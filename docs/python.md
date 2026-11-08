@@ -7,6 +7,7 @@ level `Setup` is the job setup (`camlib.jobs.Setup`).
 
 | Module | What it holds |
 | --- | --- |
+| `camlib.machine` | Required physical `MachineModel`, `Axis`, `MachineBody`, `Box`, `ConvexMesh`, `ToolCalibration`, `ToolChangeRoute`, `AllowedContact`, `MachineCheckOptions`; [coverage and required inputs](machine.md) |
 | `camlib.jobs` | `Job(id, revision, setups)`, `Setup`, `PostedProgram` (result of `job.post_nc`: text, line/motion counts, findings, accepted kinds, unchecked checks, and a lathe setup's `material` check; a program with unaccepted violation/uncertain results raises `camlib.export.ExportRefused` instead, see `accept=`), `OperationNode(op, sources=, depends_on=, limits=)`, `RegenerationCache(directory, max_entry_bytes=, max_total_bytes=)`, `CadSource` (document id, revision, geometry hash and CadQuery/OCP versions of a CAD input) |
 | `camlib.operations` | Operations and entry/clearing strategies ([Operations](operations.md)), `Tabs`, `FineBore`, `ThermalCut`, `Lead`, `SmallHoles`, `MicroJoints`, `steep_and_shallow` |
 | `camlib.limits` | `Limits(contain=, avoid=)`, `AvoidArea(region, top_z_mm)` |
@@ -33,7 +34,8 @@ Typical flow, as in [Getting started](getting-started.md):
    to write the same checked program directly; or `job.regenerate(cache)` /
    `job.record(setup_id, rapid_mm_min=...)` to plan and simulate without posting
    (the rapid rate times G0 moves in playback; posting takes it from the `Machine`).
-4. `Player` to replay stock and read check results; `run.nc_lines()` for G-code;
+4. Supply `Machine.crash_model` before machine-ready export (missing coverage requires explicit `accept={"unchecked_machine"}`).
+5. `Player` to replay stock and read check results; `run.nc_lines()` for G-code;
    `run.export(path, accept=...)` to write the finished program once its checks allow it.
 
 `Setup(avoid=(AvoidArea(region, top_z_mm), ...), contain=region)` limits every
