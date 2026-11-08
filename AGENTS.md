@@ -136,11 +136,19 @@ PYTHONPATH=python python -m unittest discover -s python/tests
 ruff check python examples bench
 ruff format --check python examples bench
 
+# Runnable examples (synthetic inspection files, without a physical machine model).
+PYTHONPATH=python python examples/standalone_job.py out --accept-unchecked-machine
+PYTHONPATH=python python examples/cadquery_job.py out-cad --accept-unchecked-machine
+
 # Toolpath benchmarks (need CadQuery for target parts).
 python bench/run.py --label <name>
 python bench/compare.py bench/results/baseline.json bench/results/<name>.json
 python bench/report.py bench/results/<name>.json
 ```
+
+Also run both examples in fresh output directories without
+`--accept-unchecked-machine`: each must refuse export and leave no NC file. Report which operating systems were actually tested;
+a local pass does not establish another platform's result.
 
 On Windows, see [docs/windows.md](docs/windows.md) for the toolchain and the
 PowerShell equivalents of these commands.
