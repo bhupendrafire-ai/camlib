@@ -157,6 +157,27 @@ Run long test suites with a memory and time limit, using whatever your system
 provides: some tests exercise large inputs on purpose, and an unbounded run
 can exhaust a machine.
 
+## Evidence before publishing
+
+Use the existing test suite for library, CLI and installed-package behavior.
+`python/tests/test_package.py` runs both example entry points, including explicit
+inspection export and default refusal, in fresh directories containing spaces.
+The same tests run locally and against the installed wheel; do not maintain
+separate unchecked copies of these commands.
+
+Before pushing, inspect callers of changed behavior: examples, documented
+commands and package entry points as well as library tests. For a timing or
+platform failure, reproduce the triggering condition deterministically and keep
+a regression that fails before the fix. Never rely on a passing retry alone.
+
+Record the tested commit (or exact dirty-tree snapshot), commands/profiles,
+package mode, operating systems, results and log locations. Check again after
+any source change and verify that the pushed head matches the tested source.
+Report each required platform/check as passed, failed, pending or not run.
+Keep an unrun or failed platform explicit; do not describe the whole change as
+verified or ready to merge while a required check is unresolved. Never weaken a machine
+check or silently add an acceptance to obtain a pass.
+
 ## Repository map
 
 | Path | What it holds |

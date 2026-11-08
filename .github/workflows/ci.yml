@@ -148,15 +148,6 @@ jobs:
       - name: Benchmark platform tests
         if: needs.changes.outputs.code == 'true'
         run: python -m unittest discover -s bench -p "test_*.py"
-      - name: Examples
-        if: needs.changes.outputs.code == 'true'
-        shell: bash
-        run: |
-          # Synthetic examples export inspection files without a physical machine model.
-          python examples/standalone_job.py out --accept-unchecked-machine
-          python examples/cadquery_job.py out-cad --accept-unchecked-machine
-        env:
-          PYTHONPATH: python
 
   bench:
     name: Benchmarks (informational)
@@ -225,11 +216,6 @@ jobs:
         run: |
           Rename-Item target target-hidden
           & '.\wheel environment\Scripts\python.exe' -m unittest discover -s python/tests
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Synthetic examples export inspection files without a physical machine model.
-          & '.\wheel environment\Scripts\python.exe' examples/standalone_job.py out-wheel --accept-unchecked-machine
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & '.\wheel environment\Scripts\python.exe' examples/cadquery_job.py out-wheel-cad --accept-unchecked-machine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
