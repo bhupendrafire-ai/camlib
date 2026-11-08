@@ -342,6 +342,14 @@ open down to the start depth (the hole drilled, or the space beside the
 boss cleared); otherwise the operation stops with an error. The neck must
 clear the thread crests. The stock model shows the swept tooth: below
 material that stays above it (the groove), the top height is unchanged.
+If the shared undercut-neck check refuses a move, its diagnostic gives the
+neck radius, stock cell half-diagonal, path error and conservative clearance
+lower bound at the failing cell. A positive cell-centre clearance also gives
+the strict square-cell size threshold at that centre. This is a local
+resolution hint, not the exact wall clearance or a guarantee for a new grid:
+rerun from the original stock at the finer resolution and check every move.
+If the current centre has no positive clearance bound, no local cell-size
+threshold is given. New stock bounds may still resolve that uncertain cell.
 `feed_mm_min` is the feed at the tool center; the cutting edge moves faster
 inside a hole (by diameter / (diameter − tool diameter)).
 
