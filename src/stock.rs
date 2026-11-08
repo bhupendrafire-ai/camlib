@@ -612,6 +612,35 @@ impl Stock {
     ) -> Result<Vec<ClearedSweep>, String> {
         self.committed_columns.collect(tolerance_mm, cancel)
     }
+    /// Native committed columns only: decoded deltas or undercut stock cannot
+    /// manufacture this proof. Stock only loses material after a certificate.
+    pub(crate) fn repeated_clearance(
+        &self,
+        motion: &Motion,
+        radius: f64,
+        height: f64,
+        work: &mut u64,
+        cancel: &impl CancelSignal,
+    ) -> Result<bool, String> {
+        if self.heightfield_unproven {
+            return Ok(false);
+        }
+        let bottom = motion.curve.start()[2].min(motion.curve.end()[2]) + height;
+        for i in (0..self.committed_columns.count).rev() {
+            cancelled(cancel)?;
+            if *work == 0 {
+                return Ok(false);
+            }
+            *work -= 1;
+            if let Some(ColumnNode::Leaf { column, .. }) =
+                self.committed_columns.leaf(i).map(AsRef::as_ref)
+                && column.sweep.repeats(&motion.curve, radius, bottom)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     /// Sweeps committed since `cursor`, and whether the consumer must rebuild
     /// (`true`: the returned sweeps are the whole history, not an extension).
     pub(crate) fn committed_clearance_since(
@@ -999,7 +1028,7 @@ impl Stock {
                     let reachable =
                         bounds.min[2] + tool.cutter().definition().cutting_length_mm - guard;
                     let mut buried = false;
-                    for y in rect.y0..=rect.y1 {
+                    'reach: for y in rect.y0..=rect.y1 {
                         cancelled(cancel)?;
                         for x in rect.x0..=rect.x1 {
                             if stats.reach_cell_visits.is_multiple_of(1024) {
@@ -1019,7 +1048,24 @@ impl Stock {
                                     Some(u) if upper <= bounds.min[2] + u.shoulder - guard => {
                                         buried = true
                                     }
-                                    _ => return Err("verified replay cutting length cannot span committed stock upper bound".into()),
+                                    _ => {
+                                        let mut work = options
+                                            .max_cell_visits
+                                            .saturating_sub(stats.reach_cell_visits);
+                                        let before = work;
+                                        let clear = self.repeated_clearance(
+                                            motion,
+                                            radius,
+                                            tool.cutter().definition().cutting_length_mm,
+                                            &mut work,
+                                            cancel,
+                                        )?;
+                                        stats.reach_cell_visits += before - work;
+                                        if clear {
+                                            break 'reach;
+                                        }
+                                        return Err("verified replay cutting length cannot span committed stock upper bound".into());
+                                    }
                                 }
                             }
                         }
@@ -1170,7 +1216,7 @@ impl Stock {
             // the affected rectangle. A previous operation may have removed
             // the original stock top; never infer that from tip samples/history.
             let reachable = bounds.min[2] + tool.cutter().definition().cutting_length_mm - guard;
-            for j in rect.y0..=rect.y1 {
+            'reach: for j in rect.y0..=rect.y1 {
                 cancelled(cancel)?;
                 for i in rect.x0..=rect.x1 {
                     if reach_cell_visits.is_multiple_of(1024) {
@@ -1190,7 +1236,23 @@ impl Stock {
                             Some(u) if upper <= bounds.min[2] + u.shoulder - guard => {
                                 buried |= !from_above
                             }
-                            _ => return Err(REACH.into()),
+                            _ => {
+                                let mut work =
+                                    options.max_cell_visits.saturating_sub(reach_cell_visits);
+                                let before = work;
+                                let clear = self.repeated_clearance(
+                                    motion,
+                                    radius,
+                                    tool.cutter().definition().cutting_length_mm,
+                                    &mut work,
+                                    cancel,
+                                )?;
+                                reach_cell_visits += before - work;
+                                if clear {
+                                    break 'reach;
+                                }
+                                return Err(REACH.into());
+                            }
                         }
                     }
                 }
@@ -1725,6 +1787,58 @@ fn segments(
 mod front_coverage_tests {
     use super::*;
     use crate::engagement::EngagementScene;
+
+    #[test]
+    fn repeated_path_reach_requires_native_history_and_exact_footprint_containment() {
+        let (mut stock, mut tool, motion) = native_fixture();
+        let options = SweepOptions::default();
+        let delta = stock
+            .preview_sweep(&tool.prepare().unwrap(), &motion, 1., options, &|| false)
+            .unwrap();
+        stock.apply_delta(&delta).unwrap();
+        tool.cutter.cutting_length_mm = 2.;
+        let mut deeper = motion.clone();
+        deeper.id += 1;
+        deeper.curve = Curve::Line {
+            start: [8., 13., 4.],
+            end: [18., 13., 4.],
+        };
+        let check = |s: &Stock, m: &Motion, r, h| {
+            s.repeated_clearance(m, r, h, &mut 1000, &|| false).unwrap()
+        };
+        assert!(check(&stock, &deeper, 2., 2.));
+        assert!(!check(&stock, &deeper, 2.001, 2.));
+        assert!(!check(&stock, &deeper, 2., 0.));
+        assert!(
+            !stock
+                .repeated_clearance(&deeper, 2., 2., &mut 0, &|| false)
+                .unwrap()
+        );
+        assert!(
+            stock
+                .repeated_clearance(&deeper, 2., 2., &mut 1000, &|| true)
+                .is_err()
+        );
+        let shifted = Motion {
+            curve: Curve::Line {
+                start: [8., 13.001, 4.],
+                end: [18., 13.001, 4.],
+            },
+            ..deeper.clone()
+        };
+        assert!(!check(&stock, &shifted, 2., 2.));
+        assert!(
+            stock
+                .preview_sweep(&tool.prepare().unwrap(), &deeper, 1., options, &|| false)
+                .is_ok()
+        );
+        // Wire transactions cannot create native empty-column authority.
+        let (mut decoded_stock, _, _) = native_fixture();
+        let decoded: StockDelta =
+            serde_json::from_slice(&serde_json::to_vec(&delta).unwrap()).unwrap();
+        decoded_stock.apply_delta(&decoded).unwrap();
+        assert!(!check(&decoded_stock, &deeper, 2., 2.));
+    }
 
     fn native_fixture() -> (Stock, crate::tool::ToolAssembly, Motion) {
         let manifest: crate::stream::StreamManifest =

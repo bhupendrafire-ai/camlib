@@ -176,6 +176,18 @@ cleared. Further options:
 - `clearing_tolerance_mm` sets the allowed construction error of each layer's
   clearing region; the operation fails if it cannot be kept.
 
+Total roughing depth may exceed the flute length: each deeper layer is
+prepared for its actual increment below the preceding layer, with a reserve
+for conservative stock bounds. Above the flutes, every emitted move must keep
+the declared shank and holder clear of committed stock. An exactly repeated
+path can reuse a native committed cutter footprint above its cleared floor,
+including a shank of the same radius. This proof requires exact path
+containment; it does not infer clearance from nearby paths, samples or decoded
+cell heights. Otherwise whole-cell bounds must prove clearance. An unresolved
+assembly check refuses the move, naming the layer, tool part and tip height
+needed to keep that part above the original stock. A wider shank or low holder
+can therefore still prevent reaching the requested floor.
+
 ## Contour: `Contour`
 
 Required: `region` (the part footprint to **keep**), `floor_z_mm`,
