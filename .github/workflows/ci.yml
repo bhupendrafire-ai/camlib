@@ -152,8 +152,9 @@ jobs:
         if: needs.changes.outputs.code == 'true'
         shell: bash
         run: |
-          python examples/standalone_job.py out
-          python examples/cadquery_job.py out-cad
+          # Synthetic examples export inspection files without a physical machine model.
+          python examples/standalone_job.py out --accept-unchecked-machine
+          python examples/cadquery_job.py out-cad --accept-unchecked-machine
         env:
           PYTHONPATH: python
 
@@ -225,9 +226,10 @@ jobs:
           Rename-Item target target-hidden
           & '.\wheel environment\Scripts\python.exe' -m unittest discover -s python/tests
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & '.\wheel environment\Scripts\python.exe' examples/standalone_job.py out-wheel
+          # Synthetic examples export inspection files without a physical machine model.
+          & '.\wheel environment\Scripts\python.exe' examples/standalone_job.py out-wheel --accept-unchecked-machine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & '.\wheel environment\Scripts\python.exe' examples/cadquery_job.py out-wheel-cad
+          & '.\wheel environment\Scripts\python.exe' examples/cadquery_job.py out-wheel-cad --accept-unchecked-machine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
