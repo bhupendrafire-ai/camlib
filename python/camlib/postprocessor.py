@@ -593,6 +593,20 @@ class Machine:
         if self.tip_travel_mm is not None:
             object.__setattr__(self, 'tip_travel_mm', tuple(tuple(p) for p in self.tip_travel_mm))
 
+    def to_dict(self):
+        """The machine as JSON-ready data: every field, with the optional
+        settings that are unset left out. A posted run records this as its
+        ``definition["machine"]``; the Rust post (``camlib.post.post_job``,
+        the ``cam-post`` command) reads it. The crash model is its
+        ``crash_model``."""
+        data = asdict(self)
+        for key in ('max_normal_accel_mm_s2', 'max_axis_feed_mm_min', 'motion_policy', 'crash_model'):
+            if data[key] is None:
+                data.pop(key)
+        if not self.schedule_post_feeds:
+            data.pop('schedule_post_feeds')
+        return data
+
     def schedule(self, program, *, adjust_feeds=True, cancel=None):
         """Limit feeds and estimate motion time using the explicitly authored policy."""
         from .dynamics import schedule
@@ -2162,19 +2176,12 @@ class PostEngine:
             raise ValueError('initialization must not move/select tools or change source setup')
         decoder.validate_initialized()
         definition = dict(
-            machine=asdict(m),
+            machine=m.to_dict(),
             post=type(post).__module__ + '.' + type(post).__qualname__,
             post_version=post.version,
             decoder=self.decoder_type.__module__ + '.' + self.decoder_type.__qualname__,
             decoder_version=decoder.version,
         )
-        for key in ('max_normal_accel_mm_s2', 'max_axis_feed_mm_min', 'motion_policy'):
-            if getattr(m, key) is None:
-                definition['machine'].pop(key)
-        if not m.schedule_post_feeds:
-            definition['machine'].pop('schedule_post_feeds')
-        if m.crash_model is None:
-            definition['machine'].pop('crash_model')
         settings = dict(
             capabilities=m.capabilities(),
             tolerance_mm=m.tolerance_mm,

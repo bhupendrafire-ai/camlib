@@ -2,7 +2,6 @@
 //! Process ownership provides cancellation; a blocked output pipe is backpressure.
 use camlib::{
     motion::{Event, Motion},
-    operation::OperationPlan,
     stream::*,
 };
 use serde::Deserialize;
@@ -269,118 +268,11 @@ fn run() -> Result<(), String> {
                     )?;
                     return Ok(());
                 }
-                let mut active: Option<&str> = None;
-                for operation in &manifest.operations {
-                    let producer = producer.as_mut().ok_or("producer unavailable")?;
-                    if active != Some(operation.tool()) {
-                        producer.change_tool(operation.tool())?;
-                        active = Some(operation.tool());
-                    }
-                    let tool = manifest
-                        .tools
-                        .iter()
-                        .find(|t| t.id == operation.tool())
-                        .ok_or("operation tool missing")?;
-                    let mut plan = OperationPlan::prepare_with_stock(
-                        operation.clone(),
-                        tool,
-                        producer.stock().unwrap(),
-                        producer.position(),
-                        producer
-                            .completed()
-                            .checked_add(1)
-                            .ok_or("motion ID overflow")?,
-                        &cancel,
-                    )?;
-                    send(&encode_operation_control(
-                        &manifest,
-                        &OperationControl {
-                            operation: operation.id(),
-                            completed: producer.completed(),
-                            stage: "begin",
-                            events: plan.prefix_events(),
-                            report: Some(plan.report()),
-                        },
-                        DEFAULT_FRAME_LIMIT,
-                    )?)?;
-                    // Events due before the first motion (a canned cycle).
-                    let events = plan.take_events();
-                    if !events.is_empty() {
-                        send(&encode_operation_control(
-                            &manifest,
-                            &OperationControl::<camlib::operation::OperationReport> {
-                                operation: operation.id(),
-                                completed: producer.completed(),
-                                stage: "events",
-                                events,
-                                report: None,
-                            },
-                            DEFAULT_FRAME_LIMIT,
-                        )?)?;
-                    }
-                    let guard = camlib::limits::LinkGuard::new(
-                        operation.limits(),
-                        tool,
-                        manifest.sweep.tolerance_mm,
-                    )?;
-                    while let Some(motion) =
-                        plan.next_motion_with_stock(producer.stock().unwrap(), &cancel)?
-                    {
-                        let motion = manifest.retract_policy(
-                            motion,
-                            producer.stock().unwrap(),
-                            operation.declares_retract_feed(),
-                        );
-                        if let Some(g) = &guard {
-                            g.check(&motion)?;
-                        }
-                        let (chunk, check) =
-                            producer.push_checked_motion(motion, DEFAULT_FRAME_LIMIT, &cancel)?;
-                        send(&chunk)?;
-                        if let Some(check) = check {
-                            send(&check)?;
-                        }
-                        let events = plan.take_events();
-                        if !events.is_empty() {
-                            send(&encode_operation_control(
-                                &manifest,
-                                &OperationControl::<camlib::operation::OperationReport> {
-                                    operation: operation.id(),
-                                    completed: producer.completed(),
-                                    stage: "events",
-                                    events,
-                                    report: None,
-                                },
-                                DEFAULT_FRAME_LIMIT,
-                            )?)?;
-                        }
-                    }
-                    plan.finish_report(&cancel)?;
-                    send(&encode_operation_control(
-                        &manifest,
-                        &OperationControl {
-                            operation: operation.id(),
-                            completed: producer.completed(),
-                            stage: "end",
-                            events: plan.suffix_events(),
-                            report: Some(plan.report()),
-                        },
-                        DEFAULT_FRAME_LIMIT,
-                    )?)?;
-                    while let Some(start) =
-                        producer.start_material_verification(Some(operation.id()))?
-                    {
-                        send(&start)?;
-                        send(&producer.finish_material_verification(&cancel)?)?;
-                    }
-                }
-
-                let producer = producer.as_mut().ok_or("producer unavailable")?;
-                while let Some(start) = producer.start_material_verification(None)? {
-                    send(&start)?;
-                    send(&producer.finish_material_verification(&cancel)?)?;
-                }
-                send(&producer.finish(DEFAULT_FRAME_LIMIT)?)?;
+                camlib::regeneration::run_uncached(
+                    producer.as_mut().ok_or("producer unavailable")?,
+                    &cancel,
+                    send,
+                )?;
                 return Ok(());
             }
             Command::Checkpoint => send(

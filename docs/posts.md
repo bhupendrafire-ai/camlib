@@ -235,6 +235,47 @@ them against your machine before use:
 Add `examples` to `PYTHONPATH`, or copy the file next to your code. The
 controller examples write curves as checked line segments by default.
 
+## Posting without Python (Rust, WebAssembly)
+
+The default post (`GCodePost` with `NativeGCodeDecoder`) also exists in Rust,
+for applications without a Python runtime, such as a WebAssembly build of the
+engine (issue #120). It is a port of the Python default post and decoder, not a
+second design: for the same job and machine it writes the same program, byte
+for byte (`python/tests/test_rust_post.py` compares them on the examples and on
+jobs with canned cycles, tapping, cutter compensation, dwells, plasma words,
+lowering, inch output and traverse feeds). Posts you write in Python stay
+Python; only the default post and the dialects you declare as data run in Rust.
+
+The machine and its dialect cross as JSON: `Machine.to_dict()`, the same form
+a posted run records as its `definition["machine"]`, with the #116
+`crash_model` inside. Every field is required, except the optional settings
+`to_dict()` leaves out when unset (`max_normal_accel_mm_s2`,
+`max_axis_feed_mm_min`, `motion_policy`, `schedule_post_feeds`, `crash_model`).
+A JSON machine is checked with the Python rules and messages.
+
+| Entry point | What it does |
+| --- | --- |
+| `camlib::post_job::run(input_json, cancel)` (Rust) | The whole `Job.post_nc` run for one setup: plans and streams its operations, posts them, decodes every block and compares it with its source event, replays the decoded program on the stock with the setup's checks, checks it against the machine model, and applies the export gate. No file, process or thread |
+| `cam-post` | The same, as a command: the JSON input on stdin, the JSON report on stdout (errors on stderr, exit status 1). Separate from `cam-sim-stream` |
+| `camlib.post.post_job_input(job, setup_id, machine=..., lowering=None, accept=())` | Builds that JSON input from a Python job |
+| `camlib.post.post_job(input)` | Runs the Rust post in this process; returns the report |
+| `camlib::gcode::post_program(input_json, cancel)` (Rust) | The counterpart of `post_events`: posts an explicit `Program`'s events with the decode-and-compare check, no stock replay and no export gate |
+
+The input is `{"manifest": ..., "program_id": ..., "frame": ..., "machine":
+..., "lowering": ..., "accept": [...], "run_id": ...}`: the setup's stream
+manifest (what `cam-sim-stream` reads), the setup id and work frame, the
+machine, optional `LoweringOptions` fields and the finding kinds accepted for
+release (`uncertain`, `violation`, `unchecked_machine`). The report holds
+`released`, `program` (the NC text, only when released), `refused` (statuses
+and message), `findings` (as `PostedRun.export` lists them: stock contact,
+scene and machine limits per move, material, machine model), `accepted`,
+`unchecked`, `machine` (the #116 report) and `posting` (run identity,
+definition, arc output). A block that does not decode to its planned event is
+an error, as in Python: nothing is released.
+
+Not supported yet in Rust, and refused with a message: lathe setups (the
+turning replay) and `schedule_post_feeds`.
+
 ## What a passing post does and does not prove
 
 Passing means the emitted words, decoded independently, describe the planned

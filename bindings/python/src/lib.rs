@@ -1646,6 +1646,34 @@ type MotionWords = (
     bool,
 );
 
+/// Post a setup from its JSON job with the Rust default post
+/// (`camlib::post_job`); returns the JSON report.
+#[pyfunction]
+#[pyo3(signature=(input_json, cancel=None))]
+fn post_job(
+    py: Python<'_>,
+    input_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<String> {
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    py.detach(|| camlib::post_job::run(input_json, &*flag))
+        .map_err(PyValueError::new_err)
+}
+
+/// Post an explicit program's events with the Rust default post
+/// (`camlib::gcode::post_program`); returns JSON.
+#[pyfunction]
+#[pyo3(signature=(input_json, cancel=None))]
+fn post_program(
+    py: Python<'_>,
+    input_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<String> {
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    py.detach(|| camlib::gcode::post_program(input_json, &*flag))
+        .map_err(PyValueError::new_err)
+}
+
 /// The highest spindle speed along a move at constant surface speed (the
 /// engine's own bound, so posts and decoders agree with the validator).
 #[pyfunction]
@@ -2244,6 +2272,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(format_post_words, module)?)?;
     module.add_function(wrap_pyfunction!(round_circular_words, module)?)?;
     module.add_function(wrap_pyfunction!(css_rpm_bound, module)?)?;
+    module.add_function(wrap_pyfunction!(post_job, module)?)?;
+    module.add_function(wrap_pyfunction!(post_program, module)?)?;
     module.add_class::<PostCancellation>()?;
     module.add_class::<StreamVerification>()?;
     module.add_class::<StreamControlContext>()?;

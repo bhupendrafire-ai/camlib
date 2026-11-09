@@ -1276,6 +1276,60 @@ class MaterialStage:
     after_operation: str
 
 
+def simulation_manifest(
+    stock,
+    tools,
+    *,
+    revision,
+    initial_position_mm,
+    run_id=None,
+    sweep=None,
+    operations=(),
+    verification=None,
+    stream_version=1,
+    tool_change=None,
+    rapid_retracts=True,
+    turning=None,
+    initial_stock=None,
+):
+    """The JSON stream manifest a ``Simulation`` sends to ``cam-sim-stream``
+    (also the setup manifest of a ``camlib.post.post_job`` input)."""
+    if type(stream_version) is not int or stream_version not in (1, 2) or stream_version == 2 and operations:
+        raise ValueError('stream_version must be 1 or 2; version 2 uses authored typed events')
+    manifest = {
+        "version": stream_version,
+        "run": {"id": run_id or uuid.uuid4().hex, "revision": revision},
+        "stock": stock.to_dict() if hasattr(stock, "to_dict") else stock,
+        "tools": [t.to_dict() if hasattr(t, "to_dict") else t for t in tools],
+        "initial_position_mm": initial_position_mm,
+        "sweep": dict(sweep) if isinstance(sweep, dict) else asdict(sweep or SweepOptions()),
+    }
+    if operations:
+        if not isinstance(operations, (list, tuple)):
+            raise TypeError("operations must be a list or tuple (a finite collection)")
+        definitions = list(operations)
+        manifest["operations"] = [op.to_dict() if hasattr(op, "to_dict") else op for op in definitions]
+    if initial_stock is not None:
+        manifest["initial_stock"] = initial_stock.to_dict() if hasattr(initial_stock, "to_dict") else initial_stock
+    if verification is not None:
+        manifest["verification"] = verification.to_dict() if hasattr(verification, "to_dict") else verification
+    if tool_change is not None:
+        manifest["tool_change"] = tool_change.to_dict() if hasattr(tool_change, "to_dict") else dict(tool_change)
+    if type(rapid_retracts) is not bool:
+        raise ValueError("rapid_retracts must be a bool")
+    if turning is not None:
+        # A lathe run: its turning setup plans and checks every move.
+        if operations or verification is not None or tool_change is not None:
+            raise ValueError("a lathe run takes its operations from its turning setup (no milling checks/poses)")
+        manifest["turning"] = turning
+    elif rapid_retracts:
+        manifest["rapid_retracts"] = True
+    from ._geometry import share_geometry
+
+    manifest = share_geometry(manifest)
+    return manifest
+
+
 class Simulation:
     """Synchronous headless API; each yielded update includes authoritative stock.
 
@@ -1303,39 +1357,21 @@ class Simulation:
         initial_stock=None,
         _on_spawn=None,
     ):
-        if type(stream_version) is not int or stream_version not in (1, 2) or stream_version == 2 and operations:
-            raise ValueError('stream_version must be 1 or 2; version 2 uses authored typed events')
-        manifest = {
-            "version": stream_version,
-            "run": {"id": run_id or uuid.uuid4().hex, "revision": revision},
-            "stock": stock.to_dict() if hasattr(stock, "to_dict") else stock,
-            "tools": [t.to_dict() if hasattr(t, "to_dict") else t for t in tools],
-            "initial_position_mm": initial_position_mm,
-            "sweep": dict(sweep) if isinstance(sweep, dict) else asdict(sweep or SweepOptions()),
-        }
-        if operations:
-            if not isinstance(operations, (list, tuple)):
-                raise TypeError("operations must be a list or tuple (a finite collection)")
-            definitions = list(operations)
-            manifest["operations"] = [op.to_dict() if hasattr(op, "to_dict") else op for op in definitions]
-        if initial_stock is not None:
-            manifest['initial_stock'] = initial_stock.to_dict() if hasattr(initial_stock, 'to_dict') else initial_stock
-        if verification is not None:
-            manifest["verification"] = verification.to_dict() if hasattr(verification, "to_dict") else verification
-        if tool_change is not None:
-            manifest["tool_change"] = tool_change.to_dict() if hasattr(tool_change, "to_dict") else dict(tool_change)
-        if type(rapid_retracts) is not bool:
-            raise ValueError("rapid_retracts must be a bool")
-        if turning is not None:
-            # A lathe run: its turning setup plans and checks every move.
-            if operations or verification is not None or tool_change is not None:
-                raise ValueError("a lathe run takes its operations from its turning setup (no milling checks/poses)")
-            manifest["turning"] = turning
-        elif rapid_retracts:
-            manifest["rapid_retracts"] = True
-        from ._geometry import share_geometry
-
-        manifest = share_geometry(manifest)
+        manifest = simulation_manifest(
+            stock,
+            tools,
+            revision=revision,
+            initial_position_mm=initial_position_mm,
+            run_id=run_id,
+            sweep=sweep,
+            operations=operations,
+            verification=verification,
+            stream_version=stream_version,
+            tool_change=tool_change,
+            rapid_retracts=rapid_retracts,
+            turning=turning,
+            initial_stock=initial_stock,
+        )
         self._regeneration = regeneration
         self.executable = _executable("cam-sim-stream", executable)
         self._errors = tempfile.TemporaryFile()

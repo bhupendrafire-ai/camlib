@@ -156,7 +156,10 @@ different quantities; setting one does not replace another.
 
 ## Posting
 
-Machines and posts are Python. The engine handles units, modal state, work
+Machines and posts are Python; the default post and declared dialects also
+run in Rust, without Python, with byte-identical output
+([Posting without Python](posts.md#posting-without-python-rust-webassembly)).
+The engine handles units, modal state, work
 frames, work and length offsets, tools, spindle/coolant, controller curve
 capabilities and optional curve-to-line conversion, then independently decodes
 the emitted text. Output precision defaults to 3 decimals (mm). See

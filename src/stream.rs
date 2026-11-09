@@ -1952,6 +1952,13 @@ pub fn read_frame(reader: &mut impl Read, limit: usize) -> Result<Option<Vec<u8>
     Ok(Some(output))
 }
 
+/// Frame kinds a frame reader in this crate may dispatch on.
+pub(crate) const CHUNK_KIND: u16 = CHUNK;
+pub(crate) const OPERATION_KIND: u16 = OPERATION;
+/// The kind of a complete frame, from its validated header.
+pub(crate) fn frame_kind(bytes: &[u8]) -> Result<u16, String> {
+    Ok(check_header(bytes, MAX_FRAME_BYTES)?.0)
+}
 fn point_valid(p: Vec3) -> bool {
     p.iter().all(|v| v.is_finite() && v.abs() <= 1e6)
 }

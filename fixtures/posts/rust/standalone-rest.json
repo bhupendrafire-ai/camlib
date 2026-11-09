@@ -1,0 +1,590 @@
+{
+ "accept": [
+  "unchecked_machine"
+ ],
+ "frame": {
+  "origin_mm": [
+   0,
+   0,
+   0
+  ],
+  "x": [
+   1,
+   0,
+   0
+  ],
+  "y": [
+   0,
+   1,
+   0
+  ],
+  "z": [
+   0,
+   0,
+   1
+  ]
+ },
+ "machine": {
+  "arcs": true,
+  "decimals": 3,
+  "dialect": {
+   "axes": [
+    "X",
+    "Y",
+    "Z"
+   ],
+   "beam_effect": "spindle_cw",
+   "beam_s_max": null,
+   "centers": [
+    "I",
+    "J",
+    "K"
+   ],
+   "chip_break_lift_mm": 0.254,
+   "commands": [
+    {
+     "code": "G0",
+     "effect": "rapid"
+    },
+    {
+     "code": "G1",
+     "effect": "linear"
+    },
+    {
+     "code": "G2",
+     "effect": "arc_cw"
+    },
+    {
+     "code": "G3",
+     "effect": "arc_ccw"
+    },
+    {
+     "code": "G21",
+     "effect": "units_mm"
+    },
+    {
+     "code": "G20",
+     "effect": "units_inch"
+    },
+    {
+     "code": "G90",
+     "effect": "absolute"
+    },
+    {
+     "code": "G91.1",
+     "effect": "center_incremental"
+    },
+    {
+     "code": "G17",
+     "effect": "plane_xy"
+    },
+    {
+     "code": "G18",
+     "effect": "plane_xz"
+    },
+    {
+     "code": "G19",
+     "effect": "plane_yz"
+    },
+    {
+     "code": "G94",
+     "effect": "feed_per_minute"
+    },
+    {
+     "code": "G97",
+     "effect": "rpm_mode"
+    },
+    {
+     "code": "G40",
+     "effect": "radius_off"
+    },
+    {
+     "code": "G41",
+     "effect": "radius_left"
+    },
+    {
+     "code": "G42",
+     "effect": "radius_right"
+    },
+    {
+     "code": "G49",
+     "effect": "length_off"
+    },
+    {
+     "code": "G80",
+     "effect": "cycles_off"
+    },
+    {
+     "code": "G92.1",
+     "effect": "frame_reset"
+    },
+    {
+     "code": "G61.1",
+     "effect": "exact_stop"
+    },
+    {
+     "code": "G43",
+     "effect": "length_on"
+    },
+    {
+     "code": "M3",
+     "effect": "spindle_cw"
+    },
+    {
+     "code": "M4",
+     "effect": "spindle_ccw"
+    },
+    {
+     "code": "M5",
+     "effect": "spindle_off"
+    },
+    {
+     "code": "M6",
+     "effect": "tool_change"
+    },
+    {
+     "code": "M7",
+     "effect": "mist"
+    },
+    {
+     "code": "M8",
+     "effect": "flood"
+    },
+    {
+     "code": "M9",
+     "effect": "coolant_off"
+    },
+    {
+     "code": "M0",
+     "effect": "stop"
+    },
+    {
+     "code": "M1",
+     "effect": "optional_stop"
+    },
+    {
+     "code": "M2",
+     "effect": "end"
+    },
+    {
+     "code": "G4",
+     "effect": "dwell"
+    },
+    {
+     "code": "G81",
+     "effect": "drill_cycle"
+    },
+    {
+     "code": "G82",
+     "effect": "drill_dwell_cycle"
+    },
+    {
+     "code": "G83",
+     "effect": "peck_cycle"
+    },
+    {
+     "code": "G73",
+     "effect": "chip_break_cycle"
+    },
+    {
+     "code": "G98",
+     "effect": "cycle_return_initial"
+    },
+    {
+     "code": "G85",
+     "effect": "bore_cycle"
+    },
+    {
+     "code": "G89",
+     "effect": "bore_dwell_cycle"
+    },
+    {
+     "code": "G86",
+     "effect": "bore_stop_cycle"
+    },
+    {
+     "code": "G33.1",
+     "effect": "tap_synchronized"
+    }
+   ],
+   "compensation_register": true,
+   "compensation_with_move": false,
+   "compensation_word": "D",
+   "css_limit_word": null,
+   "cycle_dwell_unit": "s",
+   "dwell_max_s": 100000.0,
+   "dwell_resolution_s": 0.001,
+   "dwell_word": "P",
+   "feed_word": "F",
+   "fixed_modes": [],
+   "height_control_word": null,
+   "length_activation": "explicit",
+   "length_word": "H",
+   "oriented_edge_deg": null,
+   "parentheses_comments": true,
+   "peck_reentry_mm": 0.254,
+   "radius_relative_tolerance": 0.001,
+   "radius_tolerance_mm": 0.00127,
+   "speed_word": "S",
+   "tap_pitch_word": null,
+   "thread_lead_word": "K",
+   "tool_change": "m6",
+   "tool_word": "T",
+   "work_offsets": [
+    "G54",
+    "G55",
+    "G56",
+    "G57",
+    "G58",
+    "G59"
+   ],
+   "x_diameter": false
+  },
+  "feed_tolerance_mm_min": 0.1,
+  "flood": true,
+  "frame": {
+   "origin_mm": [
+    0,
+    0,
+    0
+   ],
+   "x": [
+    1,
+    0,
+    0
+   ],
+   "y": [
+    0,
+    1,
+    0
+   ],
+   "z": [
+    0,
+    0,
+    1
+   ]
+  },
+  "helices": true,
+  "max_feed_mm_min": 10000,
+  "max_length_register": 99999,
+  "max_spindle_rpm": 30000,
+  "max_sweep_rad": 6.283185307179586,
+  "max_tool_number": 99999,
+  "mist": true,
+  "name": "Example two-tool mill",
+  "output_units": "mm",
+  "planes": [
+   "xy",
+   "xz",
+   "yz"
+  ],
+  "rapid_mm_min": 6000,
+  "revision": "1",
+  "tip_travel_mm": null,
+  "tolerance_mm": 0.01,
+  "tool_change_home_z_mm": null,
+  "tool_change_position_mode": "preserve_tip",
+  "tool_changes": true,
+  "tools": [
+   {
+    "diameter_register": null,
+    "gauge_length_mm": 60,
+    "length_register": 9,
+    "number": 7,
+    "position_after_mm": [
+     0,
+     0,
+     8
+    ],
+    "tool": "mill4"
+   },
+   {
+    "diameter_register": null,
+    "gauge_length_mm": 60,
+    "length_register": 10,
+    "number": 8,
+    "position_after_mm": [
+     0,
+     0,
+     8
+    ],
+    "tool": "mill2"
+   }
+  ],
+  "traverse_feed_mm_min": null,
+  "work_offset": 1,
+  "work_to_machine": {
+   "origin_mm": [
+    0,
+    0,
+    0
+   ],
+   "x": [
+    1,
+    0,
+    0
+   ],
+   "y": [
+    0,
+    1,
+    0
+   ],
+   "z": [
+    0,
+    0,
+    1
+   ]
+  }
+ },
+ "manifest": {
+  "initial_position_mm": [
+   0,
+   0,
+   8
+  ],
+  "operations": [
+   {
+    "axis": "x",
+    "clearance_z_mm": 8,
+    "coolant": "flood",
+    "edge_overlap_mm": null,
+    "entry_air_gap_mm": 1,
+    "feed_mm_min": 600,
+    "floor_z_mm": 5,
+    "id": "face",
+    "kind": "facing",
+    "length_register": 9,
+    "mode": "zigzag",
+    "plunge_mm_min": 150,
+    "reverse": false,
+    "spindle_rpm": 12000,
+    "stepdown_mm": 1,
+    "stepover_mm": 2,
+    "tolerance_mm": 1e-05,
+    "tool": "mill4",
+    "tool_number": 7,
+    "work_offset": 1
+   },
+   {
+    "bottom_allowance_mm": 0,
+    "clearance_z_mm": 8,
+    "coolant": "flood",
+    "feed_mm_min": 600,
+    "floor_z_mm": 3,
+    "id": "pocket",
+    "kind": "pocket",
+    "length_register": 9,
+    "plunge_mm_min": 150,
+    "radial_allowance_mm": 0,
+    "region": {
+     "boundary_error_mm": 0,
+     "components": [
+      {
+       "holes": [],
+       "outer": {
+        "vertices": [
+         [
+          4,
+          4,
+          0
+         ],
+         [
+          14,
+          4,
+          0
+         ],
+         [
+          14,
+          12,
+          0
+         ],
+         [
+          4,
+          12,
+          0
+         ]
+        ]
+       }
+      }
+     ],
+     "name": "pocket-floor",
+     "source": {
+      "job_sources": {}
+     },
+     "units": "mm",
+     "version": 1
+    },
+    "spindle_rpm": 12000,
+    "stepdown_mm": 1,
+    "stepover_mm": 1.5,
+    "tolerance_mm": 1e-05,
+    "tool": "mill4",
+    "tool_number": 7,
+    "top_z_mm": 5,
+    "work_offset": 1
+   },
+   {
+    "bottom_allowance_mm": 0,
+    "clearance_z_mm": 8,
+    "coolant": "flood",
+    "feed_mm_min": 600,
+    "feed_z_mm": 6.5,
+    "floor_z_mm": 3,
+    "id": "rest",
+    "kind": "pocket",
+    "length_register": 10,
+    "plunge_mm_min": 150,
+    "radial_allowance_mm": 0,
+    "region": {
+     "boundary_error_mm": 0,
+     "components": [
+      {
+       "holes": [],
+       "outer": {
+        "vertices": [
+         [
+          4,
+          4,
+          0
+         ],
+         [
+          14,
+          4,
+          0
+         ],
+         [
+          14,
+          12,
+          0
+         ],
+         [
+          4,
+          12,
+          0
+         ]
+        ]
+       }
+      }
+     ],
+     "name": "pocket-floor",
+     "source": {
+      "job_sources": {}
+     },
+     "units": "mm",
+     "version": 1
+    },
+    "rest_tolerance_mm": 0.01,
+    "spindle_rpm": 12000,
+    "stepdown_mm": 1,
+    "stepover_mm": 0.75,
+    "tolerance_mm": 1e-05,
+    "tool": "mill2",
+    "tool_number": 8,
+    "top_z_mm": 5,
+    "work_offset": 1
+   }
+  ],
+  "rapid_retracts": true,
+  "run": {
+   "id": "standalone-rest-source",
+   "revision": "1@337125ee9ea3fadc10164bf018806ba13c9aaf56a8b3c8257ebe74d6e2ed21b0"
+  },
+  "stock": {
+   "cell_size_mm": 0.5,
+   "max_cells": 4294967295,
+   "max_mm": [
+    24,
+    16,
+    6
+   ],
+   "min_mm": [
+    0,
+    0,
+    0
+   ],
+   "units": "mm",
+   "version": 1
+  },
+  "sweep": {
+   "chord_error_mm": 0.002,
+   "max_cell_visits": 100000000,
+   "max_changed_cells": 4294967295,
+   "max_scratch_cells": 4294967295,
+   "max_segments": 100000,
+   "max_tip_step_mm": 0.1,
+   "tolerance_mm": 1e-05
+  },
+  "tools": [
+   {
+    "cutter": {
+     "center_cutting": true,
+     "cutting_length_mm": 20,
+     "diameter_mm": 4,
+     "flutes": 3,
+     "id": "em4",
+     "material": "carbide",
+     "name": "em4",
+     "neck": null,
+     "overall_length_mm": 50,
+     "shank_diameter_mm": 4,
+     "shape": {
+      "kind": "flat"
+     }
+    },
+    "gauge_length_mm": 60,
+    "holders": [
+     {
+      "radius_max_mm": 4,
+      "radius_min_mm": 4,
+      "z_max_mm": 60,
+      "z_min_mm": 30
+     }
+    ],
+    "id": "mill4",
+    "stickout_mm": 30
+   },
+   {
+    "cutter": {
+     "center_cutting": true,
+     "cutting_length_mm": 20,
+     "diameter_mm": 2,
+     "flutes": 3,
+     "id": "rest-mill",
+     "material": "carbide",
+     "name": "rest-mill",
+     "neck": null,
+     "overall_length_mm": 50,
+     "shank_diameter_mm": 2,
+     "shape": {
+      "kind": "flat"
+     }
+    },
+    "gauge_length_mm": 60,
+    "holders": [
+     {
+      "radius_max_mm": 4,
+      "radius_min_mm": 4,
+      "z_max_mm": 60,
+      "z_min_mm": 30
+     }
+    ],
+    "id": "mill2",
+    "stickout_mm": 30
+   }
+  ],
+  "verification": {
+   "material": [],
+   "scene": null,
+   "stock_contact": {
+    "max_cell_reads": 2000000,
+    "max_findings": 128,
+    "max_nodes": 200000,
+    "spatial_resolution_mm": 0.001,
+    "tolerance_mm": 1e-05
+   }
+  },
+  "version": 1
+ },
+ "program_id": "top",
+ "run_id": "standalone-rest"
+}
