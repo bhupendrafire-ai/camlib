@@ -24,6 +24,10 @@ pub(super) struct PreparedPatches {
     patches: Vec<Patch>,
 }
 impl PreparedPatches {
+    /// The boundary segments of all patches (the most one cell charges).
+    pub(super) fn segments(&self) -> u64 {
+        self.patches.iter().map(|p| p.segments).sum()
+    }
     pub(super) fn new(
         definitions: &[InnerPlanarPatch],
         options: Options,

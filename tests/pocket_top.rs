@@ -172,15 +172,38 @@ fn lower_top_rejects_uncut_and_same_generation_foreign_stock_but_accepts_restore
             &|| false,
         )
         .unwrap();
+        // Stock above the top where the cutter can reach it (cell (80, 48)
+        // is at X20 Y12, inside the region) is refused on the rescan.
+        let inside = 48 * 160 + 80;
         let mut changed = stock.snapshot();
-        changed.cells[0].upper_mm = 9.;
+        changed.cells[inside].upper_mm = 9.;
         let foreign = Stock::from_snapshot(changed).unwrap();
         let error = plan
             .next_motion_with_stock(&foreign, &|| false)
             .unwrap_err();
         assert!(
-            error.contains("cell 0") && error.contains("raise the operation top"),
+            error.contains(&format!("cell {inside}")) && error.contains("raise the operation top"),
             "{error}"
+        );
+        // Outside the region it is judged by the assembly (issue #129):
+        // 1 mm above the top, far below the shank, it is accepted.
+        let mut changed = stock.snapshot();
+        changed.cells[0].upper_mm = 9.;
+        let outside = Stock::from_snapshot(changed).unwrap();
+        let mut probe = OperationPlan::prepare_with_stock(
+            operation(8., adaptive),
+            &m.tools[0],
+            &outside,
+            position,
+            next,
+            &|| false,
+        )
+        .unwrap();
+        assert!(
+            probe
+                .next_motion_with_stock(&outside, &|| false)
+                .unwrap()
+                .is_some()
         );
         let restored = Stock::from_snapshot(stock.snapshot()).unwrap();
         assert!(

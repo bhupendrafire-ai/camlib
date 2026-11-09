@@ -12,13 +12,14 @@ level `Setup` is the job setup (`camlib.jobs.Setup`).
 | `camlib.operations` | Operations and entry/clearing strategies ([Operations](operations.md)), `Tabs`, `FineBore`, `ThermalCut`, `Lead`, `SmallHoles`, `MicroJoints`, `steep_and_shallow` |
 | `camlib.limits` | `Limits(contain=, avoid=)`, `AvoidArea(region, top_z_mm)` |
 | `camlib.cutting` | `cutting_data` → `CuttingData`: spindle speed and feed from surface speed and feed per tooth (chip thinning, ball effective diameter, rpm cap) |
-| `camlib.tools` | `EndMill`, `BallEndMill`, `BullEndMill`, `Drill`, `ChamferMill`, `ThreadMill`, `Tap`, `BoringBar`, `Torch`, `LaserHead`, `Neck`, `ToolAssembly`, `HolderSection` |
+| `camlib.tools` | `EndMill`, `BallEndMill`, `BullEndMill`, `Drill`, `ChamferMill`, `ThreadMill`, `TSlotCutter`, `KeyseatCutter`, `LollipopCutter`, `DovetailCutter`, `Tap`, `BoringBar`, `Torch`, `LaserHead`, `Neck`, `ToolAssembly`, `HolderSection` |
 | `camlib.planar` | `PlanarRegion` (`components`, reported `boundary_error_mm`), `Component`, `Boundary` (line/arc regions) |
 | `camlib.surface` | `SurfaceMesh` (triangle surfaces with a finite stated `surface_error_mm` in the inclusive range 0–0.1 mm; checked at construction) |
-| `camlib.simulation` | `StockSpec(min, max, cell_size, max_cells=)`, `SweepOptions` (chord error, tip step and work budgets of the stock sweep), `Simulation`, `ToolChangePosition`, `ToolChangeTable`, `SimulationError`, `CamWarning`, low-level streaming |
+| `camlib.simulation` | `StockSpec(min, max, cell_size, max_cells=, mesh=)` and `StockSpec.from_mesh(mesh, cell_size)`, `InitialStock` (declared whole-cell blank bounds, [preparation](preparation.md)), `StockMesh` (closed stock solid: `from_triangles`, `transformed`; `StockState.stock_mesh()` returns the finished stock), `DexelStockSpec(min, max, cell_size, max_rays=, max_intervals=)` (tri-dexel stock: undercuts), `SweepOptions` (chord error, tip step and work budgets of the stock sweep), `Simulation`, `ToolChangePosition`, `ToolChangeTable`, `SimulationError`, `ReachRefused` and its typed `ReachRefusal` ([reach refusals](operations.md#pocket-pocket-restpocket)), `CamWarning`, low-level streaming |
 | `camlib.verification` | `StreamChecks(scene=, options=, material=, stock_contact=)`, `StockContactOptions` (resolution, work and finding limits), `Scene(id, revision, bodies, machine, work_to_machine)`, `Prism` (fixture or protected part; `z_error_mm`, `representation`), `MachineLimits` (tip travel, feed, acceleration, axis feeds), `MaterialCheck(target, after_operation=)` |
 | `camlib.playback` | `Player`, `Cursor` (operation, motion and `fraction` along it), `RecordedRun` (replay, seek, save) |
-| `camlib.post` | `Machine`, `ToolSetting`, `GCodeDialect`, `GCodePost`, `NativeGCodeDecoder`, `LoweringOptions`, `post_program`, `post_events` (post an event list you built) |
+| `camlib.dexel_state` | `DexelStockState` (a tri-dexel run's committed stock: `volume()`, `heights` (the height view), `ray(axis, index)`, `rays(axis)`, `grid`, `preview(frame, fraction)`, `compare_solid(mesh, tolerance_mm)` (leftover material and over-cut against a closed mesh of the part, undercuts included), checkpoints), `heights_at` |
+| `camlib.post` | `Machine`, `ToolSetting`, `GCodeDialect`, `GCodePost`, `NativeGCodeDecoder`, `LoweringOptions`, `post_program`, `post_events` (post an event list you built), `post_job_input`/`post_job` (the Rust default post, see [posts](posts.md#posting-without-python-rust-webassembly)) |
 | `camlib.posted` | `PostedRun`: replays a posted program from its decoded G-code (what the controller will do), with stock and checks |
 | `camlib.dynamics` | `MotionPolicy` (acceleration, rapid feed, junction mode) and feed scheduling / time estimates |
 | `camlib.motion` | Typed motion and events (`Motion`, `Line`, `Arc`, `Helix`, `Dwell`, `Cycle`, `SpindleOrient`, `CutterCompensation`, `Beam`, `HeightControl`, `SurfaceSpeed`, `FeedPerRev`, ...), `WorkFrame(origin_mm, x, y, z)` |
@@ -63,6 +64,7 @@ These rarely need changing; each failure names the budget it hit.
 | --- | --- |
 | `SweepOptions` (stock simulation) | `chord_error_mm` (0.002), `max_tip_step_mm` (0.1) sampling of curved/sloped sweeps; `max_segments`, `max_scratch_cells`, `max_changed_cells`, `max_cell_visits` work limits |
 | `StockSpec` | `max_cells` caps the stock grid size |
+| `DexelStockSpec` | `max_rays` caps the three ray grids together; `max_intervals` the stored intervals (two per uncut ray) |
 | `StockContactOptions` | `spatial_resolution_mm` (0.001) smallest region examined; `max_nodes`, `max_cell_reads` work per move; `max_findings` per move |
 | verification `Options` | the same for fixture/part checks, and `target_floor_tolerance_mm` (floor allowance on protected parts) |
 | `MachineLimits` | `min_tip_mm`, `max_tip_mm` (tip travel box), `max_feed_mm_min`, `max_normal_accel_mm_s2`, `max_axis_feed_mm_min` |

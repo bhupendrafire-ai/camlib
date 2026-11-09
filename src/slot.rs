@@ -428,11 +428,18 @@ impl SlotPlan {
                 ),
                 (
                     op.top_z_mm - op.floor_z_mm <= cutter.cutting_length_mm,
-                    format!(
+                    crate::reach::ReachRefusal::cutting_length(
+                        &op.id,
+                        &op.tool,
+                        op.top_z_mm,
+                        op.floor_z_mm,
+                        cutter.cutting_length_mm,
+                    )
+                    .error(format_args!(
                         "slot depth {} exceeds the cutting length {}",
                         op.top_z_mm - op.floor_z_mm,
                         cutter.cutting_length_mm
-                    ),
+                    )),
                 ),
                 (
                     op.clearance_z_mm > op.top_z_mm + guard && op.clearance_z_mm.abs() <= 1e6,

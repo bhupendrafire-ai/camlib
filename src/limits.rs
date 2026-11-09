@@ -240,7 +240,8 @@ impl LinkGuard {
         use crate::motion::MoveKind;
         // An oriented-spindle shift stays inside the bore its own plunge cut
         // (stock-contact certificate), which was itself checked.
-        if !matches!(motion.kind, MoveKind::Rapid | MoveKind::Link)
+        // Probing moves too: the stylus stays out of the avoid areas.
+        if !(matches!(motion.kind, MoveKind::Rapid | MoveKind::Link) || motion.kind.is_probe())
             || matches!(motion.curve, Curve::Line { start, end } if start == end)
         {
             return Ok(());

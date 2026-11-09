@@ -84,13 +84,15 @@ impl ControlState {
     }
 
     pub(super) fn check_motion(&self, motion: &Motion) -> Result<(), String> {
-        self.check_tool(&motion.tool, motion.kind.is_rapid())
+        self.check_tool(&motion.tool, !motion.kind.cuts())
     }
 
-    pub(super) fn check_tool(&self, tool: &str, rapid: bool) -> Result<(), String> {
+    /// `noncutting`: a rapid, oriented shift or probing move, which needs no
+    /// running spindle.
+    pub(super) fn check_tool(&self, tool: &str, noncutting: bool) -> Result<(), String> {
         if self.selected.as_ref().map(|s| s.tool.as_str()) != Some(tool)
             || self.work_offset.is_none()
-            || !rapid && self.spindle_rpm <= 0.
+            || !noncutting && self.spindle_rpm <= 0.
         {
             return Err(
                 "version 2 motion requires selected assembly, work offset and cutting spindle"
@@ -155,6 +157,7 @@ impl ControlState {
             Event::Stop { .. }
             | Event::Dwell { .. }
             | Event::Cycle { .. }
+            | Event::Probe { .. }
             | Event::CutterCompensation { .. } => {}
         }
         next.cursor.count = self

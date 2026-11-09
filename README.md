@@ -53,11 +53,13 @@ and writes G-code through a postprocessor you can read and change.
 | Trochoidal slot, chamfer, V-carve | Straight or curved slots; chamfer on top edges; deburring of horizontal edges; sharp-cornered V-carving of letters and logos |
 | Thread milling, tapping | Internal and external thread milling; rigid right- and left-hand tapping (G33.1, or G84/G74 where declared) |
 | Trace / engrave | Open or closed line/arc paths at depth, no radius offset |
+| Undercut | T-slot, keyseat, lollipop and dovetail cutters under material, on tri-dexel stock (3D stock that holds undercuts) |
 | Flat-area finishing | Horizontal faces at their exact heights, flat end mills |
 | Parallel, spiral, radial, project, pencil, scallop, waterline, ramp, steep-and-shallow, morph, flow finishing | Triangle-mesh surfaces: ball (certified error), flat and bull-nose end mills; slope limits; rest finishing from the stock |
 | Machining limits | Avoid areas (clamps) and containment regions for every operation, rapids and links |
 | Plasma and laser cutting | Kerf-compensated sheet parts: leads, pierce clearance, inner features first, small holes, micro-joints, torch height control, programmed or controller heights |
 | Feeds and speeds | rpm and feed from cutting data (chip thinning, ball effective diameter) |
+| Probing, tool setting | Work-offset probing of surfaces, corners, bores, bosses, pockets and webs, tool length and diameter on a tool setter; LinuxCNC G38 or Renishaw Inspection Plus macros, decoded back and checked |
 | Turning (lathe) | Facing, outside and inside roughing and finishing (boring), grooving, parting off, external and internal threading, drilling on the axis, constant surface speed and feed per revolution; insert, holder and boring-bar checks against the part, bore, stock and chuck; a lathe setup is an ordinary `Setup` (`turning=TurningSetup(...)`), streamed, played back and posted like any other, with a material check after each operation |
 
 Every setup (milling, plasma/laser and lathe) runs as one stream: each move
@@ -84,6 +86,17 @@ supported yet: 4/5-axis, undercuts.
 Details and limits: [capabilities](docs/library-capabilities.md). Measured
 toolpath quality and engine performance for every toolpath:
 [benchmarks](docs/benchmarks.md).
+
+Optional [checked recipe planning](docs/planning.md) compares supplied milling
+strategies and cutter recipes, retains the reference, and can append bounded
+native rest corrections from residual findings. It uses the existing checks
+and explicit machine/cutting data; it produces advice and never releases NC.
+The same guide covers opt-in engagement slowdown caps, declared initial-blank
+bounds, and a host-side example for colour intent and confirmed blank placement.
+
+Native [bounded preparation](docs/preparation.md) can screen supplied samples
+and calibrated assemblies and enclose a declared top-down blank. These queries
+produce explicit premises and advice; ordinary job verification still decides release.
 
 ## Install
 

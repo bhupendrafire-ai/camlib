@@ -117,6 +117,7 @@ pub(crate) struct Index {
     cell: f64,
     dims: [usize; 2],
     bins: Vec<Vec<u32>>,
+    entries: u64,
     floor: f64,
     eps: f64,
 }
@@ -278,6 +279,42 @@ pub(crate) fn enclosing_sections(
 ) -> Result<Vec<Section>, String> {
     sections_of(tool, true)
 }
+
+/// Outer staircase of the real curved lower profile. Each cylinder uses the
+/// radius at its band's upper edge and height at its lower edge, so their union
+/// contains the physical cutter. Never a sampled clearance certificate.
+pub(crate) fn bounded_sections(
+    tool: &crate::tool::PreparedAssembly,
+    height_step: f64,
+) -> Result<Vec<Section>, String> {
+    let mut sections = enclosing_sections(tool)?;
+    let r = tool.cutter().definition().diameter_mm / 2.;
+    let rc = match tool.cutter().definition().shape {
+        CutterShape::Ball => r,
+        CutterShape::Bull { corner_radius_mm } => corner_radius_mm,
+        _ => return Ok(sections),
+    };
+    if !height_step.is_finite() || height_step <= 0. || (rc / height_step).ceil() > 4096. {
+        return Err("curved cutter enclosure exceeds section budget".into());
+    }
+    let count = (rc / height_step).ceil().max(1.) as usize;
+    sections.remove(0);
+    for i in 0..count {
+        let z0 = rc * i as f64 / count as f64;
+        let z1 = rc * (i + 1) as f64 / count as f64;
+        // Round outward in radius; arithmetic margin is also charged by callers.
+        let radius =
+            (r - rc + (z1 * (2. * rc - z1)).max(0.).sqrt()) + 64. * f64::EPSILON * (1. + r);
+        sections.push(Section {
+            z0,
+            r0: radius,
+            r1: radius,
+            rise: 0.,
+            arc: 0.,
+        });
+    }
+    Ok(sections)
+}
 fn sections_of(
     tool: &crate::tool::PreparedAssembly,
     enclose_curved: bool,
@@ -316,13 +353,22 @@ fn sections_of(
             rise: cutter.tip_height_at_radius(radius).ok_or("drill profile")? / radius,
             arc: 0.,
         },
-        CutterShape::Ball | CutterShape::Bull { .. } if enclose_curved => Section {
-            z0: 0.,
-            r0: radius,
-            r1: radius,
-            rise: 0.,
-            arc: 0.,
-        },
+        // A lollipop or dovetail lies inside the cylinder of its widest
+        // radius from the tip up to its cutting length.
+        CutterShape::Ball
+        | CutterShape::Bull { .. }
+        | CutterShape::Lollipop
+        | CutterShape::Dovetail { .. }
+            if enclose_curved =>
+        {
+            Section {
+                z0: 0.,
+                r0: radius,
+                r1: radius,
+                rise: 0.,
+                arc: 0.,
+            }
+        }
         // The corner arc: a quarter circle from the flat (none for a ball)
         // out to the cutter radius.
         CutterShape::Ball => Section {
@@ -557,9 +603,35 @@ impl Tri {
     fn bull_contact(&self, p: [f64; 2], r: f64, rc: f64) -> Option<f64> {
         self.bull_contact_above(p, r, rc, f64::NEG_INFINITY)
     }
+    /// As `bull_contact`, an upper bound for proofs: each edge's objective is
+    /// concave (linear height minus a convex non-decreasing profile of a
+    /// convex distance), so it is bounded by `concave_max_upper`, with no
+    /// Lipschitz assumption (the corner's slope is unbounded at the rim).
+    /// Vertices and the facet's critical point are closed form.
+    fn bull_contact_bound(&self, p: [f64; 2], r: f64, rc: f64) -> Option<f64> {
+        self.bull_contact_with(p, r, rc, f64::NEG_INFINITY, true)
+    }
     /// As `bull_contact`, skipping edges that cannot exceed `floor` (the
     /// profile only lowers heights, so an edge never beats its higher end).
     fn bull_contact_above(&self, p: [f64; 2], r: f64, rc: f64, floor: f64) -> Option<f64> {
+        self.bull_contact_with(p, r, rc, floor, false)
+    }
+    fn bull_contact_with(
+        &self,
+        p: [f64; 2],
+        r: f64,
+        rc: f64,
+        floor: f64,
+        bound: bool,
+    ) -> Option<f64> {
+        if bound && self.p[0][2] == self.p[1][2] && self.p[1][2] == self.p[2][2] {
+            // A level facet: the objective is its height less the profile of
+            // the distance, which does not decrease outward, so the maximum
+            // is at the least horizontal distance (exact, no search). Fine
+            // flat floors are most of what a tangent pass reaches.
+            let d = self.distance_xy(p);
+            return (d <= r).then(|| self.p[0][2] - bull_profile(d, r, rc));
+        }
         let mut best: Option<f64> = None;
         fn take(best: &mut Option<f64>, z: f64) {
             *best = Some(best.map_or(z, |b| b.max(z)));
@@ -605,7 +677,14 @@ impl Tri {
                 let d = (q[0] - p[0]).hypot(q[1] - p[1]).min(r);
                 q[2] - bull_profile(d, r, rc)
             };
-            take(&mut best, golden_max(at, t0, t1, 40));
+            take(
+                &mut best,
+                if bound {
+                    concave_max_upper(at, t0, t1)
+                } else {
+                    golden_max(at, t0, t1, 40)
+                },
+            );
         }
         // Facet: the plane z = A x + B y + C; the critical point lies along
         // the gradient where the corner's slope equals the plane's.
@@ -850,20 +929,55 @@ impl Index {
         seen: &mut [u32],
         stamp: &mut u32,
     ) -> f64 {
-        let reach = sections.iter().map(|s| s.r1).fold(0., f64::max);
+        self.max_sections_cancel(p, sections, seen, stamp, &|| false)
+            .expect("uncancelled section query")
+    }
+    /// Pessimistic traversal and facet/section work, including duplicate bin entries.
+    pub(crate) fn section_work(&self, sections: usize) -> u64 {
+        self.entries
+            .saturating_add(self.bins.len() as u64)
+            .saturating_add(sections as u64)
+            .saturating_add((self.tris.len() as u64).saturating_mul(sections as u64))
+    }
+    pub(crate) fn max_sections_cancel(
+        &self,
+        p: [f64; 2],
+        sections: &[Section],
+        seen: &mut [u32],
+        stamp: &mut u32,
+        cancel: &impl CancelSignal,
+    ) -> Result<f64, String> {
+        let mut reach = 0f64;
+        let mut lowest = f64::INFINITY;
+        for section in sections {
+            if cancel.is_cancelled() {
+                return Err("flat-area section query cancelled".into());
+            }
+            reach = reach.max(section.r1);
+            lowest = lowest.min(section.z0);
+        }
         let mut best = self.floor;
-        self.visit(p, p, reach, seen, stamp, |t| {
-            if t.max[2] - sections.iter().map(|s| s.z0).fold(f64::INFINITY, f64::min) <= best {
+        let mut interrupted = false;
+        self.visit_cancel(p, p, reach, seen, stamp, cancel, |t| {
+            if t.max[2] - lowest <= best {
                 return true;
             }
             for s in sections {
+                if cancel.is_cancelled() {
+                    interrupted = true;
+                    return false;
+                }
                 if let Some(z) = t.section_contact(p, s) {
                     best = best.max(z);
                 }
             }
             true
-        });
-        best
+        })?;
+        if interrupted {
+            Err("flat-area section query cancelled".into())
+        } else {
+            Ok(best)
+        }
     }
     /// Proven: a tool made of `sections` moving straight from tip `a` to
     /// tip `b`, lifted by `lift`, stays above every triangle. Per triangle and
@@ -940,6 +1054,88 @@ impl Index {
         });
         clear
     }
+    /// Proven: a bull-nose end (radius r, corner rc; rc = r a ball, rc = 0
+    /// flat) moving straight from tip `a` to tip `b`, lifted by `lift`,
+    /// stays above every triangle. As `sections_chord_clear`, with the
+    /// curved profile itself (`Tri::bull_contact_bound`): per triangle the
+    /// contact along the chord is concave in the position (the maximum over
+    /// the triangle of a jointly concave function) and the tip height is
+    /// linear, so the gap is bounded by `concave_max_upper`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bull_chord_bound_clear(
+        &self,
+        a: Vec3,
+        b: Vec3,
+        r: f64,
+        rc: f64,
+        lift: f64,
+        seen: &mut [u32],
+        stamp: &mut u32,
+    ) -> bool {
+        if a[2].min(b[2]) < self.floor + lift {
+            return false;
+        }
+        let low = a[2].min(b[2]);
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let at = |t: f64| [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+        let tip = |t: f64| a[2] + t * (b[2] - a[2]);
+        let mut clear = true;
+        self.visit([a[0], a[1]], [b[0], b[1]], r, seen, stamp, |t| {
+            // Contacts never exceed the triangle's top.
+            if t.max[2] + lift <= low {
+                return true;
+            }
+            let gap = |k: usize| {
+                (t.min[k] - a[k].max(b[k]))
+                    .max(a[k].min(b[k]) - t.max[k])
+                    .max(0.)
+            };
+            if gap(0).hypot(gap(1)) > r {
+                return true;
+            }
+            let dist = |u: f64| t.distance_xy(at(u));
+            let near = golden_argmin(dist, 0., 1., 60);
+            let closest = dist(near);
+            if closest > r {
+                return true;
+            }
+            // No contact along the chord is higher than the triangle's top
+            // less the profile at the least horizontal distance (the profile
+            // does not decrease outward). The distance is convex along the
+            // chord, so its minimum lies in the final golden bracket around
+            // `near`; the distance is 1-Lipschitz, so it is at least
+            // `closest` less the chord's length times that bracket (bounded
+            // generously here). Most triangles of a fine mesh that a
+            // tangent pass reaches are dismissed by this alone, without the
+            // contact search.
+            let least = (closest - 1e-9 * (1. + length)).max(0.);
+            if t.max[2] - bull_profile(least, r, rc) + lift <= low {
+                return true;
+            }
+            let edge = |inside: f64, outside: f64| {
+                if dist(outside) <= r {
+                    return outside;
+                }
+                let (mut i, mut o) = (inside, outside);
+                for _ in 0..60 {
+                    let m = (i + o) / 2.;
+                    if dist(m) <= r { i = m } else { o = m }
+                }
+                i
+            };
+            let (u0, u1) = (edge(near, 0.), edge(near, 1.));
+            let gap = |u: f64| {
+                t.bull_contact_bound(at(u), r, rc)
+                    .map_or(f64::NEG_INFINITY, |c| c + lift - tip(u))
+            };
+            if concave_max_upper(gap, u0, u1) > 0. {
+                clear = false;
+                return false;
+            }
+            true
+        });
+        clear
+    }
     /// Calls `f` once for each triangle binned near the XY capsule of radius
     /// `r` around p-q, until it returns false.
     fn visit(
@@ -949,8 +1145,25 @@ impl Index {
         r: f64,
         seen: &mut [u32],
         stamp: &mut u32,
-        mut f: impl FnMut(&Tri) -> bool,
+        f: impl FnMut(&Tri) -> bool,
     ) {
+        self.visit_cancel(p, q, r, seen, stamp, &|| false, f)
+            .expect("uncancelled triangle query");
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn visit_cancel(
+        &self,
+        p: [f64; 2],
+        q: [f64; 2],
+        r: f64,
+        seen: &mut [u32],
+        stamp: &mut u32,
+        cancel: &impl CancelSignal,
+        mut f: impl FnMut(&Tri) -> bool,
+    ) -> Result<(), String> {
+        if cancel.is_cancelled() {
+            return Err("flat-area section query cancelled".into());
+        }
         *stamp = stamp.wrapping_add(1);
         if *stamp == 0 {
             seen.iter_mut().for_each(|s| *s = 0);
@@ -967,17 +1180,24 @@ impl Index {
         };
         for y in range(1) {
             for x in range(0) {
+                if cancel.is_cancelled() {
+                    return Err("flat-area section query cancelled".into());
+                }
                 for &i in &self.bins[y * self.dims[0] + x] {
+                    if cancel.is_cancelled() {
+                        return Err("flat-area section query cancelled".into());
+                    }
                     if seen[i as usize] == *stamp {
                         continue;
                     }
                     seen[i as usize] = *stamp;
                     if !f(&self.tris[i as usize]) {
-                        return;
+                        return Ok(());
                     }
                 }
             }
         }
+        Ok(())
     }
     /// Highest tip of a bull-nose cutter (radius r, corner rc) at axis `p`
     /// resting on the part, at least the base.
@@ -1029,69 +1249,180 @@ impl Index {
         r: f64,
         cancel: &impl CancelSignal,
     ) -> Result<Self, String> {
-        let mut tris = Vec::with_capacity(mesh.triangles.len());
+        Self::build(mesh, floor, r, None, &mut 0, u64::MAX, cancel)?
+            .ok_or_else(|| "flat-area triangle index work overflow".into())
+    }
+    /// Refuse before index allocation when preparation exceeds the caller's work
+    /// budget. Standard native surface validation is part of the bounds pass.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_bounded(
+        mesh: &SurfaceMesh,
+        floor: f64,
+        r: f64,
+        tolerance: f64,
+        work: &mut u64,
+        max_work: u64,
+        cancel: &impl CancelSignal,
+    ) -> Result<Option<Self>, String> {
+        mesh.validate_input(floor, tolerance)?;
+        Self::build(mesh, floor, r, Some(tolerance), work, max_work, cancel)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        mesh: &SurfaceMesh,
+        floor: f64,
+        r: f64,
+        tolerance: Option<f64>,
+        work: &mut u64,
+        max_work: u64,
+        cancel: &impl CancelSignal,
+    ) -> Result<Option<Self>, String> {
+        let count = mesh.triangles.len();
+        if count == 0 || count > u32::MAX as usize {
+            return Err("surface triangle index needs 1..=u32::MAX facets".into());
+        }
+        if !floor.is_finite() || !r.is_finite() || r <= 0. {
+            return Err("surface index needs a finite base and positive finite radius".into());
+        }
+        let charge = |work: &mut u64, cost: u64| {
+            if cost > max_work.saturating_sub(*work) {
+                false
+            } else {
+                *work += cost;
+                true
+            }
+        };
+        // No index-sized allocations until all entry storage and work are known.
+        if !charge(work, count as u64) {
+            return Ok(None);
+        }
         let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
         let mut scale = 1f64;
-        for t in mesh.triangles.iter() {
-            if t.iter().flatten().any(|v| !v.is_finite() || v.abs() > 1e6) {
+        for &t in mesh.triangles.iter() {
+            if cancel.is_cancelled() {
+                return Err("flat-area preparation cancelled".into());
+            }
+            if let Some(tolerance) = tolerance {
+                SurfaceMesh::validate_triangle(t, floor, tolerance)?;
+            } else if t.iter().flatten().any(|v| !v.is_finite() || v.abs() > 1e6) {
                 return Err("surface vertices must be finite and bounded".into());
             }
-            let min = [
-                t[0][0].min(t[1][0]).min(t[2][0]),
-                t[0][1].min(t[1][1]).min(t[2][1]),
-            ];
-            let max = [
-                t[0][0].max(t[1][0]).max(t[2][0]),
-                t[0][1].max(t[1][1]).max(t[2][1]),
-                t[0][2].max(t[1][2]).max(t[2][2]),
-            ];
-            for k in 0..2 {
-                lo[k] = lo[k].min(min[k]);
-                hi[k] = hi[k].max(max[k]);
+            for p in t {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+                scale = scale.max(p.iter().fold(0., |m: f64, v| m.max(v.abs())));
             }
-            scale = scale.max(t.iter().flatten().fold(0., |m: f64, v| m.max(v.abs())));
-            tris.push(Tri { p: *t, min, max });
-        }
-        if tris.is_empty() {
-            return Err("surface has no triangles".into());
         }
         let span = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(r);
         // About one triangle per bin on average, never finer than r / 4.
-        let cell = (span / (tris.len() as f64).sqrt().max(1.))
-            .max(r / 4.)
-            .max(1e-6);
+        let cell = (span / (count as f64).sqrt().max(1.)).max(r / 4.).max(1e-6);
         let dims = [
             ((hi[0] - lo[0]) / cell).floor() as usize + 1,
             ((hi[1] - lo[1]) / cell).floor() as usize + 1,
         ];
-        crate::resources::check_memory(
-            (dims[0] * dims[1]) as u128 * 24 + tris.len() as u128 * 96,
-            "flat-area triangle index",
-        )?;
-        let mut bins = vec![vec![]; dims[0] * dims[1]];
-        for (i, t) in tris.iter().enumerate() {
-            if i % 4096 == 0 && cancel.is_cancelled() {
+        let bin_count = dims[0]
+            .checked_mul(dims[1])
+            .ok_or("surface index size overflow")?;
+        let fixed_bytes = bin_count as u128
+            * (std::mem::size_of::<Vec<u32>>() + std::mem::size_of::<usize>()) as u128
+            // Include the per-facet query stamp array used alongside the index.
+            + count as u128 * (std::mem::size_of::<Tri>() + std::mem::size_of::<u32>()) as u128;
+        crate::resources::check_memory(fixed_bytes, "flat-area triangle index")?;
+        let memory_budget = crate::resources::memory_budget();
+        let range = |t: &[Vec3; 3]| {
+            std::array::from_fn::<_, 2, _>(|k| {
+                let min = t.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min);
+                let max = t.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
+                [
+                    (((min - lo[k]) / cell) as usize).min(dims[k] - 1),
+                    (((max - lo[k]) / cell) as usize).min(dims[k] - 1),
+                ]
+            })
+        };
+        if !charge(work, count as u64) {
+            return Ok(None);
+        }
+        let mut entries = 0u64;
+        for t in mesh.triangles.iter() {
+            if cancel.is_cancelled() {
                 return Err("flat-area preparation cancelled".into());
             }
-            let x0 = ((t.min[0] - lo[0]) / cell) as usize;
-            let x1 = ((t.max[0] - lo[0]) / cell) as usize;
-            let y0 = ((t.min[1] - lo[1]) / cell) as usize;
-            let y1 = ((t.max[1] - lo[1]) / cell) as usize;
-            for y in y0..=y1.min(dims[1] - 1) {
-                for x in x0..=x1.min(dims[0] - 1) {
-                    bins[y * dims[0] + x].push(i as u32);
+            let [[x0, x1], [y0, y1]] = range(t);
+            let n = (x1 - x0 + 1) as u64 * (y1 - y0 + 1) as u64;
+            entries = entries
+                .checked_add(n)
+                .ok_or("surface index entry overflow")?;
+            // Account for exact bin capacities, not just the vector headers.
+            let bytes = fixed_bytes + entries as u128 * std::mem::size_of::<u32>() as u128;
+            if memory_budget.is_some_and(|budget| bytes > budget as u128) {
+                crate::resources::check_memory(bytes, "flat-area triangle index")?;
+            }
+            if entries.saturating_mul(2) > max_work.saturating_sub(*work) {
+                return Ok(None);
+            }
+        }
+        // Count then fill every entry; build each facet and initialise each bin.
+        let allocation_work = entries
+            .saturating_mul(2)
+            .saturating_add(count as u64)
+            .saturating_add(bin_count as u64);
+        if !charge(work, allocation_work) {
+            return Ok(None);
+        }
+        crate::resources::check_memory(
+            fixed_bytes + entries as u128 * std::mem::size_of::<u32>() as u128,
+            "flat-area triangle index",
+        )?;
+        let mut counts = vec![0usize; bin_count];
+        for t in mesh.triangles.iter() {
+            let [[x0, x1], [y0, y1]] = range(t);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    if cancel.is_cancelled() {
+                        return Err("flat-area preparation cancelled".into());
+                    }
+                    counts[y * dims[0] + x] += 1;
                 }
             }
         }
-        Ok(Self {
+        let mut bins = Vec::with_capacity(bin_count);
+        for count in counts {
+            if cancel.is_cancelled() {
+                return Err("flat-area preparation cancelled".into());
+            }
+            bins.push(Vec::with_capacity(count));
+        }
+        let mut tris = Vec::with_capacity(count);
+        for (i, t) in mesh.triangles.iter().enumerate() {
+            let [[x0, x1], [y0, y1]] = range(t);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    if cancel.is_cancelled() {
+                        return Err("flat-area preparation cancelled".into());
+                    }
+                    bins[y * dims[0] + x].push(i as u32);
+                }
+            }
+            tris.push(Tri {
+                p: *t,
+                min: std::array::from_fn(|k| t.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min)),
+                max: std::array::from_fn(|k| {
+                    t.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max)
+                }),
+            });
+        }
+        Ok(Some(Self {
             tris,
             origin: lo,
             cell,
             dims,
             bins,
+            entries,
             floor,
             eps: 1e-12 * scale.max(1.),
-        })
+        }))
     }
     /// Highest part point under the swept disk (radius r) from p to q, at
     /// least the base.
@@ -1711,6 +2042,112 @@ mod tests {
         assert!(!index.bull_chord_clear(a, b, 2., 0.7, 0., &mut seen, &mut stamp));
     }
 
+    #[test]
+    fn bull_contact_bound_is_never_below_dense_sampling() {
+        // As the dense check of `bull_contact`, for the proof's bound: never
+        // below any sampled contact, and close to it.
+        let cases = [
+            ([[0., 0., 0.], [10., 0., 5.], [0., 10., 2.]], [3., 3.]),
+            ([[0., 0., 0.], [10., 0., 5.], [0., 10., 2.]], [11., 1.]),
+            ([[2., 2., 3.], [8., 3., 1.], [4., 9., 6.]], [5., 5.]),
+            ([[2., 2., 3.], [8., 3., 1.], [4., 9., 6.]], [0.5, 4.]),
+            ([[0., 0., 4.], [6., 0., 4.], [0., 6., 4.]], [7.2, 1.]),
+            // A steep facet and a vertical one (the corner's slope is
+            // unbounded at the rim: no Lipschitz bound holds there).
+            ([[0., 0., 0.], [1., 0., 9.], [0., 6., 0.]], [1.8, 3.]),
+            ([[3., 0., 0.], [3., 6., 0.], [3., 3., 8.]], [1.2, 3.]),
+        ];
+        for (corners, p) in cases {
+            let t = tri(corners);
+            for (r, rc) in [(2., 0.), (2., 0.5), (2., 1.5), (2., 2.)] {
+                let bound = t.bull_contact_bound(p, r, rc);
+                let mut sampled = f64::NEG_INFINITY;
+                let n = 600;
+                for i in 0..=n {
+                    for j in 0..=n - i {
+                        let (u, v) = (i as f64 / n as f64, j as f64 / n as f64);
+                        let w = [1. - u - v, u, v];
+                        let q: Vec3 = std::array::from_fn(|k| {
+                            w[0] * corners[0][k] + w[1] * corners[1][k] + w[2] * corners[2][k]
+                        });
+                        let d = (q[0] - p[0]).hypot(q[1] - p[1]);
+                        if d <= r {
+                            sampled = sampled.max(q[2] - bull_profile(d, r, rc));
+                        }
+                    }
+                }
+                match bound {
+                    None => assert!(sampled == f64::NEG_INFINITY, "{p:?} {r} {rc} {sampled}"),
+                    Some(z) => assert!(
+                        z >= sampled - 1e-9 && z - sampled < 0.05,
+                        "{corners:?} {p:?} {r} {rc}: bound {z}, sampled {sampled}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bull_chord_bound_clearance_agrees_with_dense_sampling() {
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let index_of = |corners: [Vec3; 3]| {
+            let mesh = crate::surface::SurfaceMesh {
+                version: 1,
+                units: "mm".into(),
+                triangles: vec![corners].into(),
+                surface_error_mm: 0.,
+                source: serde_json::Value::Null,
+            };
+            Index::new(&mesh, -10., 2., &never).unwrap()
+        };
+        let corners = [[0., 0., 0.], [10., 0., 5.], [0., 10., 2.]];
+        let index = index_of(corners);
+        let mut seen = vec![0; index.len()];
+        let mut stamp = 0;
+        let t = tri(corners);
+        for (r, rc) in [(2., 0.), (2., 0.7), (2., 2.)] {
+            let (pa, pb) = ([1., 2.], [4., 2.5]);
+            let contact = |p: [f64; 2]| t.bull_contact(p, r, rc).unwrap();
+            for (margin, clear) in [(0.01, true), (-0.01, false)] {
+                let mut a = [pa[0], pa[1], contact(pa) + margin];
+                let mut b = [pb[0], pb[1], contact(pb) + margin];
+                if !clear {
+                    a[2] += 0.02;
+                    b[2] += 0.02;
+                }
+                let dense = (0..=2000).all(|k| {
+                    let s = k as f64 / 2000.;
+                    let p = [a[0] + s * (b[0] - a[0]), a[1] + s * (b[1] - a[1])];
+                    contact(p) <= a[2] + s * (b[2] - a[2])
+                });
+                let proven = index.bull_chord_bound_clear(a, b, r, rc, 0., &mut seen, &mut stamp);
+                assert!(!proven || dense, "{r} {rc} {margin}");
+                if clear {
+                    assert!(proven, "{r} {rc}: a chord above the slope must be proven");
+                }
+            }
+        }
+        // A ball rolled level across a ridge (the tent's cross-section at
+        // Y 2 peaks at X 5): refused when its middle dips into it, proven
+        // with a small clearance, both judged by dense sampling.
+        let ridge = [[0., 0., 0.], [5., 5., 4.], [10., 0., 0.]];
+        let index = index_of(ridge);
+        let mut seen = vec![0; index.len()];
+        let t = tri(ridge);
+        let peak = t.bull_contact([5., 2.], 2., 2.).unwrap();
+        for (lift, expect) in [(-0.02, false), (0.002, true)] {
+            let (a, b) = ([1., 2., peak + lift], [9., 2., peak + lift]);
+            let dense = (0..=4000).all(|k| {
+                let s = k as f64 / 4000.;
+                t.bull_contact([1. + 8. * s, 2.], 2., 2.)
+                    .is_none_or(|c| c <= peak + lift)
+            });
+            let proven = index.bull_chord_bound_clear(a, b, 2., 2., 0., &mut seen, &mut stamp);
+            assert_eq!(proven, expect, "lift {lift}");
+            assert!(!proven || dense);
+        }
+    }
+
     /// Dense oracle: the highest tip over many triangle points, from the
     /// section's own profile (independent of the closed-form candidates).
     fn sampled_section(corners: [Vec3; 3], p: [f64; 2], s: &Section, n: usize) -> f64 {
@@ -2230,5 +2667,61 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn every_triangle_index_user_accounts_for_bin_entry_storage() {
+        let mesh = SurfaceMesh {
+            version: 1,
+            units: "mm".into(),
+            triangles: vec![[[-1e6, -1e6, 1.], [1e6, -1e6, 1.], [1e6, 1e6, 1.]]; 4096].into(),
+            surface_error_mm: 0.,
+            source: serde_json::Value::Null,
+        };
+        let error = crate::resources::with_memory_budget(1_048_576, || {
+            Index::new(&mesh, 0., 1., &|| false).err().unwrap()
+        });
+        assert!(error.contains("triangle index needs"), "{error}");
+    }
+    #[test]
+    fn index_construction_and_queries_poll_inside_large_bin_loops() {
+        use std::cell::Cell;
+        let mesh = SurfaceMesh {
+            version: 1,
+            units: "mm".into(),
+            triangles: vec![[[-100., -100., 1.], [100., -100., 1.], [100., 100., 1.]]; 100].into(),
+            surface_error_mm: 0.,
+            source: serde_json::Value::Null,
+        };
+        let polls = Cell::new(0usize);
+        let cancelled = || {
+            polls.set(polls.get() + 1);
+            polls.get() >= 300
+        };
+        assert!(
+            Index::new(&mesh, 0., 1., &cancelled)
+                .err()
+                .unwrap()
+                .contains("cancelled")
+        );
+        assert_eq!(polls.get(), 300);
+        let index = Index::new(&mesh, 0., 1., &|| false).unwrap();
+        polls.set(0);
+        let error = index
+            .max_sections_cancel(
+                [0., 0.],
+                &[Section {
+                    z0: 0.,
+                    r0: 300.,
+                    r1: 300.,
+                    rise: 0.,
+                    arc: 0.,
+                }],
+                &mut vec![0; index.len()],
+                &mut 0,
+                &cancelled,
+            )
+            .unwrap_err();
+        assert!(error.contains("cancelled"));
+        assert_eq!(polls.get(), 300);
     }
 }

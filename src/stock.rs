@@ -72,6 +72,72 @@ pub struct HeightBounds {
     pub upper_mm: f64,
 }
 
+/// Caller-declared whole-cell bounds of a top-down blank in setup coordinates.
+/// Source identity binds the physical premise; this is not a restored snapshot
+/// and does not claim that an imported mesh or a weld was measured by camlib.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitialStock {
+    pub source_id: String,
+    pub revision: String,
+    pub source_sha256: String,
+    /// Recorded placement only: bounds below are already in setup coordinates.
+    pub source_to_setup: crate::motion::WorkFrame,
+    /// Source/placement error already enclosed by every whole-cell bound.
+    pub uncertainty_mm: f64,
+    pub representation: String,
+    pub bounds: Vec<HeightBounds>,
+}
+impl InitialStock {
+    const INVALID: &str = "initial stock needs source identity, whole_cell_top_down representation and one valid lower/upper height pair per cell";
+
+    pub(crate) fn validate_metadata(&self) -> Result<(), String> {
+        self.source_to_setup.validate()?;
+        if !crate::tool::valid_id(&self.source_id)
+            || self.revision.is_empty()
+            || self.revision.len() > 512
+            || self.source_sha256.len() != 64
+            || !self.source_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || !self.uncertainty_mm.is_finite()
+            || !(0. ..=1e6).contains(&self.uncertainty_mm)
+            || self.representation != "whole_cell_top_down"
+        {
+            return Err(Self::INVALID.into());
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self, spec: &StockSpec) -> Result<(), String> {
+        let (nx, ny, _) = spec.grid()?;
+        self.validate_metadata()?;
+        if self.bounds.len() != nx * ny
+            || self
+                .bounds
+                .iter()
+                .any(|&height| !height_valid(height, spec))
+        {
+            return Err(Self::INVALID.into());
+        }
+        Ok(())
+    }
+
+    pub fn volume(&self, spec: &StockSpec) -> Result<[f64; 2], String> {
+        self.validate(spec)?;
+        let (_, _, step) = spec.grid()?;
+        let area = step[0] * step[1];
+        Ok([
+            self.bounds
+                .iter()
+                .map(|h| (h.lower_mm - spec.min_mm[2]) * area)
+                .sum(),
+            self.bounds
+                .iter()
+                .map(|h| (h.upper_mm - spec.min_mm[2]) * area)
+                .sum(),
+        ])
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StockSnapshot {
@@ -133,7 +199,7 @@ impl AxialColumn {
         let Curve::Line { start, end } = motion.curve else {
             return None;
         };
-        (!motion.kind.is_rapid()
+        (motion.kind.cuts()
             && start[0] == end[0]
             && start[1] == end[1]
             && end[2] < start[2]
@@ -319,7 +385,20 @@ impl Undercut {
         Ok(true)
     }
 }
+const UNDERCUT_STOCK: &str = "lollipop and dovetail cutters cut above their widest section, under material a height field cannot hold; run them on tri-dexel stock (DexelStockSpec)";
 const REACH: &str = "cutting length cannot span committed stock upper bound at lowest tip; unsupported non-heightfield removal/reach";
+/// Whether every point of the cell centred at `center` lies farther than
+/// `touch` from the move's axis (distance is 1-Lipschitz; `error` covers the
+/// path's numerical error).
+fn beyond(
+    axis: &crate::verification::AxisSpan,
+    center: Option<[f64; 2]>,
+    cell_radius: f64,
+    error: f64,
+    touch: f64,
+) -> bool {
+    center.is_some_and(|p| axis.distance(p) - cell_radius - error > touch)
+}
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct StockVolume {
@@ -508,6 +587,7 @@ pub struct Stock {
     cells: Vec<HeightBounds>,
     contact_index: Option<crate::stock_contact::HeightIndex>,
     initial_full_stock: bool,
+    initial_volume_mm3: Option<[f64; 2]>,
     identity: u64,
     receipt_requested: Arc<AtomicBool>,
     last_receipt: Option<Arc<SweepReceipt>>,
@@ -598,6 +678,7 @@ impl Stock {
             cells,
             contact_index: None,
             initial_full_stock: true,
+            initial_volume_mm3: None,
             identity: new_identity(),
             receipt_requested: Arc::new(AtomicBool::new(false)),
             last_receipt: None,
@@ -608,8 +689,39 @@ impl Stock {
             bore: None,
         })
     }
+    /// A run's starting stock given cell by cell (a mesh stock converted to
+    /// the height field, `crate::stock_mesh`): the run's initial state, with
+    /// its history (none) known, unlike a snapshot.
+    pub(crate) fn from_initial_cells(
+        spec: StockSpec,
+        cells: Vec<HeightBounds>,
+    ) -> Result<Self, String> {
+        let mut stock = Self::new(spec)?;
+        if cells.len() != stock.cells.len() || cells.iter().any(|&h| !height_valid(h, &stock.spec))
+        {
+            return Err("initial stock has invalid height bounds or grid length".into());
+        }
+        let top = stock.spec.max_mm[2];
+        stock.initial_full_stock = cells.iter().all(|h| h.lower_mm == top);
+        stock.cells = cells;
+        Ok(stock)
+    }
     pub fn spec(&self) -> &StockSpec {
         &self.spec
+    }
+
+    pub fn from_initial(spec: StockSpec, initial: &InitialStock) -> Result<Self, String> {
+        initial.validate(&spec)?;
+        let mut stock = Self::new(spec)?;
+        stock.cells.clone_from(&initial.bounds);
+        stock.initial_full_stock = false;
+        stock.initial_volume_mm3 = Some(initial.volume(&stock.spec)?);
+        Ok(stock)
+    }
+
+    pub(crate) fn initial_volume(&mut self, initial: &InitialStock) -> Result<(), String> {
+        self.initial_volume_mm3 = Some(initial.volume(&self.spec)?);
+        Ok(())
     }
     pub fn dimensions(&self) -> [usize; 2] {
         [self.nx, self.ny]
@@ -942,6 +1054,7 @@ impl Stock {
             cells: snapshot.cells,
             contact_index: None,
             initial_full_stock: false,
+            initial_volume_mm3: None,
             identity: new_identity(),
             receipt_requested: Arc::new(AtomicBool::new(false)),
             last_receipt: None,
@@ -967,11 +1080,12 @@ impl Stock {
             .map(|c| (c.upper_mm - base) * area)
             .sum::<f64>();
         let total = (self.spec.max_mm[2] - base) * area * self.cells.len() as f64;
+        let initial = self.initial_volume_mm3.unwrap_or([total, total]);
         StockVolume {
             remaining_lower_mm3: lower,
             remaining_upper_mm3: upper,
-            removed_lower_mm3: (total - upper).max(0.),
-            removed_upper_mm3: (total - lower).max(0.),
+            removed_lower_mm3: (initial[0] - upper).max(0.),
+            removed_upper_mm3: (initial[1] - lower).max(0.),
         }
     }
 
@@ -1003,7 +1117,7 @@ impl Stock {
         let mut stats = ReplayClearanceStats::default();
         let mut column = None;
         let mut undercut = false;
-        if !motion.kind.is_rapid()
+        if motion.kind.cuts()
             && matches!(tool.cutter().definition().shape, CutterShape::Flat)
             && motion.curve.start()[2] == motion.curve.end()[2]
             && matches!(
@@ -1052,6 +1166,15 @@ impl Stock {
                     let reachable =
                         bounds.min[2] + tool.cutter().definition().cutting_length_mm - guard;
                     let mut buried = false;
+                    let whole = crate::verification::AxisSpan::new(motion, &path, [0., 1.]);
+                    let cell_radius = self.step[0].hypot(self.step[1]) / 2.;
+                    let touch = radius.max(
+                        tool.cutter()
+                            .definition()
+                            .neck
+                            .as_ref()
+                            .map_or(0., |n| n.diameter_mm / 2.),
+                    );
                     'reach: for y in rect.y0..=rect.y1 {
                         cancelled(cancel)?;
                         for x in rect.x0..=rect.x1 {
@@ -1066,8 +1189,20 @@ impl Stock {
                             }
                             // Native preview certified any undercut and made
                             // no column for it; match that, never claim one.
+                            // Like native preview, cells beyond the cutter
+                            // and its neck are not judged for reach.
                             let upper = self.cells[y * self.nx + x].upper_mm;
-                            if upper > reachable {
+                            if upper > reachable
+                                && !whole.as_ref().is_some_and(|a| {
+                                    beyond(
+                                        a,
+                                        self.cell_center(y * self.nx + x),
+                                        cell_radius,
+                                        error,
+                                        touch,
+                                    )
+                                })
+                            {
                                 match Undercut::new(tool.cutter().definition(), guard) {
                                     Some(u) if upper <= bounds.min[2] + u.shoulder - guard => {
                                         buried = true
@@ -1113,8 +1248,8 @@ impl Stock {
         delta.native_identity = Some(self.identity);
         delta.cleared_column = column;
         delta.axial_column = AxialColumn::from_motion(tool, motion, self.spec.max_mm[2]);
-        delta.departure = (!motion.kind.is_rapid() && !undercut)
-            .then(|| (motion.tool.clone(), motion.curve.end()));
+        delta.departure =
+            (motion.kind.cuts() && !undercut).then(|| (motion.tool.clone(), motion.curve.end()));
         delta.shift = motion.kind == MoveKind::Shift;
         delta.receipt = None;
         Ok(stats)
@@ -1167,8 +1302,12 @@ impl Stock {
                 })
             }),
         };
-        if fraction == 0. || motion.kind.is_rapid() {
+        // Rapids, oriented shifts and probing moves never remove stock.
+        if fraction == 0. || !motion.kind.cuts() {
             return Ok(delta);
+        }
+        if tool.cutter().definition().shape.undercuts() {
+            return Err(UNDERCUT_STOCK.into());
         }
         if matches!(tool.cutter().definition().shape, CutterShape::Beam) {
             self.beam_sweep(&mut delta, tool, motion, fraction, options, cancel)?;
@@ -1225,6 +1364,11 @@ impl Stock {
         }
         let mut reach_cell_visits = 0u64;
         let undercut = Undercut::new(tool.cutter().definition(), guard);
+        // Reach is judged where the cutter can touch: cells provably beyond
+        // its cross-section (and its neck) over the whole move are left to
+        // the assembly checks (issue #129), not to its bounding rectangle.
+        let whole = crate::verification::AxisSpan::new(motion, &prepared, [0., 1.]);
+        let touch = radius.max(undercut.as_ref().map_or(0., |u| u.neck));
         // A straight plunge from above the stock: the cutting part sweeps the
         // whole column down to the tip, so the neck follows it through empty
         // space and nothing is left above the cut (no undercut).
@@ -1253,7 +1397,17 @@ impl Stock {
                         );
                     }
                     let upper = self.cells[j * self.nx + i].upper_mm;
-                    if upper > reachable {
+                    if upper > reachable
+                        && !whole.as_ref().is_some_and(|a| {
+                            beyond(
+                                a,
+                                self.cell_center(j * self.nx + i),
+                                cell_radius,
+                                analytic_error,
+                                touch,
+                            )
+                        })
+                    {
                         // A neck may pass beside material between the cutting
                         // length and the shoulder; decided per cell below.
                         match &undercut {
@@ -1318,6 +1472,10 @@ impl Stock {
                     let distance = axis.distance(p);
                     stats.analytic_path_queries += 1;
                     let mut under = false;
+                    if distance - cell_radius - analytic_error > touch {
+                        // Untouched by the cutter and its neck: unchanged.
+                        continue;
+                    }
                     if buried {
                         let near = (distance - cell_radius - analytic_error).max(0.);
                         let u = undercut.as_ref().expect("buried needs a neck");
@@ -1403,6 +1561,9 @@ impl Stock {
                         };
                         let d = (p[0] - (s.a[0] + t * dx)).hypot(p[1] - (s.a[1] + t * dy));
                         let near = (d - cell_radius - s.error).max(0.);
+                        if near > touch {
+                            continue;
+                        }
                         let tip = s.a[2].min(s.b[2]) - s.error;
                         let under = match (&undercut, buried) {
                             (Some(u), true) => u.classify(
@@ -1474,6 +1635,100 @@ impl Stock {
                 });
         }
         Ok(delta)
+    }
+
+    /// A height-view transaction for a tri-dexel run (`crate::dexel`): the
+    /// cell changes are the projection of the dexel sweep's Z rays, and the
+    /// native records are the ones this height field's own sweep would add
+    /// for the same move, under the same condition (`records`: a fully swept
+    /// cutting move that passed under no material, so the space above every
+    /// pose of its cutting part is empty). `undercut_cells` > 0 marks a move
+    /// whose cutting part ran under material, as `preview_sweep` does.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn derived_delta(
+        &self,
+        tool: &PreparedAssembly,
+        motion: &Motion,
+        fraction: f64,
+        changes: Vec<CellChange>,
+        records: bool,
+        analytic: bool,
+        undercut_cells: u64,
+        tolerance_mm: f64,
+    ) -> StockDelta {
+        let stats = SweepStats {
+            changed_cells: changes.len(),
+            delta_bytes: changes.len() * std::mem::size_of::<CellChange>(),
+            undercut_cells,
+            ..Default::default()
+        };
+        let mut delta = StockDelta {
+            spec: self.spec.clone(),
+            base_generation: self.generation,
+            motion_id: motion.id,
+            operation: motion.operation.clone(),
+            fraction,
+            changes,
+            stats,
+            native_identity: Some(self.identity),
+            cleared_column: None,
+            axial_column: None,
+            departure: None,
+            shift: motion.kind == MoveKind::Shift,
+            receipt: self.receipt_requested.load(Ordering::Relaxed).then(|| {
+                // The dexel kernel swept exactly this motion prefix with this
+                // tool from this view's stock state.
+                Arc::new(SweepReceipt {
+                    base_identity: self.identity,
+                    motion: motion.clone(),
+                    tool: tool.definition().clone(),
+                    fraction,
+                    tolerance_mm,
+                })
+            }),
+        };
+        if records && fraction == 1. && !motion.kind.is_rapid() {
+            delta.axial_column = AxialColumn::from_motion(tool, motion, self.spec.max_mm[2]);
+            delta.departure = Some((motion.tool.clone(), motion.curve.end()));
+            if analytic {
+                let radius = tool.cutter().definition().diameter_mm / 2.;
+                delta.cleared_column = ClearedSweep::from_motion(motion, radius, tolerance_mm)
+                    .ok()
+                    .map(|sweep| CommittedColumn {
+                        sweep,
+                        tolerance_mm,
+                    });
+            }
+        }
+        delta
+    }
+
+    /// A height-only transaction (no native records) for received tri-dexel
+    /// changes: the projection of their Z rays.
+    pub(crate) fn wire_delta(
+        &self,
+        motion: &Motion,
+        fraction: f64,
+        changes: Vec<CellChange>,
+    ) -> StockDelta {
+        StockDelta {
+            spec: self.spec.clone(),
+            base_generation: self.generation,
+            motion_id: motion.id,
+            operation: motion.operation.clone(),
+            fraction,
+            stats: SweepStats {
+                changed_cells: changes.len(),
+                ..Default::default()
+            },
+            changes,
+            native_identity: None,
+            cleared_column: None,
+            axial_column: None,
+            departure: None,
+            shift: false,
+            receipt: None,
+        }
     }
 
     pub fn apply_delta(&mut self, delta: &StockDelta) -> Result<(), String> {
@@ -1710,7 +1965,7 @@ fn height_valid(h: HeightBounds, spec: &StockSpec) -> bool {
         && h.upper_mm <= spec.max_mm[2]
         && h.lower_mm <= h.upper_mm
 }
-fn cancelled(cancel: &impl CancelSignal) -> Result<(), String> {
+pub(crate) fn cancelled(cancel: &impl CancelSignal) -> Result<(), String> {
     if cancel.is_cancelled() {
         Err("stock sweep cancelled; no changes committed".into())
     } else {
@@ -1731,10 +1986,10 @@ impl Rect {
         self.width() * (self.y1 - self.y0 + 1)
     }
 }
-struct Segment {
-    a: Vec3,
-    b: Vec3,
-    error: f64,
+pub(crate) struct Segment {
+    pub(crate) a: Vec3,
+    pub(crate) b: Vec3,
+    pub(crate) error: f64,
 }
 fn segment_layout(curve: &Curve, options: SweepOptions) -> Result<(usize, f64), String> {
     let layout = match *curve {
@@ -1783,7 +2038,7 @@ fn segment_layout(curve: &Curve, options: SweepOptions) -> Result<(usize, f64), 
     }
     Ok(layout)
 }
-fn segments(
+pub(crate) fn segments(
     curve: &Curve,
     prepared: &crate::motion::PreparedCurve,
     fraction: f64,

@@ -127,6 +127,110 @@ def ThreadMill(
     )
 
 
+def TSlotCutter(
+    id,
+    *,
+    diameter,
+    width,
+    neck_diameter,
+    neck_length,
+    overall_length,
+    shank_diameter=None,
+    flutes=6,
+    material="carbide",
+    name=None,
+):
+    """T-slot cutter: a cutting disk of ``diameter`` and ``width`` (its
+    height) on a narrower neck. It cuts the wide bottom of a T-slot under a
+    slot milled first (``camlib.operations.Undercut``, tri-dexel stock)."""
+    return _cutter(
+        id,
+        {"kind": "flat"},
+        diameter=diameter,
+        flute_length=width,
+        overall_length=overall_length,
+        shank_diameter=shank_diameter,
+        flutes=flutes,
+        center_cutting=False,
+        material=material,
+        name=name,
+        neck=Neck(neck_diameter, neck_length),
+    )
+
+
+def KeyseatCutter(id, **dimensions):
+    """Keyseat (Woodruff) cutter: a thin cutting disk on a neck, cutting a
+    keyseat into a wall from the side. Dimensions as for ``TSlotCutter``."""
+    return TSlotCutter(id, **dimensions)
+
+
+def LollipopCutter(
+    id,
+    *,
+    diameter,
+    neck_diameter,
+    neck_length,
+    overall_length,
+    cutting_length=None,
+    shank_diameter=None,
+    flutes=4,
+    material="carbide",
+    name=None,
+):
+    """Lollipop (ball-shank undercut) cutter: a sphere of ``diameter`` on a
+    neck. ``cutting_length``: the sphere's height up to where it meets the
+    neck (default: where the sphere's radius equals the neck's)."""
+    if cutting_length is None:
+        r, n = diameter / 2, neck_diameter / 2
+        cutting_length = r + math.sqrt(max(r * r - n * n, 0))
+    return _cutter(
+        id,
+        {"kind": "lollipop"},
+        diameter=diameter,
+        flute_length=cutting_length,
+        overall_length=overall_length,
+        shank_diameter=shank_diameter,
+        flutes=flutes,
+        center_cutting=False,
+        material=material,
+        name=name,
+        neck=Neck(neck_diameter, neck_length),
+    )
+
+
+def DovetailCutter(
+    id,
+    *,
+    diameter,
+    angle,
+    cutting_length,
+    overall_length,
+    neck_diameter=None,
+    neck_length=None,
+    shank_diameter=None,
+    flutes=6,
+    material="carbide",
+    name=None,
+):
+    """Dovetail cutter: widest at its flat tip (``diameter``), the flank
+    tapering toward the spindle at ``angle`` degrees from the tip face (a 60
+    degree cutter cuts a 60 degree dovetail)."""
+    neck = None if neck_diameter is None else Neck(neck_diameter, neck_length)
+    return _cutter(
+        id,
+        {"kind": "dovetail", "flank_angle_rad": math.radians(angle)},
+        diameter=diameter,
+        flute_length=cutting_length,
+        overall_length=overall_length,
+        shank_diameter=shank_diameter,
+        flutes=flutes,
+        center_cutting=False,
+        material=material,
+        name=name,
+        neck=neck,
+    )
+
+
 def BoringBar(
     id,
     *,
@@ -195,6 +299,37 @@ def LaserHead(id, *, kerf_width, nozzle_diameter=3, nozzle_length=15, body_diame
     """Laser cutting head: the beam cuts a kerf of ``kerf_width`` through the
     sheet below the nozzle (focus) tip. Returns a ToolAssembly."""
     return _beam(id, kerf_width, nozzle_diameter, nozzle_length, body_diameter, body_length, name)
+
+
+def ProbeTool(id, *, ball_diameter, stem_diameter, stylus_length, body_diameter, body_length, name=None):
+    """A touch probe as a tool assembly: the stylus ball (``ball_diameter``,
+    the calibrated effective diameter the controller's probe calibration
+    holds), its stem (``stem_diameter``, thinner than the ball) reaching
+    ``stylus_length`` from the ball's bottom (the controlled point) to the
+    probe body, and the body (``body_diameter``) up ``body_length`` to the
+    gauge line. Stylus, stem and body are checked against stock and fixtures
+    on every probing move. A probe never cuts: only the probing operations
+    (ProbeSurface, ProbeBore, ...) use it. Every dimension is the caller's:
+    there are no defaults."""
+    if not 0 < stem_diameter < ball_diameter < stylus_length:
+        raise ValueError("a probe needs 0 < stem_diameter < ball_diameter < stylus_length")
+    if not (body_diameter >= stem_diameter and body_length > 0):
+        raise ValueError("the probe body must be at least as wide as the stem, with a positive length")
+    gauge = stylus_length + body_length
+    cutter = _cutter(
+        id,
+        {"kind": "probe"},
+        diameter=ball_diameter,
+        flute_length=ball_diameter,
+        overall_length=gauge,
+        shank_diameter=stem_diameter,
+        flutes=1,
+        center_cutting=False,
+        material="",
+        name=name,
+    )
+    holder = (HolderSection(stylus_length, gauge, body_diameter / 2, body_diameter / 2),)
+    return ToolAssembly(id, cutter, stylus_length, gauge, holder)
 
 
 def Tap(id, *, drill_diameter, thread_length, overall_length, shank_diameter, flutes=3, material="hss", name=None):
