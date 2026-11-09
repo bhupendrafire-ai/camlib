@@ -42,6 +42,12 @@ pub struct Target {
 pub struct Options {
     pub geometry_tolerance_mm: f64,
     pub comparison_tolerance_mm: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residual_tolerance_mm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gouge_tolerance_mm: Option<f64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub scope_to_region: bool,
     pub max_tile_nodes: u64,
     pub max_boundary_tests: u64,
     pub max_classified_cells: usize,
@@ -52,6 +58,9 @@ impl Default for Options {
         Self {
             geometry_tolerance_mm: 1e-5,
             comparison_tolerance_mm: 0.001,
+            residual_tolerance_mm: None,
+            gouge_tolerance_mm: None,
+            scope_to_region: false,
             max_tile_nodes: 1_000_000,
             max_boundary_tests: 50_000_000,
             max_classified_cells: u32::MAX as usize,
@@ -60,11 +69,23 @@ impl Default for Options {
     }
 }
 impl Options {
+    pub fn residual_tolerance(self) -> f64 {
+        self.residual_tolerance_mm
+            .unwrap_or(self.comparison_tolerance_mm)
+    }
+    pub fn gouge_tolerance(self) -> f64 {
+        self.gouge_tolerance_mm
+            .unwrap_or(self.comparison_tolerance_mm)
+    }
     pub(crate) fn validate(self) -> Result<(), String> {
         if !self.geometry_tolerance_mm.is_finite()
             || !(1e-7..=0.01).contains(&self.geometry_tolerance_mm)
             || !self.comparison_tolerance_mm.is_finite()
             || !(1e-7..=1.).contains(&self.comparison_tolerance_mm)
+            || [self.residual_tolerance_mm, self.gouge_tolerance_mm]
+                .into_iter()
+                .flatten()
+                .any(|v| !v.is_finite() || !(0. ..=1.).contains(&v))
             || !(1..=10_000_000).contains(&self.max_tile_nodes)
             || !(1..=1_000_000_000).contains(&self.max_boundary_tests)
             || !(1..=u32::MAX as usize).contains(&self.max_classified_cells)
@@ -154,6 +175,12 @@ pub struct Report {
     pub stock_sha256: String,
     pub context: Context,
     pub comparison_tolerance_mm: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residual_tolerance_mm: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gouge_tolerance_mm: Option<f64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scope_to_region: bool,
     pub complete: bool,
     pub residual: Summary,
     pub gouge: Summary,
@@ -341,6 +368,9 @@ impl PreparedTarget {
 }
 
 trait MaterialGeometry {
+    fn local_scope(&self) -> bool {
+        false
+    }
     fn finishing_target(&self) -> Option<&PreparedSurfaceTarget> {
         None
     }
@@ -366,6 +396,9 @@ trait MaterialGeometry {
 }
 
 impl MaterialGeometry for PreparedTarget {
+    fn local_scope(&self) -> bool {
+        self.options.scope_to_region
+    }
     fn options(&self) -> Options {
         self.options
     }
@@ -428,6 +461,7 @@ impl MaterialGeometry for PreparedTarget {
             match class {
                 FootprintClass::Inside => inside,
                 FootprintClass::Outside => [spec.max_mm[2]; 2],
+                FootprintClass::Mixed if self.options.scope_to_region => inside,
                 FootprintClass::Mixed => [inside[0], spec.max_mm[2]],
             },
         )))
@@ -543,6 +577,21 @@ fn check_material(
             stats.work_exhausted = true;
             break;
         };
+        if target.local_scope() && class == FootprintClass::Outside {
+            // Examined, with no local material claim outside the declared region.
+            // Never skip mixed boundary cells.
+            let count = (x1 - x0) * (y1 - y0);
+            if count
+                > options
+                    .max_classified_cells
+                    .saturating_sub(stats.classified_cells)
+            {
+                stats.work_exhausted = true;
+                break;
+            }
+            stats.classified_cells += count;
+            continue;
+        }
         if class == FootprintClass::Mixed && (x1 - x0 > 1 || y1 - y0 > 1) {
             let xm = x0 + (x1 - x0) / 2;
             let ym = y0 + (y1 - y0) / 2;
@@ -587,16 +636,25 @@ fn check_material(
                     ];
                     scope.add(i, cell_xy, actual, desired, cancel)?;
                 }
-                let r = [
+                let mut r = [
                     (actual[0] - desired[1] - arithmetic).max(0.),
                     (actual[1] - desired[0] + arithmetic).max(0.),
                 ];
-                let g = [
+                let mut g = [
                     (desired[0] - actual[1] - arithmetic).max(0.),
                     (desired[1] - actual[0] + arithmetic).max(0.),
                 ];
-                let rc = residual.add(r, area, options.comparison_tolerance_mm);
-                let gc = gouge.add(g, area, options.comparison_tolerance_mm);
+                if target.local_scope() && class == FootprintClass::Mixed {
+                    // A mixed cell may only touch the scope's error guard.
+                    // Without a certified positive overlap area, no excess
+                    // volume or definite excess is established in the scope.
+                    // Keep the full-cell upper enclosure for every possible
+                    // overlap instead of counting the whole cell as inside.
+                    r[0] = 0.;
+                    g[0] = 0.;
+                }
+                let rc = residual.add(r, area, options.residual_tolerance());
+                let gc = gouge.add(g, area, options.gouge_tolerance());
                 // The report stays the cell comparison (reproducible from
                 // the stock alone); the per-move proof counts, beside it,
                 // the possible-only gouge cells it rules out (no swept
@@ -648,6 +706,9 @@ fn check_material(
         stock_sha256,
         context: context.clone(),
         comparison_tolerance_mm: options.comparison_tolerance_mm,
+        residual_tolerance_mm: options.residual_tolerance_mm,
+        gouge_tolerance_mm: options.gouge_tolerance_mm,
+        scope_to_region: options.scope_to_region,
         complete: stats.unexamined_cells == 0 && finishing.as_ref().is_none_or(|f| f.complete),
         residual: residual.finish(stats.unexamined_cells, unknown),
         gouge: gouge.finish(stats.unexamined_cells, unknown),

@@ -35,7 +35,10 @@ is ordered by real dependency, not by size:
 
 ## Phase 1: Correctness
 
+- [x] #132 macOS extension linking, portable wheel loading and actionable first-use refusals
+
 - [x] #116 Machine crash detection: check the posted program against a declared machine model (safety)
+- [x] #136 Geodesic contour construction: observe cancellation within a level
 
 ## Phase 2: Complete milling
 
@@ -118,6 +121,10 @@ use: 2D, holes, 3D), turning and thermal.
 - [ ] #48 Optimize ThermalCut (plasma and laser)
 
 ## Any time
+
+- [x] #134 Caller-supplied checked recipes, bounded rest correction and declared engagement policy
+
+- [x] #133 Bounded preparation and declared whole-cell stock/material premises (scoped library APIs)
 
 These can run in parallel with any phase.
 

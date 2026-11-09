@@ -628,6 +628,42 @@ fn initialise_heights(
         .ok_or_else(|| PyValueError::new_err("height buffer must be writable contiguous f64"))?;
     buffers::initialise_heights(&mut Writable(cells), bottom, top).map_err(PyValueError::new_err)
 }
+
+#[pyfunction]
+fn initialise_declared_stock(
+    py: Python<'_>,
+    heights: &Bound<'_, PyAny>,
+    manifest: &str,
+) -> PyResult<()> {
+    let manifest: camlib::stream::StreamManifest =
+        serde_json::from_str(manifest).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    manifest.validate().map_err(PyValueError::new_err)?;
+    let spec = manifest.stock.height().map_err(PyValueError::new_err)?;
+    let initial = manifest
+        .initial_stock
+        .as_ref()
+        .ok_or_else(|| PyValueError::new_err("manifest has no declared initial stock"))?;
+    initial.validate(spec).map_err(PyValueError::new_err)?;
+    let lease = PyBuffer::<f64>::get(heights)?;
+    if lease.dimensions() != 1 {
+        return Err(PyValueError::new_err(
+            "height buffer must be one-dimensional",
+        ));
+    }
+    let cells = lease
+        .as_mut_slice(py)
+        .ok_or_else(|| PyValueError::new_err("height buffer must be writable contiguous f64"))?;
+    if cells.len() != initial.bounds.len() * 2 {
+        return Err(PyValueError::new_err(
+            "initial stock buffer/grid length mismatch",
+        ));
+    }
+    for (pair, bounds) in cells.as_chunks::<2>().0.iter().zip(&initial.bounds) {
+        pair[0].set(bounds.lower_mm);
+        pair[1].set(bounds.upper_mm);
+    }
+    Ok(())
+}
 #[pyfunction]
 fn validate_delta(
     py: Python<'_>,
@@ -1209,6 +1245,81 @@ fn schedule_motion<'py>(
     })?;
     Ok(PyBytes::new(py, &bytes))
 }
+
+#[pyfunction]
+#[pyo3(signature = (program_json, stock_json, policy_json, cancel=None))]
+fn schedule_engagement<'py>(
+    py: Python<'py>,
+    program_json: &str,
+    stock_json: &str,
+    policy_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if program_json
+        .len()
+        .saturating_add(stock_json.len())
+        .saturating_add(policy_json.len())
+        > 256 * 1024 * 1024
+    {
+        return Err(PyValueError::new_err("engagement input byte cap"));
+    }
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    let bytes = py.detach(|| {
+        let program = serde_json::from_str(program_json)
+            .map_err(|e| PyValueError::new_err(format!("program: {e}")))?;
+        let (stock, initial, sweep): (
+            camlib::stock::StockSpec,
+            Option<camlib::stock::InitialStock>,
+            camlib::stock::SweepOptions,
+        ) = serde_json::from_str(stock_json)
+            .map_err(|e| PyValueError::new_err(format!("stock: {e}")))?;
+        let policy = serde_json::from_str(policy_json)
+            .map_err(|e| PyValueError::new_err(format!("feed policy: {e}")))?;
+        let report = camlib::feed_policy::apply(&program, stock, initial, sweep, &policy, &*flag)
+            .map_err(PyValueError::new_err)?;
+        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(PyValueError::new_err("engagement feed analysis cancelled"));
+        }
+        serde_json::to_vec(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(PyBytes::new(py, &bytes))
+}
+#[pyfunction]
+#[pyo3(signature = (kind, request_json, cancel=None))]
+fn prepare_geometry<'py>(
+    py: Python<'py>,
+    kind: &str,
+    request_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if request_json.len() > 256 * 1024 * 1024 {
+        return Err(PyValueError::new_err("preparation input byte cap"));
+    }
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    let bytes = py.detach(|| {
+        let value = match kind {
+            "reach" => {
+                let request = serde_json::from_str(request_json)
+                    .map_err(|e| PyValueError::new_err(format!("reach request: {e}")))?;
+                serde_json::to_vec(
+                    &camlib::preparation::reach(&request, &*flag).map_err(PyValueError::new_err)?,
+                )
+            }
+            "blank" => {
+                let request = serde_json::from_str(request_json)
+                    .map_err(|e| PyValueError::new_err(format!("blank request: {e}")))?;
+                serde_json::to_vec(
+                    &camlib::preparation::enclose_blank(&request, &*flag)
+                        .map_err(PyValueError::new_err)?,
+                )
+            }
+            _ => return Err(PyValueError::new_err("unknown preparation query")),
+        };
+        value.map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
 /// Generic syntax-independent geometry checker used by ordinary Python posts.
 #[pyclass]
 struct IntentSession {
@@ -2143,12 +2254,15 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(turning_rectangle_holder, module)?)?;
     module.add_function(wrap_pyfunction!(turning_validate_tool, module)?)?;
     module.add_function(wrap_pyfunction!(schedule_motion, module)?)?;
+    module.add_function(wrap_pyfunction!(schedule_engagement, module)?)?;
     module.add_function(wrap_pyfunction!(validate_heights, module)?)?;
     module.add_function(wrap_pyfunction!(decode_committed_chunk, module)?)?;
     module.add_function(wrap_pyfunction!(accept_motion_frames, module)?)?;
     module.add_function(wrap_pyfunction!(volume, module)?)?;
     module.add_function(wrap_pyfunction!(display_patch, module)?)?;
     module.add_function(wrap_pyfunction!(initialise_heights, module)?)?;
+    module.add_function(wrap_pyfunction!(initialise_declared_stock, module)?)?;
+    module.add_function(wrap_pyfunction!(prepare_geometry, module)?)?;
     module.add_function(wrap_pyfunction!(validate_delta, module)?)?;
     module.add_function(wrap_pyfunction!(display_overlay_patch, module)?)?;
     module.add_class::<MaterialTarget>()?;

@@ -232,11 +232,15 @@ fn run() -> Result<(), String> {
                     );
                 }
                 let p = producer.as_mut().ok_or("producer unavailable")?;
-                let started = p
-                    .start_material_verification(Some(&after_operation))?
-                    .ok_or("material stage is not configured")?;
-                send(&started)?;
-                send(&p.finish_material_verification(&cancel)?)?;
+                let mut found = false;
+                while let Some(started) = p.start_material_verification(Some(&after_operation))? {
+                    found = true;
+                    send(&started)?;
+                    send(&p.finish_material_verification(&cancel)?)?;
+                }
+                if !found {
+                    return Err("material stage is not configured or already complete".into());
+                }
             }
             Command::Operations { cache } => {
                 if query
@@ -285,7 +289,7 @@ fn run() -> Result<(), String> {
                     );
                 }
                 let producer = producer.as_mut().ok_or("producer unavailable")?;
-                if let Some(start) = producer.start_material_verification(None)? {
+                while let Some(start) = producer.start_material_verification(None)? {
                     send(&start)?;
                     send(&producer.finish_material_verification(&cancel)?)?;
                 }

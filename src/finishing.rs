@@ -211,10 +211,11 @@ impl RestMap {
             lower: cells.iter().map(|c| c.lower_mm).collect(),
         })
     }
-    /// The ball (center `p`, height `center_z`) reaches more than
-    /// `threshold` into the stock of some flagged cell: its lowest point over
-    /// the cell (at the cell's nearest point) is that far below the stock.
-    fn engaged(&self, p: [f64; 2], center_z: f64, radius: f64, threshold: f64) -> bool {
+    /// The real flat/ball/bull profile at its planned tip height may reach
+    /// more than `threshold` into a flagged cell. The cell's enclosing disk
+    /// deliberately retains uncertain strokes; selection is not a removal
+    /// certificate, and the full stock/material replay still decides completion.
+    fn engaged(&self, p: [f64; 2], tip_z: f64, radius: f64, corner: f64, threshold: f64) -> bool {
         let half = self.step[0].hypot(self.step[1]) / 2.;
         let range = |k: usize, n: usize| {
             let lo = ((p[k] - radius - half - self.min[k]) / self.step[k])
@@ -237,11 +238,12 @@ impl RestMap {
                     self.min[1] + (j as f64 + 0.5) * self.step[1],
                 ];
                 let near = ((c[0] - p[0]).hypot(c[1] - p[1]) - half).max(0.);
-                if near <= radius
-                    && self.lower[k] - (center_z - (radius * radius - near * near).sqrt())
-                        > threshold
-                {
-                    return true;
+                if near <= radius {
+                    let arc = (near - (radius - corner)).max(0.);
+                    let bottom = tip_z + corner - (corner * corner - arc * arc).max(0.).sqrt();
+                    if self.lower[k] - bottom > threshold {
+                        return true;
+                    }
                 }
             }
         }
@@ -573,9 +575,9 @@ impl ParallelPlan {
         plan.expected_generation = Some(stock.generation());
         plan.report.stock_top = Some(ceiling.report.clone());
         plan.report.clearance_proof = if plan.depth_parts.is_some() {
-            "continuous segment distance to downward-extruded triangles and base; inflated analytic ball contact; neck/shank/holder above the committed stock under them on every feed move"
+            "continuous segment clearance against downward-extruded triangles and base with the declared cutter profile; neck/shank/holder above the committed stock under them on every feed move"
         } else {
-            "continuous segment distance to downward-extruded triangles and base; inflated analytic ball contact; shank/holder above admitted committed stock ceiling"
+            "continuous segment clearance against downward-extruded triangles and base with the declared cutter profile; shank/holder above admitted committed stock ceiling"
         };
         plan.stock_ceiling = Some(ceiling);
         Ok(plan)
@@ -671,14 +673,13 @@ impl ParallelPlan {
                     !matches!(cutter.shape, CutterShape::Flat | CutterShape::Bull { .. })
                         || (op.slope_from_deg == 0.
                             && op.slope_to_deg == 90.
-                            && op.rest_threshold_mm.is_none()
                             && !matches!(
                                 op.pattern,
                                 FinishPattern::Pencil { .. }
                                     | FinishPattern::Scallop
                                     | FinishPattern::Geodesic { .. }
                             )),
-                    "slope limits, rest finishing, pencil, scallop and geodesic passes need a ball end mill (a flat end mill has no single contact normal)".into(),
+                    "slope limits, pencil, scallop and geodesic passes need a ball end mill (a flat end mill has no single contact normal)".into(),
                 ),
                 (
                     values.iter().all(|x| x.is_finite()),
@@ -722,11 +723,11 @@ impl ParallelPlan {
                 ),
                 (
                     per_move_depth || spec.max_mm[2] - op.floor_z_mm < cutter.cutting_length_mm - guard,
-                    format!(
+                    crate::reach::ReachRefusal::cutting_length(&op.id, &op.tool, spec.max_mm[2], op.floor_z_mm, cutter.cutting_length_mm).error(format_args!(
                         "depth {} below the stock top exceeds the cutting length {}",
                         spec.max_mm[2] - op.floor_z_mm,
                         cutter.cutting_length_mm
-                    ),
+                    )),
                 ),
                 if matches!(
                     op.pattern,
@@ -1009,15 +1010,19 @@ impl ParallelPlan {
             let guard_angle = 1e-9;
             passes = filter_runs(passes, spacing, |p| {
                 if let Some(f) = &flat {
-                    // Flat end mill: only the limits apply (checked above).
+                    let tip = f.tip(p);
+                    if let (Some(map), Some(threshold)) = (&rest, op.rest_threshold_mm)
+                        && !map.engaged(p, tip, radius, corner.unwrap(), threshold)
+                    {
+                        return Ok(false);
+                    }
                     return region_limits.as_ref().map_or(Ok(true), |l| {
-                        l.margin(p, f.tip(p) - spacing, true)
-                            .map(|m| m >= spacing / 2.)
+                        l.margin(p, tip - spacing, true).map(|m| m >= spacing / 2.)
                     });
                 }
                 let here = surface.contact(p, inflated, &mut slope_work, cancel)?;
                 if let (Some(map), Some(threshold)) = (&rest, op.rest_threshold_mm)
-                    && !map.engaged(p, here.center_z, radius, threshold)
+                    && !map.engaged(p, here.center_z - radius, radius, radius, threshold)
                 {
                     return Ok(false);
                 }
@@ -1039,7 +1044,7 @@ impl ParallelPlan {
             })?;
             if passes.is_empty() && rest.is_some() {
                 return Err(
-                    "rest finishing found no stock above the target by more than the threshold"
+                    "rest finishing selected no resolvable strokes above the threshold; completion remains unproven"
                         .into(),
                 );
             }
@@ -1107,7 +1112,7 @@ impl ParallelPlan {
             flat_reference_scallop_mm: radius
                 - (radius * radius - (pitch / 2.).powi(2)).max(0.).sqrt(),
             work: slope_work,
-            clearance_proof: "continuous segment distance to downward-extruded triangles and base; inflated analytic ball contact; shank/holder above initial stock",
+            clearance_proof: "continuous segment clearance against downward-extruded triangles and base with the declared cutter profile; shank/holder above initial stock",
             surface_completion: "not_certified; path excess is bounded, whole-target scallop/unreachable regions require independent stock checks",
             geodesic: geodesic_report,
         };

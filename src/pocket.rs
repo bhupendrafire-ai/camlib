@@ -457,13 +457,136 @@ pub struct StockTopReport {
     pub maximum_upper_z_mm: f64,
     pub checked_cells: usize,
     pub generation: u64,
+    /// Highest remaining stock outside the region's tool envelope, when it
+    /// stands above the authored top (issue #129). The neck, shank and holder
+    /// sections were proven clear of it before any motion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outside_upper_z_mm: Option<f64>,
+    /// Stock cells above the top that the assembly proof examined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assembly_checked_cells: Option<usize>,
+}
+
+/// What a lower top needs to know about the operation, to judge stock left
+/// above the top outside the region by the tool assembly (issue #129).
+pub(crate) struct ReachScope<'a> {
+    pub(crate) operation: &'a str,
+    pub(crate) tool: &'a ToolAssembly,
+    /// The authored region (before limits, which only restrict it).
+    pub(crate) region: &'a PlanarRegion,
+    /// The lowest tip Z of the operation (floor plus bottom allowance).
+    pub(crate) lowest_tip_z: f64,
+    pub(crate) clearance_z: f64,
+    /// How far a cutter centre may come closer to the region boundary than
+    /// the cutter radius (an adaptive boundary tolerance), beyond the
+    /// numerical slack this module adds itself.
+    pub(crate) boundary_slack_mm: f64,
+}
+
+/// A non-cutting part of the assembly: `bottom..top` above the tip.
+#[derive(Clone, Copy)]
+struct Section {
+    limit: crate::reach::ReachLimit,
+    holder: Option<usize>,
+    bottom: f64,
+    top: f64,
+    radius: crate::verification::Radius,
+}
+impl Section {
+    /// Its largest radius from its bottom up to `height` above the tip
+    /// (profiles are constant or linear, so the ends bound it).
+    fn radius_to(&self, height: f64) -> f64 {
+        self.radius
+            .at(self.bottom)
+            .max(self.radius.at(height.clamp(self.bottom, self.top)))
+    }
+}
+
+/// Stock standing above the authored top outside the region's tool envelope.
+/// Every tool centre the plan can use lies in the region at least
+/// `cutter radius - slack` inside its boundary (the centre set). The plan
+/// proves, for every such centre and every tip at or above `lowest_tip`,
+/// that the neck, shank and holder sections clear that stock; any motion
+/// that leaves the centre set below `highest` is refused (`admit`).
+struct Outside {
+    operation: String,
+    tool: String,
+    region: PreparedRegion,
+    region_bounds: [f64; 4],
+    cutter_radius: f64,
+    slack: f64,
+    sections: Vec<Section>,
+    lowest_tip: f64,
+    clearance: f64,
+    guard: f64,
+    tolerance: f64,
+    /// The highest remaining stock, when it stands above the top.
+    highest: Option<f64>,
+}
+impl Outside {
+    fn new(scope: &ReachScope, tolerance: f64) -> Result<Self, String> {
+        let prepared = scope.tool.prepare()?;
+        let sections = crate::verification::parts(&prepared)?
+            .into_iter()
+            .filter_map(|p| {
+                use crate::{reach::ReachLimit, verification::ToolPart};
+                let limit = match p.kind {
+                    ToolPart::Cutter => return None,
+                    ToolPart::Neck => ReachLimit::Neck,
+                    ToolPart::Shank => ReachLimit::Shank,
+                    ToolPart::Holder => ReachLimit::Holder,
+                };
+                Some(Section {
+                    limit,
+                    holder: p.holder,
+                    bottom: p.min,
+                    top: p.max,
+                    radius: p.radius,
+                })
+            })
+            .collect();
+        let region = scope.region.prepare(ConstructionOptions {
+            tolerance_mm: tolerance,
+        })?;
+        // Empty regions have no tool centres: any box prunes nothing wrongly
+        // (the query then reports every point outside).
+        let bounds = region.bounds().unwrap_or([0.; 4]);
+        let slack = scope.boundary_slack_mm + crate::limits::REGION_CLEARANCE + 64. * tolerance;
+        Ok(Self {
+            operation: scope.operation.into(),
+            tool: scope.tool.id.clone(),
+            region,
+            region_bounds: bounds,
+            cutter_radius: scope.tool.cutter.diameter_mm / 2.,
+            slack,
+            sections,
+            lowest_tip: scope.lowest_tip_z,
+            clearance: scope.clearance_z,
+            guard: 16. * tolerance,
+            tolerance,
+            highest: None,
+        })
+    }
+    /// Signed clearance of `p` from the region boundary (positive inside),
+    /// lowered by its uncertainty.
+    fn clearance_at(&self, p: Point) -> Result<f64, String> {
+        let q = self.region.query(p)?;
+        Ok(q.signed_clearance_mm.unwrap_or(f64::NEG_INFINITY) - q.uncertainty_mm)
+    }
+    fn upper_clearance_at(&self, p: Point) -> Result<f64, String> {
+        let q = self.region.query(p)?;
+        Ok(q.signed_clearance_mm.unwrap_or(f64::NEG_INFINITY) + q.uncertainty_mm)
+    }
 }
 
 /// A lower authored top is valid when preceding operations actually removed the
-/// material. The original stock grid remains unchanged; this is a planning bound.
+/// material the cutter can reach. The original stock grid remains unchanged;
+/// this is a planning bound. Stock left above the top outside the region is
+/// judged by the tool assembly (`Outside`).
 pub(crate) struct StockTop {
     ceiling: f64,
     identity: u64,
+    outside: Outside,
     pub(crate) report: StockTopReport,
 }
 impl StockTop {
@@ -471,6 +594,7 @@ impl StockTop {
         stock: &Stock,
         top: f64,
         tolerance: f64,
+        scope: &ReachScope,
         cancel: &impl CancelSignal,
     ) -> Result<(StockSpec, Option<Self>), String> {
         let mut spec = stock.spec().clone();
@@ -481,46 +605,132 @@ impl StockTop {
             return Err("pocket tolerance_mm must be finite in [1e-7, 0.01]".into());
         }
         let ceiling = top + 16. * tolerance;
-        let maximum = Self::scan(stock, top, ceiling, cancel)?;
+        let mut outside = Outside::new(scope, tolerance)?;
+        let (maximum, examined) = Self::scan(stock, top, ceiling, &mut outside, cancel)?;
         spec.max_mm[2] = top;
         stock.request_sweep_receipts();
+        let tall = outside.highest;
         Ok((
             spec,
             Some(Self {
                 ceiling,
                 identity: stock.identity(),
+                outside,
                 report: StockTopReport {
                     authored_top_z_mm: top,
                     maximum_upper_z_mm: maximum,
                     checked_cells: stock.cells().len(),
                     generation: stock.generation(),
+                    outside_upper_z_mm: tall,
+                    assembly_checked_cells: tall.map(|_| examined),
                 },
             }),
         ))
     }
+    /// The highest stock, and how many cells above the top were examined.
     fn scan(
         stock: &Stock,
         top: f64,
         ceiling: f64,
+        outside: &mut Outside,
         cancel: &impl CancelSignal,
-    ) -> Result<f64, String> {
+    ) -> Result<(f64, usize), String> {
         let mut maximum = f64::NEG_INFINITY;
+        let [dx, dy] = stock.cell_widths_mm();
+        let half = dx.hypot(dy) / 2.;
+        let o = &*outside;
+        let reach = o
+            .sections
+            .iter()
+            .map(|s| s.radius_to(s.top))
+            .fold(0., f64::max);
+        // Per section, the highest obstruction within its radius.
+        let mut blocked = vec![None::<f64>; o.sections.len()];
+        let mut examined = 0;
         for (i, cell) in stock.cells().iter().enumerate() {
             if i.is_multiple_of(1024) && cancel.is_cancelled() {
                 return Err("pocket stock-top inspection cancelled".into());
             }
-            if cell.upper_mm > ceiling {
-                return Err(format!(
-                    "pocket top_z_mm {top} is below remaining stock at cell {i} (upper {} mm); face or clear that stock first, or raise the operation top",
-                    cell.upper_mm
-                ));
-            }
             maximum = maximum.max(cell.upper_mm);
+            if cell.upper_mm <= ceiling {
+                continue;
+            }
+            let refuse = || {
+                format!(
+                    "pocket top_z_mm {top} is below remaining stock at cell {i} (upper {} mm) where the cutter can reach it; face or clear that stock first, or raise the operation top",
+                    cell.upper_mm
+                )
+            };
+            let p = stock.cell_center(i).ok_or("stock cell outside the grid")?;
+            examined += 1;
+            // The distance from this cell to the region's bounding box bounds
+            // its distance to the region from below: far cells need no query.
+            let b = o.region_bounds;
+            let far = ((b[0] - p[0]).max(p[0] - b[2]).max(0.))
+                .hypot((b[1] - p[1]).max(p[1] - b[3]).max(0.))
+                - half;
+            if far > reach + o.guard + o.slack {
+                continue;
+            }
+            // Signed clearance is 1-Lipschitz: every point of the cell is
+            // within `half` of its centre.
+            let inside = o.upper_clearance_at(p)? + half;
+            if inside + o.guard > 0. {
+                return Err(refuse());
+            }
+            // Any centre c of the centre set has clearance >= radius - slack;
+            // a point x of this cell has clearance <= `inside`. Clearance is a
+            // signed distance, so |x - c| is at least their difference.
+            let distance = o.cutter_radius - o.slack - inside;
+            let above_tip = cell.upper_mm - o.lowest_tip;
+            for (k, s) in o.sections.iter().enumerate() {
+                if above_tip <= s.bottom + o.guard {
+                    continue;
+                }
+                if distance < s.radius_to(above_tip) + o.guard {
+                    blocked[k] = Some(blocked[k].map_or(cell.upper_mm, |h| h.max(cell.upper_mm)));
+                }
+            }
         }
         if cancel.is_cancelled() {
             return Err("pocket stock-top inspection cancelled".into());
         }
-        Ok(maximum)
+        if let Some((k, height)) = blocked
+            .iter()
+            .enumerate()
+            .find_map(|(k, h)| h.map(|h| (k, h)))
+        {
+            let s = o.sections[k];
+            let refusal = crate::reach::ReachRefusal {
+                operation: o.operation.clone(),
+                tool: o.tool.clone(),
+                limit: s.limit,
+                holder_section: s.holder,
+                depth_needed_mm: height - o.lowest_tip,
+                depth_available_mm: s.bottom,
+                top_z_mm: height,
+                z_mm: o.lowest_tip,
+            };
+            let part = match s.holder {
+                Some(h) => format!("holder section {h}"),
+                None => format!("{:?}", s.limit).to_lowercase(),
+            };
+            return Err(refusal.error(format_args!(
+                "operation {}: the tool {} {part} (from {} mm above the tip) would meet remaining stock up to Z{height} beside the region: the tip must reach {} mm below it, to Z{}; clear that stock first, or use an assembly whose {part} stands higher or is slimmer",
+                o.operation, o.tool, s.bottom, height - o.lowest_tip, o.lowest_tip
+            )));
+        }
+        let tall = (maximum > ceiling).then_some(maximum);
+        if let Some(h) = tall
+            && o.clearance < h + o.guard
+        {
+            return Err(format!(
+                "operation {}: clearance_z_mm {} must be above the remaining stock (up to Z{h}) because top_z_mm {top} is below it",
+                o.operation, o.clearance
+            ));
+        }
+        outside.highest = tall;
+        Ok((maximum, examined))
     }
     pub(crate) fn validate(
         &mut self,
@@ -534,11 +744,66 @@ impl StockTop {
                 .last_sweep_receipt()
                 .is_some_and(|r| r.base_identity == self.identity)
             {
-                Self::scan(stock, self.report.authored_top_z_mm, self.ceiling, cancel)?;
+                let (_, _) = Self::scan(
+                    stock,
+                    self.report.authored_top_z_mm,
+                    self.ceiling,
+                    &mut self.outside,
+                    cancel,
+                )?;
             }
             self.identity = stock.identity();
         }
         stock.request_sweep_receipts();
+        Ok(())
+    }
+    /// Refuse a planned motion that leaves the proven centre set below the
+    /// remaining stock (or goes below the operation's lowest tip there).
+    pub(crate) fn admit(&self, motion: &Motion) -> Result<(), String> {
+        let o = &self.outside;
+        let Some(highest) = o.highest else {
+            return Ok(());
+        };
+        let path = motion.curve.prepare(o.tolerance)?;
+        let bounds = path.bounds();
+        if bounds.min[2] >= highest + o.guard {
+            return Ok(());
+        }
+        let refuse = |why: &str| {
+            Err(format!(
+                "operation {}: a {:?} move from {:?} to {:?} {why} below the remaining stock top Z{highest} beside the region (operation top Z{}); raise the move above Z{highest}",
+                o.operation,
+                motion.kind,
+                motion.curve.start(),
+                motion.curve.end(),
+                self.report.authored_top_z_mm
+            ))
+        };
+        if bounds.min[2] < o.lowest_tip - o.guard {
+            return refuse("goes deeper than the operation floor");
+        }
+        let error = crate::verification::path_error(motion, o.tolerance);
+        let need = o.cutter_radius - o.slack;
+        let length = path.length_mm();
+        let mut stack = vec![[0., 1.]];
+        let mut steps = 0u64;
+        while let Some([a, b]) = stack.pop() {
+            steps += 1;
+            if steps > 4_000_000 {
+                return refuse("is too long to prove inside the region");
+            }
+            let m = path.position((a + b) / 2.)?;
+            let half = length * (b - a) / 2.;
+            let margin = o.clearance_at([m[0], m[1]])? - error - need;
+            if margin >= half {
+                continue;
+            }
+            if margin <= -half || half <= o.tolerance {
+                return refuse("leaves the region's tool centres");
+            }
+            stack.push([(a + b) / 2., b]);
+            stack.push([a, (a + b) / 2.]);
+        }
         Ok(())
     }
 }
@@ -1024,7 +1289,16 @@ impl PocketPlan {
         first_motion_id: u64,
         cancel: &impl CancelSignal,
     ) -> Result<Self, String> {
-        let (envelope, bound) = StockTop::prepare(stock, op.top_z_mm, op.tolerance_mm, cancel)?;
+        let scope = ReachScope {
+            operation: &op.id,
+            tool: assembly,
+            region: &op.region,
+            lowest_tip_z: op.floor_z_mm + op.bottom_allowance_mm,
+            clearance_z: op.clearance_z_mm,
+            boundary_slack_mm: 0.,
+        };
+        let (envelope, bound) =
+            StockTop::prepare(stock, op.top_z_mm, op.tolerance_mm, &scope, cancel)?;
         let mut plan = Self::prepare(op, assembly, &envelope, initial, first_motion_id, cancel)?;
         if let Some(bound) = bound {
             plan.activate_layer(initial, first_motion_id, stock.spec())?;
@@ -1149,11 +1423,18 @@ impl PocketPlan {
             ),
             (
                 op.top_z_mm - target <= cutter.cutting_length_mm,
-                format!(
+                crate::reach::ReachRefusal::cutting_length(
+                    &op.id,
+                    &op.tool,
+                    op.top_z_mm,
+                    target,
+                    cutter.cutting_length_mm,
+                )
+                .error(format_args!(
                     "pocket depth {} exceeds the cutting length {}",
                     op.top_z_mm - target,
                     cutter.cutting_length_mm
-                ),
+                )),
             ),
         ];
         if let Some((_, why)) = reach.into_iter().find(|(ok, _)| !ok) {
@@ -2267,6 +2548,9 @@ impl PocketPlan {
             self.rest_stock_identity.get_or_insert(stock.identity());
         }
         let result = self.next_with_stock(Some(stock), cancel)?;
+        if let (Some(bound), Some(motion)) = (&self.stock_top, &result) {
+            bound.admit(motion)?;
+        }
         if self.rest_tool.is_some()
             && let Some(motion) = &result
         {
@@ -2660,5 +2944,132 @@ mod tests {
         middle.sort_by(f64::total_cmp);
         assert_eq!(middle, vec![-3., 3.]);
         assert!(pieces.iter().all(|p| p.x_at(3.).is_none()));
+    }
+}
+
+#[cfg(test)]
+mod stock_top_tests {
+    use super::*;
+    use crate::{
+        planar::Component,
+        stock::HeightBounds,
+        tool::{Cutter, HolderSection},
+    };
+
+    fn walled() -> Stock {
+        let spec = StockSpec {
+            version: 1,
+            units: "mm".into(),
+            min_mm: [0.; 3],
+            max_mm: [60., 40., 60.],
+            cell_size_mm: 0.5,
+            max_cells: 1 << 20,
+        };
+        let mut s = Stock::new(spec).unwrap().snapshot();
+        for (i, h) in s.cells.iter_mut().enumerate() {
+            let z = if (i % 120) < 60 { 8. } else { 60. };
+            *h = HeightBounds {
+                lower_mm: z,
+                upper_mm: z,
+            };
+        }
+        Stock::from_snapshot(s).unwrap()
+    }
+    fn tool() -> ToolAssembly {
+        ToolAssembly {
+            id: "em6".into(),
+            cutter: Cutter {
+                id: "c6".into(),
+                name: "em6".into(),
+                shape: CutterShape::Flat,
+                diameter_mm: 6.,
+                cutting_length_mm: 6.,
+                overall_length_mm: 40.,
+                shank_diameter_mm: 6.,
+                flutes: 3,
+                center_cutting: true,
+                material: "carbide".into(),
+                neck: None,
+            },
+            stickout_mm: 15.,
+            gauge_length_mm: 60.,
+            holders: vec![HolderSection {
+                z_min_mm: 15.,
+                z_max_mm: 60.,
+                radius_min_mm: 4.,
+                radius_max_mm: 4.,
+            }],
+        }
+    }
+    fn motion(kind: MoveKind, start: Vec3, end: Vec3) -> Motion {
+        Motion {
+            id: 1,
+            operation: "low".into(),
+            tool: "em6".into(),
+            kind,
+            curve: Curve::Line { start, end },
+            feed_mm_min: (kind != MoveKind::Rapid).then_some(600.),
+        }
+    }
+
+    #[test]
+    fn moves_leaving_the_proven_centres_below_the_remaining_stock_are_refused() {
+        let region = PlanarRegion {
+            version: 1,
+            units: "mm".into(),
+            name: "low".into(),
+            boundary_error_mm: 0.,
+            source: serde_json::Value::Null,
+            components: vec![Component {
+                outer: Boundary {
+                    vertices: vec![
+                        [10., 10., 0.],
+                        [22., 10., 0.],
+                        [22., 30., 0.],
+                        [10., 30., 0.],
+                    ],
+                },
+                holes: vec![],
+            }],
+        };
+        let t = tool();
+        let scope = ReachScope {
+            operation: "low",
+            tool: &t,
+            region: &region,
+            lowest_tip_z: 4.,
+            clearance_z: 65.,
+            boundary_slack_mm: 0.,
+        };
+        let stock = walled();
+        let (spec, bound) = StockTop::prepare(&stock, 8., 1e-5, &scope, &|| false).unwrap();
+        assert_eq!(spec.max_mm[2], 8.);
+        let bound = bound.unwrap();
+        assert_eq!(bound.report.outside_upper_z_mm, Some(60.));
+        // Inside the centre set (3 mm in from the edge) at any planned depth.
+        bound
+            .admit(&motion(MoveKind::Cut, [13., 13., 4.], [19., 27., 4.]))
+            .unwrap();
+        bound
+            .admit(&motion(MoveKind::Rapid, [19., 27., 4.], [19., 27., 20.]))
+            .unwrap();
+        // Above all remaining stock, anywhere.
+        bound
+            .admit(&motion(MoveKind::Rapid, [-20., -20., 65.], [50., 30., 65.]))
+            .unwrap();
+        // Leaving the centres below the wall top, or the cutter edge
+        // crossing the region edge, is refused.
+        for m in [
+            motion(MoveKind::Rapid, [19., 20., 20.], [40., 20., 20.]),
+            motion(MoveKind::Link, [13., 13., 10.], [13., 5., 10.]),
+            motion(MoveKind::Cut, [13., 13., 4.], [21., 13., 4.]),
+            motion(MoveKind::Cut, [13., 13., 4.], [13., 13., 3.]),
+        ] {
+            let error = bound.admit(&m).unwrap_err();
+            assert!(
+                error.contains("below the remaining stock top Z60"),
+                "{error}"
+            );
+        }
     }
 }

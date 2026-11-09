@@ -62,8 +62,24 @@ Rigid tapping needs `rigid_tapping=True`, the premise that parameter No.
 5200#0 (G84) is 1, so G84 and G74 are rigid tapping cycles without `M29`
 (§13.2.1–13.2.2). A right-hand tap is written `G84 X Y Z R F` under `M3`, a
 left-hand tap (`Tapping(hand="left")`) `G74 X Y Z R F` under `M4`, each
-followed by `G80`. F = lead × S (G94). Without the premise, tapping is
-refused; the `M29 S` form is not written.
+followed by `G80`. F = lead × S (G94).
+
+Machines that keep 5200#0 = 0 declare `rigid_tapping_m29=True` instead: rigid
+mode is then selected by `M29 S…` in the block before each cycle, the form of
+the manual's examples (§13.2.1–13.2.2), and S repeats the running spindle speed:
+
+```
+M29 S600
+G84 X8. Y8. Z4. R11. F600.
+G80
+```
+
+The decoder requires the `M29 S` block directly before every `G84`/`G74`
+(an S word or axis move between them is P/S alarm 203/204, Appendix G),
+refuses a cycle without it and an `M29` whose S differs from the running
+speed, and refuses `M29` under `rigid_tapping=True`. Under this premise M29
+cannot be bound to an OEM function. The two premises are exclusive; with
+neither, tapping is refused.
 Cutter compensation is started and cancelled in the block of the straight XY
 lead move (§14.4): `G1 G41 D… X… Y… F…` and `G1 G40 X… Y… F…`. Offset memory A
 keeps one value per number for H and D, so every tool's D register must

@@ -216,6 +216,9 @@ pub fn post(input: Input, run_id: String, cancel: &impl CancelSignal) -> Result<
             revision: header.revision.clone(),
         },
         stock: manifest.stock.clone(),
+        // The declared blank the plan started from (#133): the replay
+        // must start from the same material.
+        initial_stock: manifest.initial_stock.clone(),
         tools: header.tools.clone(),
         initial_position_mm: decoded_initial,
         sweep: manifest.sweep,

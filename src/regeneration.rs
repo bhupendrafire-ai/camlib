@@ -778,13 +778,13 @@ pub fn run_uncached(
             },
             DEFAULT_FRAME_LIMIT,
         )?)?;
-        if let Some(start) = producer.start_material_verification(Some(operation.id()))? {
+        while let Some(start) = producer.start_material_verification(Some(operation.id()))? {
             send(&start)?;
             send(&producer.finish_material_verification(cancel)?)?;
         }
     }
 
-    if let Some(start) = producer.start_material_verification(None)? {
+    while let Some(start) = producer.start_material_verification(None)? {
         send(&start)?;
         send(&producer.finish_material_verification(cancel)?)?;
     }
@@ -1041,12 +1041,12 @@ pub fn run(
                 &mut send,
             )?;
         }
-        if let Some(start) = producer.start_material_verification(Some(op.id()))? {
+        while let Some(start) = producer.start_material_verification(Some(op.id()))? {
             send(&start)?;
             send(&producer.finish_material_verification(cancel)?)?;
         }
     }
-    if let Some(start) = producer.start_material_verification(None)? {
+    while let Some(start) = producer.start_material_verification(None)? {
         send(&start)?;
         send(&producer.finish_material_verification(cancel)?)?;
     }
