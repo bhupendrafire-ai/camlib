@@ -1,8 +1,9 @@
-"""Deburr (#11, #92): the top and accessible side edges of a pocketed part are
-broken to the requested size with a chamfer, ball-end or bull-nose mill;
-concave edges and unreachable stretches are reported, never silently
-dropped."""
+"""Deburr (#11, #92, #93): the top and accessible side edges of a part are
+broken to the requested size with a chamfer, ball-end or bull-nose mill,
+next to vertical or drafted walls; concave, already broken (filleted) and
+unreachable stretches are reported, never silently dropped."""
 
+import math
 import unittest
 
 from camlib import Deburr, Job, OperationNode, Pocket, Setup, StockSpec
@@ -93,6 +94,22 @@ def job(levels, surface, region, deburr=None):
         (0, 0, 40),
     )
     return Job("deburr", "1", (setup,))
+
+
+def _chamfer_top(solid, top_leg, wall_leg):
+    """The solid with its top face's edges chamfered top_leg on the top face
+    and wall_leg on the walls (CadQuery's two lengths go to the faces in an
+    order of its own: the one that leaves the top face as asked is kept)."""
+    for first, second in ((top_leg, wall_leg), (wall_leg, top_leg)):
+        chamfered = solid.faces(">Z").edges().chamfer(first, second)
+        top = chamfered.faces(">Z").val()
+        expected = solid.faces(">Z").val().Area()
+        box = solid.faces(">Z").val().BoundingBox()
+        # Each side moves in by top_leg.
+        width, depth = box.xlen - 2 * top_leg, box.ylen - 2 * top_leg
+        if abs(top.Area() - width * depth) < 1e-6 * expected:
+            return chamfered
+    raise AssertionError("CadQuery's chamfer did not leave the requested top leg")
 
 
 @unittest.skipIf(cq is None, "CadQuery is required")
@@ -230,6 +247,101 @@ class DeburrTest(unittest.TestCase):
                 self.assertEqual(material["gouge"]["definite_cells"], 0, material["gouge"])
                 # Against the sharp part the breaks are a definite violation.
                 self.assertEqual(material_status(Verifier(sharp, Options(max_findings=64)).check(state)), "violation")
+
+    def _deburr_only(self, solid, width_mm=0.5, tool=C90):
+        """Runs Deburr alone on a block of stock around ``solid`` (the stock
+        outside the part is not machined first: only gouges are checked)."""
+        from camlib.cadquery import deburr_levels, export_surface_mesh
+
+        levels = deburr_levels(solid, source={"test": "deburr"})
+        surface = export_surface_mesh(solid, max_error_mm=0.001)
+        box = solid.val().BoundingBox()
+        op = Deburr(
+            "deburr",
+            tool,
+            surface,
+            levels,
+            width_mm,
+            30,
+            tip_clearance_mm=0.3,
+            feed_mm_min=600,
+            plunge_mm_min=200,
+            spindle_rpm=10000,
+            tool_number=2,
+            length_register=2,
+            coolant="flood",
+        )
+        setup = Setup(
+            "top",
+            StockSpec((box.xmin - 4, box.ymin - 4, box.zmin), (box.xmax + 4, box.ymax + 4, box.zmax), 0.1),
+            (tool,),
+            (OperationNode(op, sources=()),),
+            (box.xmin - 4, box.ymin - 4, 40),
+        )
+        report = None
+        with Job("deburr", "1", (setup,)).regenerate() as run:
+            for event in run:
+                update = event.update
+                if isinstance(update, OperationUpdate) and update.stage == "end" and update.operation == "deburr":
+                    report = update.report
+            self.assertTrue(run.finished)
+            state = run.states["top"]
+        return report, state
+
+    def test_drafted_block_is_broken_all_round_to_the_requested_width(self):
+        from camlib.cadquery import export_inner_patches, export_surface_mesh
+        from camlib.material import Options, SurfaceTarget, Verifier
+
+        draft = 5
+        solid = cq.Workplane("XY").rect(30, 20).extrude(10, taper=draft)
+        report, state = self._deburr_only(solid)
+        self.assertEqual(report["skipped"], [])
+        self.assertEqual(report["unreachable_length_mm"], 0)
+        (level,) = report["level_details"]
+        self.assertAlmostEqual(level["max_wall_draft_deg"], draft, places=6)
+        # The cone (45 degrees) ends the break on the drafted wall at depth
+        # h = w / (tan 45 - tan 5); its lower edge keeps the tip clearance:
+        # the axis is at least h tan 5 further out than for a vertical wall,
+        # and at most w k / (1 - k), k = sqrt 2 tan 5, where the drafted
+        # corner edges lean out sqrt 2 times as far.
+        t = math.tan(math.radians(draft))
+        h, k = 0.5 / (1 - t), math.sqrt(2) * t
+        x = level["axis_offset_mm"]
+        self.assertTrue(0.4 + h * t - 1e-9 <= x <= 0.4 + 0.5 * k / (1 - k) + 1e-9, level)
+        # The face width is exact: the cone's radius at the face is x + 0.5.
+        self.assertAlmostEqual(level["tip_z_mm"], 10 - (x + 0.5 - 0.1), places=9)
+        # Material: against the part chamfered by CadQuery with those legs
+        # (0.5 on the top face, h / cos(draft) along the drafted wall).
+        chamfered = _chamfer_top(solid, 0.5, h / math.cos(math.radians(draft)))
+        target = SurfaceTarget(
+            "chamfered",
+            "1",
+            export_surface_mesh(chamfered, max_error_mm=0.001),
+            0,
+            inner_patches=export_inner_patches(chamfered),
+        )
+        material = Verifier(target, Options(max_findings=4096)).check(state)
+        self.assertEqual(material["gouge"]["definite_cells"], 0, material["gouge"])
+
+    def test_draft_beyond_the_half_angle_is_reported(self):
+        solid = cq.Workplane("XY").rect(30, 20).extrude(2, taper=50)
+        report, _ = self._deburr_only(solid)
+        self.assertEqual(report["runs"], 0)
+        self.assertGreater(report["unreachable_length_mm"], 2 * (30 + 20) - 2 * 4 * 2 * math.tan(math.radians(50)))
+        self.assertTrue(all("drafted too steeply" in s["reason"] for s in report["skipped"]), report["skipped"])
+
+    def test_filleted_edges_are_reported_as_already_broken(self):
+        # A block with its two long top edges filleted: those count as broken.
+        solid = cq.Workplane("XY").box(30, 20, 10, centered=False).edges("|X and >Z").fillet(1)
+        report, _ = self._deburr_only(solid)
+        broken = [s for s in report["skipped"] if "already broken" in s["reason"]]
+        # Both long edges (30 each) and the path's corner arcs around them.
+        self.assertGreater(report["already_broken_length_mm"], 2 * 30)
+        self.assertTrue(broken)
+        # The sharp short edges are cut; only where the cone would reach the
+        # fillet's end (a curved edge, #94) next to each corner are they not.
+        self.assertGreater(report["cut_length_mm"], 2 * 18 - 4 * 2)
+        self.assertLess(report["unreachable_length_mm"], 4 * 2)
 
     def test_needs_a_chamfer_mill(self):
         from camlib.cadquery import deburr_levels, export_surface_mesh

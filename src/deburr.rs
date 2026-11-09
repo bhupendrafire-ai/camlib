@@ -65,6 +65,19 @@ pub struct DeburrLevel {
     /// The upward-facing planar faces at this height (unioned).
     pub regions: Vec<PlanarRegion>,
     pub z_mm: f64,
+    /// Stretches of the faces' boundaries that are already broken (the face
+    /// meets a fillet tangentially): reported as such, not as unreachable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub broken_edges: Vec<DeburrBrokenEdge>,
+}
+
+/// A boundary stretch with no sharp edge (a tangent fillet), as an XY
+/// polyline within `error_mm` of the edge.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeburrBrokenEdge {
+    pub points: Vec<[f64; 2]>,
+    pub error_mm: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,11 +200,44 @@ pub struct DeburrReport {
     /// Every stretch not cut, with its reason.
     pub skipped: Vec<SkippedSpan>,
     pub obstacle_triangles: usize,
+    /// Boundary stretches already broken (a tangent fillet; no sharp edge).
+    pub already_broken_length_mm: f64,
+    /// Per level: where the tool ran and the steepest drafted wall broken.
+    pub level_details: Vec<DeburrLevelReport>,
     pub clearance_proof: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DeburrLevelReport {
+    pub z_mm: f64,
+    /// The tool axis's distance outward from the face boundary at this level
+    /// (larger than `axis_offset_mm` when a drafted wall is broken, so the
+    /// break's lower edge on it keeps the tip clearance).
+    pub axis_offset_mm: f64,
+    pub tip_z_mm: f64,
+    /// The steepest drafted wall below an edge at this level that the break
+    /// ends on (0: only vertical walls).
+    pub max_wall_draft_deg: f64,
 }
 
 const CONCAVE: &str = "concave edge: the part rises above the face there (nothing to break)";
 const UNPROVEN: &str = "not proven clear of the rest of the part (whole tool assembly)";
+const ALREADY_BROKEN: &str =
+    "already broken: the face meets a fillet tangentially there (no sharp edge)";
+const DRAFT_STEEP: &str = "the wall below the edge is drafted too steeply for the chamfer mill (at or near its half angle, or the edge is already chamfered or rounded): the cone cannot end the break on it within its radius";
+const DRAFT_ARC: &str = "the wall below the edge is drafted: ball-end and bull-nose breaks are proven against vertical walls only (use a chamfer mill)";
+
+/// XY distance from `p` to the segment a-b.
+fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    stroke_distance(p, &Stroke { a, b, arc: None })
+}
+
+/// A feature that explains why a stretch near it was not cut.
+struct Label {
+    segments: Vec<([f64; 2], [f64; 2])>,
+    reach: f64,
+    reason: &'static str,
+}
 
 /// One continuous cut at a level's tip height.
 struct Run {
@@ -234,6 +280,71 @@ fn clip(t: [Vec3; 3], c: f64, above: bool) -> Vec<[Vec3; 3]> {
     (1..poly.len().saturating_sub(1))
         .map(|i| [poly[0], poly[i], poly[i + 1]])
         .collect()
+}
+
+/// Exact half-space clip of a triangle (keep n . p >= c), as triangles.
+fn clip_half(t: [Vec3; 3], n: Vec3, c: f64) -> Vec<[Vec3; 3]> {
+    let side = |p: &Vec3| n[0] * p[0] + n[1] * p[1] + n[2] * p[2] - c;
+    let mut poly: Vec<Vec3> = Vec::with_capacity(4);
+    for k in 0..3 {
+        let (p, q) = (t[k], t[(k + 1) % 3]);
+        let (sp, sq) = (side(&p), side(&q));
+        if sp >= 0. {
+            poly.push(p);
+        }
+        if (sp >= 0.) != (sq >= 0.) {
+            let s = sp / (sp - sq);
+            poly.push(std::array::from_fn(|i| p[i] + s * (q[i] - p[i])));
+        }
+    }
+    (1..poly.len().saturating_sub(1))
+        .map(|i| [poly[0], poly[i], poly[i + 1]])
+        .collect()
+}
+
+/// XY distance from `p` to the infinite line through a and b.
+fn line_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let l = d[0].hypot(d[1]);
+    if l == 0. {
+        return (p[0] - a[0]).hypot(p[1] - a[1]);
+    }
+    ((p[0] - a[0]) * d[1] - (p[1] - a[1]) * d[0]).abs() / l
+}
+
+/// A piece in the vertical plane of the segment a-b, split into the part
+/// over the segment (within `slack` past its ends) and the rest.
+fn split_under(
+    piece: [Vec3; 3],
+    a: [f64; 2],
+    b: [f64; 2],
+    slack: f64,
+) -> (Vec<[Vec3; 3]>, Vec<[Vec3; 3]>) {
+    let l = (b[0] - a[0]).hypot(b[1] - a[1]);
+    let u = [(b[0] - a[0]) / l, (b[1] - a[1]) / l, 0.];
+    let (lo, hi) = (
+        u[0] * a[0] + u[1] * a[1] - slack,
+        u[0] * b[0] + u[1] * b[1] + slack,
+    );
+    let minus = [-u[0], -u[1], 0.];
+    let mut under = vec![];
+    for p in clip_half(piece, u, lo) {
+        under.extend(clip_half(p, minus, -hi));
+    }
+    let mut beyond = clip_half(piece, minus, -lo);
+    beyond.extend(clip_half(piece, u, hi));
+    (under, beyond)
+}
+
+/// A triangle's (unnormalised) normal.
+fn normal(t: &[Vec3; 3]) -> Vec3 {
+    let u: Vec3 = std::array::from_fn(|k| t[1][k] - t[0][k]);
+    let v: Vec3 = std::array::from_fn(|k| t[2][k] - t[0][k]);
+    [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ]
 }
 
 /// Horizontal distance from `p` to a stroke (line or arc).
@@ -336,9 +447,25 @@ struct Prover {
     part: Index,
     part_seen: Vec<u32>,
     part_stamp: u32,
+    /// Already-broken edges and drafted walls the tool cannot break, in
+    /// the order their reasons apply.
+    labels: Vec<Label>,
 }
 
 impl Prover {
+    /// Why a stretch at `p` (on the tool path) was not cut, beyond being
+    /// concave: a nearby label, else not proven.
+    fn reason(&self, p: Vec3) -> &'static str {
+        let q = [p[0], p[1]];
+        self.labels
+            .iter()
+            .find(|l| {
+                l.segments
+                    .iter()
+                    .any(|(a, b)| segment_distance(q, *a, *b) <= l.reach)
+            })
+            .map_or(UNPROVEN, |l| l.reason)
+    }
     /// Whether the part rises above `z` under the point (a tool centre on a
     /// concave stretch lies inside the wall rising from the face).
     fn inside_part_above(&mut self, p: Vec3, z: f64) -> bool {
@@ -737,6 +864,8 @@ impl DeburrPlan {
             skipped_length_mm: 0.,
             skipped: vec![],
             obstacle_triangles: 0,
+            already_broken_length_mm: 0.,
+            level_details: vec![],
             clearance_proof: "exact section contact (cone or corner arc, neck, shank, holder) against the part above the level, below the break and any non-face/non-wall geometry in the break band; sections grown by the surface error, two stock cell diagonals and each arc chord's sagitta",
         };
         let mut runs = vec![];
@@ -746,7 +875,6 @@ impl DeburrPlan {
                 return Err("deburr planning cancelled".into());
             }
             let z_e = level.z_mm;
-            let tip = z_e - top;
             // The face: union of the level's regions.
             let mut face = level.regions[0].prepare(options)?;
             for r in &level.regions[1..] {
@@ -760,8 +888,6 @@ impl DeburrPlan {
                     "deburr level {li} (Z{z_e}): face boundary uncertainty {error} exceeds the boundary_tolerance_mm budget"
                 ));
             }
-            // camlib offsets are positive inward (clearance): grow outward.
-            let center = face.offset(-(d + error + margin))?.region;
             let boundary_strokes: Vec<Stroke> = face
                 .definition()
                 .components
@@ -780,18 +906,141 @@ impl DeburrPlan {
             let grow = e + 2. * spec.cell_size_mm * std::f64::consts::SQRT_2;
             // The wall is cut down to where the grown tool's end reaches
             // the wall's distance d from the axis.
-            let wall_bottom = match geometry.arc {
+            let vertical_bottom = match geometry.arc {
                 None => z_e - depth - grow * rise,
-                Some(_) => tip + sections[0].profile((d - grow).max(0.)).unwrap_or(0.),
+                Some(_) => z_e - top + sections[0].profile((d - grow).max(0.)).unwrap_or(0.),
             };
-            let (low, high) = (wall_bottom - band, z_e + band);
-            let on_boundary = |p: Vec3| {
+            let high = z_e + band;
+            let slack = e + op.boundary_tolerance_mm + error + guard;
+            let boundary = |p: Vec3| {
                 boundary_strokes
                     .iter()
                     .map(|s| stroke_distance([p[0], p[1]], s))
                     .fold(f64::INFINITY, f64::min)
-                    <= e + op.boundary_tolerance_mm + error + guard
             };
+            let on_boundary = |p: Vec3| boundary(p) <= slack;
+            // A wall hanging off the boundary below the edge (drafted at
+            // beta from vertical: each point s = depth tan(beta) out from
+            // the boundary; at a convex corner between drafted walls up to
+            // sqrt 2 times that). For a non-vertical piece, k is the least
+            // slope with s <= depth k + slack at its vertices and centroid
+            // (the same slack as a vertical wall). The cone (half angle
+            // alpha) at offset X reaches a point only if its distance from
+            // the path, at least X - s, is below X + width - depth
+            // tan(alpha): only above the depth (width + slack) / (tan(alpha)
+            // - k), the proof's grown and lowered tool a little deeper. The
+            // piece is excluded down to there and is an obstacle below, so
+            // the proof catches anything deeper. Returns (k, the piece's
+            // own draft slope, whether it touches the edge).
+            let hanging = |piece: &[Vec3; 3]| -> Option<(f64, f64, bool)> {
+                let n = normal(piece);
+                let (horizontal, up) = (n[0].hypot(n[1]), n[2].abs());
+                if horizontal == 0. || up <= 1e-9 * horizontal {
+                    return None;
+                }
+                let mid = std::array::from_fn(|k| (piece[0][k] + piece[1][k] + piece[2][k]) / 3.);
+                let (mut k, mut touches) = (0f64, false);
+                for p in piece.iter().chain([&mid]) {
+                    let (depth, s) = (z_e - p[2], boundary(*p));
+                    if depth <= band {
+                        // At the edge's height: on the boundary.
+                        if s > slack {
+                            return None;
+                        }
+                        touches = true;
+                    } else {
+                        k = k.max((s - slack).max(0.) / depth);
+                    }
+                }
+                Some((k, up / horizontal, touches))
+            };
+            // The steepest draft whose break still fits the cone: the axis
+            // offset X(s) = d + width s / (tan(alpha) - s) plus the width
+            // within the cone's radius r: s <= tan(alpha) K / (width + K),
+            // K = r - width - d. None for a ball or bull-nose end.
+            let width = geometry.face;
+            let tan_alpha = match geometry.arc {
+                None => 1. / sections[0].rise,
+                Some(_) => 0.,
+            };
+            let room = (sections[0].r1 - width - d).max(0.);
+            let max_slope = tan_alpha * room / (width + room);
+            // Drafted walls hanging off the edge (below it, within the
+            // vertical wall's band): the axis moves out so the break's
+            // lower edge on the steepest keeps the tip clearance.
+            let mut steepest = 0f64;
+            let mut labels = vec![];
+            if !level.broken_edges.is_empty() {
+                let mut segments = vec![];
+                let mut reach: f64 = 0.;
+                for b in &level.broken_edges {
+                    if b.points.len() < 2
+                        || b.points.iter().flatten().any(|v| !v.is_finite())
+                        || !(0. ..=0.1).contains(&b.error_mm)
+                    {
+                        return Err(format!(
+                            "deburr level {li}: a broken edge needs at least two finite points and error_mm within 0..0.1"
+                        ));
+                    }
+                    reach = reach.max(b.error_mm);
+                    segments.extend(b.points.windows(2).map(|w| (w[0], w[1])));
+                }
+                labels.push(Label {
+                    segments,
+                    reach,
+                    reason: ALREADY_BROKEN,
+                });
+            }
+            let mut steep = vec![];
+            let (mut drafted, mut draft_slope) = (false, 0f64);
+            for t in op.surface.triangles.iter() {
+                for piece in clip(*t, high, false)
+                    .into_iter()
+                    .flat_map(|p| clip(p, vertical_bottom - band, true))
+                {
+                    if piece.iter().all(|p| (p[2] - z_e).abs() <= band) {
+                        continue;
+                    }
+                    if let Some((k, slope, touches)) = hanging(&piece) {
+                        if k <= max_slope {
+                            drafted = true;
+                            steepest = steepest.max(k);
+                            draft_slope = draft_slope.max(slope);
+                        } else if touches {
+                            steep.extend((0..3).map(|k| {
+                                (
+                                    [piece[k][0], piece[k][1]],
+                                    [piece[(k + 1) % 3][0], piece[(k + 1) % 3][1]],
+                                )
+                            }));
+                        }
+                    }
+                }
+            }
+            let d = d + width * steepest / (tan_alpha - steepest).max(f64::MIN_POSITIVE);
+            let top = match geometry.arc {
+                None => actual.cutter().tip_height_at_radius(d + width).ok_or(format!(
+                    "deburr level {li} (Z{z_e}): the axis offset {d:.4} for its drafted walls plus the width exceeds the chamfer mill's cone radius"
+                ))?,
+                Some(_) => top,
+            };
+            let tip = z_e - top;
+            if tip < spec.min_mm[2] {
+                return Err(format!(
+                    "deburr level {li} (Z{z_e}): the tool tip {tip:.4} would be below the stock"
+                ));
+            }
+            // The proof also lowers the tool by the surface error (lift),
+            // which widens the cone by e tan(alpha) at every height.
+            let depth_for =
+                |slope: f64| (width + grow + slack + e * tan_alpha) / (tan_alpha - slope);
+            let low = if drafted {
+                (vertical_bottom - band).min(z_e - depth_for(steepest) - band)
+            } else {
+                vertical_bottom - band
+            };
+            // camlib offsets are positive inward (clearance): grow outward.
+            let center = face.offset(-(d + error + margin))?.region;
             let mut obstacles = vec![];
             for t in op.surface.triangles.iter() {
                 obstacles.extend(clip(*t, high, true));
@@ -801,32 +1050,77 @@ impl DeburrPlan {
                     .flat_map(|p| clip(p, low, true))
                 {
                     let horizontal = piece.iter().all(|p| (p[2] - z_e).abs() <= band);
-                    let u = [
-                        piece[1][0] - piece[0][0],
-                        piece[1][1] - piece[0][1],
-                        piece[1][2] - piece[0][2],
-                    ];
-                    let v = [
-                        piece[2][0] - piece[0][0],
-                        piece[2][1] - piece[0][1],
-                        piece[2][2] - piece[0][2],
-                    ];
-                    let n = [
-                        u[1] * v[2] - u[2] * v[1],
-                        u[2] * v[0] - u[0] * v[2],
-                        u[0] * v[1] - u[1] * v[0],
-                    ];
+                    let n = normal(&piece);
                     let norm = n[0].hypot(n[1]).hypot(n[2]);
                     let vertical = norm > 0. && n[2].abs() <= 1e-9 * norm;
                     let mid =
                         std::array::from_fn(|k| (piece[0][k] + piece[1][k] + piece[2][k]) / 3.);
-                    let wall =
-                        vertical && piece.iter().all(|p| on_boundary(*p)) && on_boundary(mid);
-                    if !(horizontal || wall || norm == 0.) {
-                        obstacles.push(piece);
+                    if horizontal || norm == 0. {
+                        continue;
+                    }
+                    // Excluded down to `bottom`: the break ends above it.
+                    let bottom =
+                        if vertical && piece.iter().all(|p| on_boundary(*p)) && on_boundary(mid) {
+                            Some(vertical_bottom - band)
+                        } else {
+                            hanging(&piece)
+                                .filter(|(k, ..)| drafted && *k <= steepest)
+                                .map(|(k, ..)| z_e - depth_for(k) - band)
+                        };
+                    match bottom {
+                        // Wholly inside the excluded band.
+                        Some(b) if piece.iter().all(|p| p[2] >= b) => {}
+                        Some(b) => obstacles.extend(clip(piece, b, false)),
+                        // A vertical wall reaching past a straight stretch of
+                        // the boundary in its plane (an end wall that also
+                        // closes a fillet's or chamfer's profile): the part
+                        // under the stretch is the wall, the rest an
+                        // obstacle.
+                        None if vertical => {
+                            let line = boundary_strokes.iter().find(|s| {
+                                s.arc.is_none()
+                                    && piece
+                                        .iter()
+                                        .all(|p| line_distance([p[0], p[1]], s.a, s.b) <= slack)
+                            });
+                            match line {
+                                Some(s) => {
+                                    let (under, beyond) = split_under(piece, s.a, s.b, slack);
+                                    let b = vertical_bottom - band;
+                                    for p in under {
+                                        obstacles.extend(clip(p, b, false));
+                                    }
+                                    obstacles.extend(beyond);
+                                }
+                                None => obstacles.push(piece),
+                            }
+                        }
+                        None => obstacles.push(piece),
                     }
                 }
             }
+            if !steep.is_empty() {
+                labels.push(Label {
+                    segments: steep,
+                    reach: d + slack,
+                    reason: if geometry.arc.is_some() {
+                        DRAFT_ARC
+                    } else {
+                        DRAFT_STEEP
+                    },
+                });
+            }
+            for l in &mut labels {
+                if l.reason == ALREADY_BROKEN {
+                    l.reach += d + slack;
+                }
+            }
+            report.level_details.push(DeburrLevelReport {
+                z_mm: z_e,
+                axis_offset_mm: d,
+                tip_z_mm: tip,
+                max_wall_draft_deg: draft_slope.atan().to_degrees(),
+            });
             report.obstacle_triangles += obstacles.len();
             let mesh = SurfaceMesh {
                 version: 1,
@@ -848,6 +1142,7 @@ impl DeburrPlan {
                 lift: e,
                 sagitta: band,
                 stamp: 0,
+                labels,
             };
             for component in &center.components {
                 for (hole, b) in std::iter::once((false, &component.outer))
@@ -894,7 +1189,14 @@ impl DeburrPlan {
             .filter(|s| s.reason == CONCAVE)
             .map(|s| s.length_mm)
             .sum();
-        report.unreachable_length_mm = report.skipped_length_mm - report.concave_length_mm;
+        report.already_broken_length_mm = report
+            .skipped
+            .iter()
+            .filter(|s| s.reason == ALREADY_BROKEN)
+            .map(|s| s.length_mm)
+            .sum();
+        report.unreachable_length_mm =
+            report.skipped_length_mm - report.concave_length_mm - report.already_broken_length_mm;
         if first_id == 0 {
             return Err("deburr motion ids start at 1".into());
         }
@@ -967,7 +1269,7 @@ impl DeburrPlan {
                 let reason = if prover.inside_part_above(mid, tip + band) {
                     CONCAVE
                 } else {
-                    UNPROVEN
+                    prover.reason(mid)
                 };
                 match report.skipped.last_mut() {
                     Some(last)

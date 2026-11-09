@@ -417,7 +417,9 @@ def export_floor_region(face, *, name, source, work_frame=None, max_error_mm=0.0
     return region
 
 
-def deburr_levels(shape, *, source=None, max_error_mm=0.005, level_tolerance_mm=1e-6, cancel=None):
+def deburr_levels(
+    shape, *, source=None, max_error_mm=0.005, level_tolerance_mm=1e-6, tangent_tolerance_deg=0.05, cancel=None
+):
     """The upward-facing planar faces of a solid, grouped by height, as
     ``camlib.operations.DeburrLevel`` (highest first), for ``camlib.Deburr``.
 
@@ -426,11 +428,34 @@ def deburr_levels(shape, *, source=None, max_error_mm=0.005, level_tolerance_mm=
     ``export_floor_region``. Faces within ``level_tolerance_mm`` in height
     form one level. Which boundary stretches are convex edges to break, and
     which are concave (a wall rises there), the operation decides against the
-    part itself.
+    part itself. Boundary edges where the face meets the next face
+    tangentially (within ``tangent_tolerance_deg``, as OpenCascade's
+    ``BRepOffset_Analyse`` classifies them: a fillet) are already broken:
+    each is listed as a ``DeburrBrokenEdge`` polyline within ``max_error_mm``
+    of the edge, and reported as such instead of unreachable.
     """
-    from .operations import DeburrLevel
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.BRepOffset import BRepOffset_Analyse
+    from OCP.ChFiDS import ChFiDS_TypeOfConcavity
+    from OCP.GCPnts import GCPnts_QuasiUniformDeflection
 
+    from .operations import DeburrBrokenEdge, DeburrLevel
+
+    if not (math.isfinite(tangent_tolerance_deg) and 0 < tangent_tolerance_deg <= 1):
+        raise ValueError("tangent_tolerance_deg must be within (0, 1]")
     solid = shape.val() if hasattr(shape, "val") else shape
+    analyse = BRepOffset_Analyse(solid.wrapped, math.radians(tangent_tolerance_deg))
+
+    def tangent(edge):
+        intervals = analyse.Type(edge.wrapped)
+        return bool(intervals) and all(i.Type() == ChFiDS_TypeOfConcavity.ChFiDS_Tangential for i in intervals)
+
+    def polyline(edge):
+        sampler = GCPnts_QuasiUniformDeflection(BRepAdaptor_Curve(edge.wrapped), max_error_mm)
+        if not sampler.IsDone() or sampler.NbPoints() < 2:
+            raise ValueError("deburr_levels could not sample a tangent boundary edge")
+        return tuple((p.X(), p.Y()) for p in (sampler.Value(i) for i in range(1, sampler.NbPoints() + 1)))
+
     groups = []
     for index, face in enumerate(solid.Faces()):
         _fixture_cancel(cancel)
@@ -447,13 +472,17 @@ def deburr_levels(shape, *, source=None, max_error_mm=0.005, level_tolerance_mm=
             max_error_mm=max_error_mm,
             cancel=cancel,
         )
+        broken = [DeburrBrokenEdge(polyline(edge), max_error_mm) for edge in face.Edges() if tangent(edge)]
         for group in groups:
             if abs(group[0] - z) <= level_tolerance_mm:
                 group[1].append(region)
+                group[2].extend(broken)
                 break
         else:
-            groups.append((z, [region]))
-    return tuple(DeburrLevel(tuple(regions), z) for z, regions in sorted(groups, key=lambda g: -g[0]))
+            groups.append((z, [region], broken))
+    return tuple(
+        DeburrLevel(tuple(regions), z, tuple(broken)) for z, regions, broken in sorted(groups, key=lambda g: -g[0])
+    )
 
 
 def _analytic_floor_region(

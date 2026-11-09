@@ -754,19 +754,44 @@ class Flat:
 
 
 @dataclass(frozen=True)
+class DeburrBrokenEdge:
+    """A boundary stretch of a deburr level's faces that is already broken:
+    the face meets the next face tangentially (a fillet), so there is no
+    sharp edge to break. ``points`` is a polyline in XY within ``error_mm``
+    of the edge."""
+
+    points: tuple
+    error_mm: float
+
+    def __post_init__(self):
+        object.__setattr__(self, "points", tuple((float(x), float(y)) for x, y in self.points))
+
+    def to_dict(self):
+        return dict(points=[list(p) for p in self.points], error_mm=float(self.error_mm))
+
+
+@dataclass(frozen=True)
 class DeburrLevel:
     """The upward-facing planar faces of a part at one height ``z_mm``, as
-    planar regions (unioned). ``camlib.cadquery.deburr_levels`` makes them
-    from a solid."""
+    planar regions (unioned), and the stretches of their boundaries that are
+    already broken (``DeburrBrokenEdge``: tangent fillets).
+    ``camlib.cadquery.deburr_levels`` makes them from a solid."""
 
     regions: tuple
     z_mm: float
+    broken_edges: tuple = ()
 
     def __post_init__(self):
         object.__setattr__(self, "regions", tuple(self.regions))
+        object.__setattr__(self, "broken_edges", tuple(self.broken_edges))
 
     def to_dict(self):
-        return dict(regions=[r.to_dict() if hasattr(r, "to_dict") else r for r in self.regions], z_mm=float(self.z_mm))
+        result = dict(
+            regions=[r.to_dict() if hasattr(r, "to_dict") else r for r in self.regions], z_mm=float(self.z_mm)
+        )
+        if self.broken_edges:
+            result["broken_edges"] = [e.to_dict() if hasattr(e, "to_dict") else e for e in self.broken_edges]
+        return result
 
 
 @dataclass(frozen=True)

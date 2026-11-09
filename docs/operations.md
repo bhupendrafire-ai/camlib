@@ -511,10 +511,29 @@ op = Deburr("deburr", c90, export_surface_mesh(part), deburr_levels(part), 0.5, 
   must be at least `tip_clearance_mm` out from the end of the tool's flat
   (c >= `tip_clearance_mm`, the ball's centre line for a ball), so the
   point does not cut. A larger break is refused.
+- **Drafted walls** (chamfer mill): a planar wall hanging off the boundary
+  at draft beta below alpha, the cone's half angle, is found in the part
+  mesh. Each of its points is depth tan(beta) out from the boundary. The
+  cone ends the break on it at depth h = width / (tan alpha - tan beta),
+  the slant leg h / cos beta. The level's axis moves out by h tan(beta) for
+  the steepest such wall, so the break's lower edge there keeps the tip
+  clearance and the width on the face stays exact (`level_details`:
+  `axis_offset_mm`, `tip_z_mm`, `max_wall_draft_deg`). The proof excludes
+  such a wall only down to that depth. The cone reaches a point at depth d
+  only if d (tan alpha - tan beta) < width (plus the proof's margins), so
+  nothing deeper is cut. A wall drafted too steeply for the cone, at or near
+  its half angle or beyond its radius, stays an obstacle, and the stretch is
+  reported with that reason. With a ball-end or bull-nose mill, drafted
+  walls stay obstacles and are reported (use a chamfer mill).
+- **Fillets:** `deburr_levels` lists the boundary edges where a face meets
+  a fillet tangentially (`DeburrLevel.broken_edges`, from OpenCascade's
+  `BRepOffset_Analyse`). There is no sharp edge there, so the stretch is
+  reported as already broken (`already_broken_length_mm`), not unreachable.
 - Nothing else is touched, by an exact proof for the whole tool (cone or
   corner arc, neck, shank and holder) against the part above the face,
   below the break and anything in the break's height band that is not the
-  face or a vertical wall under its boundary. The arc's contact is a
+  face, a vertical wall under its boundary or (to the depth above) a drafted
+  wall hanging off it. The arc's contact is a
   concave maximisation like the cone's. It is bounded without a slope
   bound, because a full quarter arc is vertical at its rim, and tested
   against dense sampling. The proof allows for the mesh's `surface_error_mm`
@@ -526,9 +545,8 @@ op = Deburr("deburr", c90, export_surface_mesh(part), deburr_levels(part), 0.5, 
   edges the tool cannot reach in `unreachable_length_mm`.
 - The stock must already be machined to the part. A non-center-cutting
   tool enters only where the stock is proven clear under its tip.
-- Not yet: edges next to drafted or filleted walls (#93), and edges that are
-  not horizontal (#94; sloped or vertical edges, some needing a tilted tool,
-  see the multi-axis issues).
+- Not yet: edges that are not horizontal (#94; sloped or vertical edges,
+  some needing a tilted tool, see the multi-axis issues).
 
 ## Parallel finishing: `Parallel`
 
