@@ -71,17 +71,26 @@ impl Config {
         if let Some(options) = self.stock_contact {
             options.validate()?;
         }
+        if self.material.iter().any(|c| c.options.scope_to_region)
+            && !self
+                .material
+                .iter()
+                .any(|c| c.after_operation.is_none() && !c.options.scope_to_region)
+        {
+            return Err(
+                "local material scopes require a separate full-part final material check".into(),
+            );
+        }
         for (i, check) in self.material.iter().enumerate() {
             check.options.validate()?;
             if check.after_operation.as_ref().is_some_and(|id| {
                 !crate::tool::valid_id(id)
                     || !operations.is_empty() && !operations.iter().any(|op| op.id() == id)
-            }) || self.material[..i]
-                .iter()
-                .any(|old| old.after_operation == check.after_operation)
-            {
+            }) || self.material[..i].iter().any(|old| {
+                old.after_operation == check.after_operation && old.target.id() == check.target.id()
+            }) {
                 return Err(
-                    "material stage must be unique and name a manifest operation or end of run"
+                    "material stage/target pair must be unique and name a manifest operation or end of run"
                         .into(),
                 );
             }
@@ -318,6 +327,8 @@ pub struct Binding {
     options_sha256: Option<String>,
     tool_sha256: HashMap<String, String>,
     target_sha256: Vec<String>,
+    proof_source_error_mm: Vec<f64>,
+    raw_stock: bool,
 }
 impl Binding {
     pub fn new(manifest: &StreamManifest) -> Result<Self, String> {
@@ -347,6 +358,22 @@ impl Binding {
                 .iter()
                 .map(|c| verification::identity(&(&c.target, c.options)))
                 .collect::<Result<_, _>>()?,
+            proof_source_error_mm: config
+                .material
+                .iter()
+                .map(|c| match &c.target {
+                    material::Definition::Surface(t) => t.surface.surface_error_mm,
+                    material::Definition::Prismatic(t) => {
+                        // PreparedRegion's numerical guard is tolerance / 32;
+                        // binding this scalar needs no geometry preparation.
+                        (t.machining_region.boundary_error_mm
+                            + c.options.geometry_tolerance_mm / 32.
+                            + c.options.geometry_tolerance_mm)
+                            .max(t.floor_error_mm)
+                    }
+                })
+                .collect(),
+            raw_stock: manifest.initial_stock.is_none(),
             config,
             run: manifest.run.clone(),
             stock: manifest.stock.height()?.clone(),
@@ -354,11 +381,15 @@ impl Binding {
             identity: crate::stream::identity_bytes(manifest)?,
         })
     }
-    fn material_index(&self, after_operation: &Option<String>) -> Result<usize, String> {
+    fn material_index(
+        &self,
+        after_operation: &Option<String>,
+        target_id: &str,
+    ) -> Result<usize, String> {
         self.config
             .material
             .iter()
-            .position(|c| c.after_operation == *after_operation)
+            .position(|c| c.after_operation == *after_operation && c.target.id() == target_id)
             .ok_or_else(|| "unconfigured material verification stage".into())
     }
     fn validate_stock_contact(
@@ -418,6 +449,13 @@ impl Binding {
                     })
                     || f.contact_point_mm
                         .is_some_and(|p| p[2] <= self.stock.min_mm[2] || p[2] >= f.solid_lower_mm)
+                    || f.obstruction_top_mm
+                        .is_some_and(|z| !(z > self.stock.min_mm[2] && z <= self.stock.max_mm[2]))
+                    || f.lowest_tip_z_mm.is_some_and(|z| !z.is_finite())
+                    || f.max_clear_radius_mm
+                        .is_some_and(|r| !(r.is_finite() && r >= 0.))
+                    || ((f.obstruction_top_mm.is_some() || f.max_clear_radius_mm.is_some())
+                        && f.lowest_tip_z_mm.is_none())
             })
             || (r.status == Status::Clear && (!r.findings.is_empty() || !r.fully_examined))
             || (r.status == Status::Violation
@@ -556,7 +594,7 @@ impl Binding {
                 target_id,
                 target_sha256,
             } => {
-                let i = self.material_index(after_operation)?;
+                let i = self.material_index(after_operation, target_id)?;
                 if *target_id != self.config.material[i].target.id()
                     || *target_sha256 != self.target_sha256[i]
                 {
@@ -568,7 +606,7 @@ impl Binding {
                 report: r,
                 sweep_proof,
             } => {
-                let i = self.material_index(after_operation)?;
+                let i = self.material_index(after_operation, &r.target_id)?;
                 let c = &self.config.material[i];
                 let binding = r
                     .context
@@ -576,6 +614,17 @@ impl Binding {
                     .as_ref()
                     .ok_or("material report lacks run binding")?;
                 let (nx, ny, _) = self.stock.grid()?;
+                let scale = self
+                    .stock
+                    .min_mm
+                    .into_iter()
+                    .chain(self.stock.max_mm)
+                    .map(f64::abs)
+                    .fold(1., f64::max);
+                let proof_available = c.options.gouge_tolerance()
+                    - self.proof_source_error_mm[i]
+                    - 1024. * f64::EPSILON * scale
+                    > 0.;
                 let finishing_valid = match (c.target.finishing_scope(), r.finishing.as_ref()) {
                     (None, None) => true,
                     (Some(scope), Some(f)) => {
@@ -606,6 +655,9 @@ impl Binding {
                     || r.context.generation != completed
                     || r.context.fraction != 0.
                     || r.comparison_tolerance_mm != c.options.comparison_tolerance_mm
+                    || r.residual_tolerance_mm != c.options.residual_tolerance_mm
+                    || r.gouge_tolerance_mm != c.options.gouge_tolerance_mm
+                    || r.scope_to_region != c.options.scope_to_region
                     || r.findings.len() > c.options.max_findings
                     || r.stats.validated_cells != nx * ny
                     || r.stats
@@ -629,11 +681,20 @@ impl Binding {
                                     || r.stats.unexamined_cells != 0))
                     })
                     || r.findings.iter().any(|f| f.cell_index as usize >= nx * ny)
-                    // A proof decides at most the report's possible-only
-                    // gouge cells, at the configured tolerance.
+                    // A retained proof must account for exactly the actual
+                    // replay suffix, bind its source error, and cannot decide
+                    // cells without complete available history and analysis.
                     || sweep_proof.as_ref().is_some_and(|p| {
                         p.decided_cells > r.gouge.possible_only_cells
-                            || p.tolerance_mm != c.options.comparison_tolerance_mm
+                            || p.tolerance_mm != c.options.gouge_tolerance()
+                            || p.surface_error_mm != self.proof_source_error_mm[i]
+                            || (p.history_complete && (!self.raw_stock || record.progress.from_completed != 0))
+                            || p.proven_moves.checked_add(p.unproven_moves)
+                                != completed.checked_sub(record.progress.from_completed)
+                            || (!proof_available && p.proven_moves != 0)
+                            || ((!p.history_complete || !proof_available) && p.unavailable.is_none())
+                            || (p.decided_cells != 0
+                                && (!p.history_complete || !proof_available || p.unavailable.is_some() || !r.complete))
                     })
                 {
                     return Err("material verification source, cursor or coverage mismatch".into());
@@ -692,9 +753,11 @@ impl Tracker {
                 expected.motion(completed, r.check.motion_status().unwrap());
             }
             Check::MaterialStarted {
-                after_operation, ..
+                after_operation,
+                target_id,
+                ..
             } => {
-                let i = self.binding.material_index(after_operation)?;
+                let i = self.binding.material_index(after_operation, target_id)?;
                 if pending.is_some()
                     || self.done.contains(&i)
                     || self.binding.config.motion_checks()
@@ -706,9 +769,13 @@ impl Tracker {
                 pending = Some((i, completed));
             }
             Check::Material {
-                after_operation, ..
+                after_operation,
+                report,
+                ..
             } => {
-                let i = self.binding.material_index(after_operation)?;
+                let i = self
+                    .binding
+                    .material_index(after_operation, &report.target_id)?;
                 if pending != Some((i, completed)) {
                     return Err("material report lacks matching started stage/cursor".into());
                 }
@@ -755,7 +822,11 @@ impl Runtime {
         }
         Ok(())
     }
-    pub fn prepare(manifest: &StreamManifest, completed: u64) -> Result<Self, String> {
+    pub fn prepare(
+        manifest: &StreamManifest,
+        completed: u64,
+        restored: bool,
+    ) -> Result<Self, String> {
         let binding = Arc::new(Binding::new(manifest)?);
         let never = std::sync::atomic::AtomicBool::new(false);
         let proofs = binding
@@ -763,17 +834,21 @@ impl Runtime {
             .material
             .iter()
             .map(|c| match &c.target {
-                // The motions are proven only from the raw stock on: a
-                // resumed stream decides no cell (history incomplete).
-                material::Definition::Surface(t) => {
-                    material::SweepProof::new(t, c.options, &binding.stock, completed == 0, &never)
-                        .map(Some)
-                }
+                // A retained snapshot is not proof of raw stock, including
+                // one restored at cursor zero with valid bounded cell data.
+                material::Definition::Surface(t) => material::SweepProof::new(
+                    t,
+                    c.options,
+                    &binding.stock,
+                    !restored && completed == 0 && manifest.initial_stock.is_none(),
+                    &never,
+                )
+                .map(Some),
                 material::Definition::Prismatic(t) => material::SweepProof::new_prismatic(
                     t,
                     c.options,
                     &binding.stock,
-                    completed == 0,
+                    !restored && completed == 0 && manifest.initial_stock.is_none(),
                 )
                 .map(Some),
             })
@@ -805,6 +880,9 @@ impl Runtime {
         cancel: &impl CancelSignal,
     ) -> Result<Option<Vec<u8>>, String> {
         let tolerance = self.sweep_tolerance_mm;
+        for proof in self.proofs.iter_mut().flatten() {
+            proof.begin_motion();
+        }
         for proof in self.proofs.iter_mut().flatten() {
             proof.motion(tool, motion, tolerance, cancel)?;
         }
@@ -853,6 +931,11 @@ impl Runtime {
         })
         .map(Some)
     }
+    pub fn finish_motion(&mut self, commit: bool) {
+        for proof in self.proofs.iter_mut().flatten() {
+            proof.finish_motion(commit);
+        }
+    }
     fn encode(&self, record: &Record) -> Result<Vec<u8>, String> {
         crate::stream::encode_verification(
             &self.tracker.binding.identity,
@@ -871,7 +954,11 @@ impl Runtime {
             .config
             .material
             .iter()
-            .position(|c| c.after_operation.as_deref() == after_operation)
+            .enumerate()
+            .find_map(|(i, c)| {
+                (c.after_operation.as_deref() == after_operation && !self.tracker.done.contains(&i))
+                    .then_some(i)
+            })
         else {
             return Ok(None);
         };
@@ -910,7 +997,7 @@ impl Runtime {
                 manifest_sha256: b.manifest_sha256.clone(),
             }),
         };
-        let (report, sweep_proof) = match (&self.targets[i], &self.proofs[i]) {
+        let (report, mut sweep_proof) = match (&self.targets[i], &self.proofs[i]) {
             (material::PreparedMaterial::Surface(t), Some(proof)) => {
                 let (report, proof) = t.check_proven(stock, &context, proof, cancel)?;
                 (report, Some(proof))
@@ -921,6 +1008,11 @@ impl Runtime {
             }
             (target, _) => (target.check(stock, &context, cancel)?, None),
         };
+        if !report.complete
+            && let Some(proof) = &mut sweep_proof
+        {
+            proof.decided_cells = 0;
+        }
         let mut progress = self.tracker.progress.clone();
         progress.records += 1;
         progress.material_reports += 1;

@@ -120,6 +120,40 @@ Every planned tool-centre path is checked against the original region before
 any motion is emitted: if geometry construction ever went wrong, the operation
 fails instead of cutting into an island or wall.
 
+**A top below the remaining stock** (`Pocket` and `AdaptivePocket`, issue
+#129). `top_z_mm` may be below the stock's original top when earlier
+operations removed the material: the depth (and the cutting-length check) is
+then measured from `top_z_mm`. Every stock cell meeting the `region` must be at
+or below it. Stock may stand higher outside the region, for example a low
+pocket beside a tall wall, when the tool assembly clears it:
+
+- Before any motion, the neck, shank and every holder section are checked
+  against that stock for every tool centre the cutter can occupy in the region
+  and every tip at or above the operation's floor (plus bottom allowance).
+  A section that would meet it refuses the operation with a typed reach
+  refusal (below) naming the section, the obstruction's top and the depth.
+- `clearance_z_mm` must then be above all remaining stock, and a planned move
+  that leaves the region's tool centres below that height is refused.
+- The plan's report gives `stock_top.outside_upper_z_mm` (the highest such
+  stock) and `assembly_checked_cells`.
+
+This is conservative (every pose at the lowest tip anywhere in the region);
+configure stock-contact checking (`StreamChecks(stock_contact=...)`) to check
+every move's assembly against the actual stock independently.
+
+**Reach refusals are typed.** When a tool cannot reach the depth an operation
+needs, the run raises `camlib.simulation.ReachRefused` (a `SimulationError`)
+whose `refusal` is a `ReachRefusal`: `operation`, `tool`, `limit`
+(`"cutting_length"`, `"neck"`, `"shank"` or `"holder"`, with
+`holder_section`), `depth_needed_mm`, `depth_available_mm`, `top_z_mm` (the
+material top the depth is measured from: the operation's top, or the
+obstruction's) and `z_mm` (the lowest tip Z needed); `depth_needed_mm =
+top_z_mm - z_mm`. Pocket, adaptive pocket, slot, contour, drilling, bore,
+facing, chamfer, waterline, trace, parallel finishing and roughing layers
+refuse their cutting-length depth this way, and pockets their neck, shank and
+holder sections. In Rust, `camlib::reach::ReachRefusal::parse` reads it from
+the error text.
+
 ## Adaptive pocket: `AdaptivePocket`
 
 Same region and depths as `Pocket`, cleared with bounded tool engagement
@@ -335,7 +369,8 @@ is tapped from the R plane (`feed_z_mm`, default the retract height) to
   declare neither refuse tapping.
 - Left-hand taps: `G33.1` under `M4` (LinuxCNC reverses whatever direction
   is running), or `G74 X… Y… Z… R… F…` and `G80` on machines that declare
-  `tap_cycle_left` (the FANUC 0i-MB example with `rigid_tapping=True`).
+  `tap_cycle_left` (the FANUC 0i-MB example with `rigid_tapping=True`, or
+  `rigid_tapping_m29=True`, which writes `M29 S…` before each cycle).
   Machines with neither refuse a left-hand tap. The decoder reads the hand
   back: `G84` needs the spindle clockwise, `G74` counterclockwise, and the
   decoded spindle direction must match the plan.
@@ -642,6 +677,10 @@ How it is computed:
   gaps on, a 1:2 slope), else a straight link of at most two stepovers, else
   along the boundary pass or back along the ring just cut; only otherwise a
   retract.
+
+Cancellation is checked while constructing a level, including subdivision
+inside one facet, path chaining and simplification. A cancelled contour returns
+an error; its partial paths cannot become a successful plan.
 
 Verification, independent of the distance field, in the operation report
 (`geodesic`):

@@ -661,6 +661,7 @@ struct Iso<'a> {
     field: &'a Field<'a>,
     /// Each face's interior peaks (`Field::face_peaks`).
     peaks: &'a [Vec<(Vec3, f64)>],
+    cancel: &'a dyn CancelSignal,
     level: f64,
     /// How far a link's points may stray from the curve.
     tol: f64,
@@ -673,14 +674,23 @@ struct Iso<'a> {
 }
 
 impl<'a> Iso<'a> {
-    fn edge(&mut self, e: u32) -> Side {
+    fn checkpoint(&self) -> Result<(), String> {
+        if self.cancel.is_cancelled() {
+            return Err("geodesic planning cancelled".into());
+        }
+        Ok(())
+    }
+
+    fn edge(&mut self, e: u32) -> Result<Side, String> {
+        self.checkpoint()?;
         if let Some(c) = self.edges.get(&e) {
-            return c.clone();
+            return Ok(c.clone());
         }
         let [a, b] = self.drive.topo.edges[e as usize];
         let (pa, pb) = (self.drive.v[a as usize], self.drive.v[b as usize]);
         let mut c: Side = vec![];
         for s in self.field.edge_crossings(e, self.level) {
+            self.checkpoint()?;
             // A crossing at an end (within rounding) is that vertex: one
             // node for every edge there, so pieces meeting at a vertex
             // chain whichever edges the rounding puts it on.
@@ -714,25 +724,27 @@ impl<'a> Iso<'a> {
             }
         }
         self.edges.insert(e, c.clone());
-        c
+        Ok(c)
     }
 
-    fn face(&mut self, f: u32) {
+    fn face(&mut self, f: u32) -> Result<(), String> {
+        self.checkpoint()?;
         let tri = self.drive.t[f as usize];
         let p = tri.map(|k| self.drive.v[k as usize]);
         let vals = tri.map(|k| self.field.vertex[k as usize]);
         let signs = vals.map(|d| d >= self.level);
-        let sides = [0, 1, 2].map(|k| {
+        let mut sides: [Side; 3] = Default::default();
+        for k in 0..3 {
             let e = self.drive.topo.tri_edges[f as usize][k];
-            let c = self.edge(e);
-            if self.drive.topo.edges[e as usize][0] == tri[k] {
+            let c = self.edge(e)?;
+            sides[k] = if self.drive.topo.edges[e as usize][0] == tri[k] {
                 c
             } else {
                 c.iter().rev().map(|&(s, n)| (1. - s, n)).collect()
-            }
-        });
+            };
+        }
         let q = FaceQuery::new(self.field, f);
-        self.region(&q, f, p, vals, signs, sides, 0);
+        self.region(&q, f, p, vals, signs, sides, 0)
     }
 
     /// The contour inside a triangle of face `f` (corner distances `vals`,
@@ -750,7 +762,8 @@ impl<'a> Iso<'a> {
         signs: [bool; 3],
         sides: [Side; 3],
         depth: usize,
-    ) {
+    ) -> Result<(), String> {
+        self.checkpoint()?;
         // A crossing at a corner appears on both sides there: once.
         let mut ring: Vec<u32> = vec![];
         for x in sides.iter().flatten() {
@@ -779,7 +792,7 @@ impl<'a> Iso<'a> {
                         false
                     };
                 if island {
-                    self.split(q, f, p, vals, signs, sides, depth);
+                    self.split(q, f, p, vals, signs, sides, depth)?;
                 }
             }
             2 => {
@@ -790,14 +803,14 @@ impl<'a> Iso<'a> {
                 // where any chord across it is within the tolerance.
                 let (a, b) = (self.nodes[ring[0] as usize], self.nodes[ring[1] as usize]);
                 let mut mid = vec![];
-                if self.chord(q, f, a, b, self.tol, 0, &mut mid) || diameter(p) <= self.tol {
+                if self.chord(q, f, a, b, self.tol, 0, &mut mid)? || diameter(p) <= self.tol {
                     self.links.push((ring[0], ring[1], f, mid));
                 } else {
-                    self.split(q, f, p, vals, signs, sides, depth);
+                    self.split(q, f, p, vals, signs, sides, depth)?;
                 }
             }
             _ if depth < MAX_DEPTH || diameter(p) > self.tol => {
-                self.split(q, f, p, vals, signs, sides, depth)
+                self.split(q, f, p, vals, signs, sides, depth)?
             }
             _ => {
                 // Below a micrometre: join each crossing to the next where
@@ -812,6 +825,7 @@ impl<'a> Iso<'a> {
                 }
             }
         }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -824,7 +838,8 @@ impl<'a> Iso<'a> {
         signs: [bool; 3],
         sides: [Side; 3],
         depth: usize,
-    ) {
+    ) -> Result<(), String> {
+        self.checkpoint()?;
         let m = [0, 1, 2].map(|k| lerp(p[k], p[(k + 1) % 3], 0.5));
         let dm = m.map(|x| q.at(x));
         let halves = |side: &Side| -> (Side, Side, bool) {
@@ -866,7 +881,7 @@ impl<'a> Iso<'a> {
             [signs[0], sm[0], sm[2]],
             [h0a, i02.clone(), h2b],
             d,
-        );
+        )?;
         self.region(
             q,
             f,
@@ -875,7 +890,7 @@ impl<'a> Iso<'a> {
             [sm[0], signs[1], sm[1]],
             [h0b, h1a, rev(&i01)],
             d,
-        );
+        )?;
         self.region(
             q,
             f,
@@ -884,8 +899,8 @@ impl<'a> Iso<'a> {
             [sm[2], sm[1], signs[2]],
             [rev(&i12), h1b, h2a],
             d,
-        );
-        self.region(q, f, m, dm, sm, [i01, i12, rev(&i02)], d);
+        )?;
+        self.region(q, f, m, dm, sm, [i01, i12, rev(&i02)], d)
     }
 
     /// Points of the curve between two of its points in face `f`: the
@@ -902,19 +917,20 @@ impl<'a> Iso<'a> {
         tol: f64,
         depth: usize,
         out: &mut Vec<Vec3>,
-    ) -> bool {
+    ) -> Result<bool, String> {
+        self.checkpoint()?;
         let d = sub(b, a);
         let l = norm(d);
         if l <= tol {
-            return true;
+            return Ok(true);
         }
         if depth >= 24 {
-            return false;
+            return Ok(false);
         }
         let m = lerp(a, b, 0.5);
         let u = scale(cross(self.drive.n[f as usize], d), 1. / l);
         let Some((s0, s1)) = self.drive.clip(f, m, u, l) else {
-            return false;
+            return Ok(false);
         };
         let (q0, q1) = (axpy(m, s0, u), axpy(m, s1, u));
         let (g0, g1) = (q.at(q0) >= self.level, q.at(q1) >= self.level);
@@ -924,21 +940,22 @@ impl<'a> Iso<'a> {
             .map(|t| s0 + t * (s1 - s0))
             .min_by(|x, y| x.abs().total_cmp(&y.abs()))
         else {
-            return false;
+            return Ok(false);
         };
         if z.abs() <= tol {
-            return true;
+            return Ok(true);
         }
         let mq = axpy(m, z, u);
-        let ok = self.chord(q, f, a, mq, tol, depth + 1, out);
+        let ok = self.chord(q, f, a, mq, tol, depth + 1, out)?;
         out.push(mq);
-        ok && self.chord(q, f, mq, b, tol, depth + 1, out)
+        Ok(ok && self.chord(q, f, mq, b, tol, depth + 1, out)?)
     }
 
     /// The links chained into contact paths: open chains (from a node with
     /// one link: the drive boundary, or the end of the faces given) first,
     /// then loops.
-    fn paths(&self) -> Vec<ContactPath> {
+    fn paths(&self) -> Result<Vec<ContactPath>, String> {
+        self.checkpoint()?;
         let mut adj: HashMap<u32, Vec<usize>> = HashMap::new();
         // A contour along a mesh edge (from vertex to vertex, straight) is
         // linked by both faces there: one segment, once. (Two links between
@@ -953,6 +970,7 @@ impl<'a> Iso<'a> {
         };
         let mut seen = std::collections::HashSet::new();
         for (i, (a, b, _, mid)) in self.links.iter().enumerate() {
+            self.checkpoint()?;
             let (a, b) = (*a, *b);
             if a == b || (mid.is_empty() && along_edge(a, b) && !seen.insert((a.min(b), a.max(b))))
             {
@@ -974,18 +992,25 @@ impl<'a> Iso<'a> {
         let mut used = vec![false; self.links.len()];
         let mut keys: Vec<u32> = adj.keys().copied().collect();
         keys.sort();
-        let walk = |start: u32, used: &mut Vec<bool>| {
+        let walk = |start: u32, used: &mut Vec<bool>| -> Result<ContactPath, String> {
             let mut path = vec![(self.nodes[start as usize], normal(start))];
             let mut at = start;
             while let Some(&i) = adj[&at].iter().find(|&&i| !used[i]) {
+                self.checkpoint()?;
                 used[i] = true;
                 let (a, b, f, ref mid) = self.links[i];
                 let next = if a == at { b } else { a };
                 let nf = self.drive.n[f as usize];
                 if a == at {
-                    path.extend(mid.iter().map(|&q| (q, nf)));
+                    for chunk in mid.chunks(256) {
+                        self.checkpoint()?;
+                        path.extend(chunk.iter().map(|&q| (q, nf)));
+                    }
                 } else {
-                    path.extend(mid.iter().rev().map(|&q| (q, nf)));
+                    for chunk in mid.rchunks(256) {
+                        self.checkpoint()?;
+                        path.extend(chunk.iter().rev().map(|&q| (q, nf)));
+                    }
                 }
                 path.push((self.nodes[next as usize], normal(next)));
                 at = next;
@@ -993,26 +1018,28 @@ impl<'a> Iso<'a> {
                     break;
                 }
             }
-            path
+            Ok(path)
         };
         let mut out = vec![];
         for &k in &keys {
+            self.checkpoint()?;
             if adj[&k].len() == 1 && !used[adj[&k][0]] {
-                let c = walk(k, &mut used);
+                let c = walk(k, &mut used)?;
                 if c.len() >= 2 {
                     out.push(c);
                 }
             }
         }
         for &k in &keys {
+            self.checkpoint()?;
             while adj[&k].iter().any(|&i| !used[i]) {
-                let c = walk(k, &mut used);
+                let c = walk(k, &mut used)?;
                 if c.len() >= 2 {
                     out.push(c);
                 }
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -1025,11 +1052,13 @@ fn contour(
     level: f64,
     faces: &[u32],
     tol: f64,
-) -> Vec<ContactPath> {
+    cancel: &dyn CancelSignal,
+) -> Result<Vec<ContactPath>, String> {
     let mut iso = Iso {
         drive,
         field,
         peaks,
+        cancel,
         level,
         tol: 0.225 * tol,
         nodes: vec![],
@@ -1039,7 +1068,7 @@ fn contour(
     };
     let started = std::time::Instant::now();
     for &f in faces {
-        iso.face(f);
+        iso.face(f)?;
     }
     trace::line(|| {
         format!(
@@ -1057,25 +1086,37 @@ fn contour(
     // of it of itself (where the curve grazes a long sliver's side within
     // rounding, the exact crossings come micrometres apart; their wiggles
     // are below any tolerance).
-    iso.paths()
+    iso.paths()?
         .into_iter()
-        .map(|path| simplify(&path, 0.025 * tol))
+        .map(|path| simplify(&path, 0.025 * tol, cancel))
         .collect()
 }
 
 /// A polyline simplified (Douglas and Peucker 1973): a subset of its points
 /// (so still on the surface, its ends kept, a closed path closed), every
 /// dropped point within `eps` of the chord that replaces it.
-fn simplify(path: &ContactPath, eps: f64) -> ContactPath {
+fn simplify(
+    path: &ContactPath,
+    eps: f64,
+    cancel: &dyn CancelSignal,
+) -> Result<ContactPath, String> {
+    let checkpoint = || {
+        if cancel.is_cancelled() {
+            return Err("geodesic planning cancelled".to_string());
+        }
+        Ok(())
+    };
+    checkpoint()?;
     let n = path.len();
     if n < 3 {
-        return path.clone();
+        return Ok(path.clone());
     }
     let mut keep = vec![false; n];
     keep[0] = true;
     keep[n - 1] = true;
     let mut stack = vec![(0usize, n - 1)];
     while let Some((i, j)) = stack.pop() {
+        checkpoint()?;
         if j <= i + 1 {
             continue;
         }
@@ -1084,6 +1125,9 @@ fn simplify(path: &ContactPath, eps: f64) -> ContactPath {
         let ll = dot(ab, ab);
         let (mut far, mut at) = (0f64, i);
         for (k, q) in path.iter().enumerate().take(j).skip(i + 1) {
+            if k % 256 == 0 {
+                checkpoint()?;
+            }
             let t = if ll > 0. {
                 (dot(sub(q.0, a), ab) / ll).clamp(0., 1.)
             } else {
@@ -1100,11 +1144,13 @@ fn simplify(path: &ContactPath, eps: f64) -> ContactPath {
             stack.push((at, j));
         }
     }
-    path.iter()
+    checkpoint()?;
+    Ok(path
+        .iter()
         .zip(keep)
         .filter(|(_, k)| *k)
         .map(|(q, _)| *q)
-        .collect()
+        .collect())
 }
 
 /// Each face's interior peaks that matter for the levels (offset + k) x
@@ -1461,7 +1507,7 @@ fn fill(
                 }
                 // Every face within F(c) of c (in space, never farther).
                 let faces = drive.within(c, far);
-                for path in contour(drive, field, peaks, level, &faces, path_error / 2.) {
+                for path in contour(drive, field, peaks, level, &faces, path_error / 2., cancel)? {
                     chosen.push(path.clone());
                     fresh.push((band(level), true, level, path));
                 }
@@ -1867,16 +1913,17 @@ fn plan<'a>(
         levels.saturating_sub(first),
         workers,
         cancel,
-        |i, _| {
+        |i, signal| {
             let k = first + i;
-            Ok(contour(
+            contour(
                 drive,
                 &field,
                 &peaks,
                 value_of(k),
                 &buckets[k],
                 path_error / 2.,
-            ))
+                signal,
+            )
         },
         |_| Ok(()),
     )?;
@@ -3813,6 +3860,51 @@ mod tests {
     }
 
     #[test]
+    fn contour_cancellation_interrupts_a_single_face_without_returning_partial_paths() {
+        use std::cell::Cell;
+
+        let never = AtomicBool::new(false);
+        let plane = mesh(vec![[[0., 0., 1.], [24., 0., 1.], [0., 24., 1.]]]);
+        let drive = Drive::build(&plane, &never).unwrap();
+        let (ti, _, p) = drive.top_at([6., 6.]).unwrap();
+        let field = Field::compute(
+            &drive.v,
+            &drive.t,
+            &drive.topo,
+            &[Piece::Point(ti, p)],
+            f64::INFINITY,
+            &never,
+        )
+        .unwrap();
+        let peaks = peaks_of(&drive, &field);
+        let polls = Cell::new(0usize);
+        let count = || {
+            polls.set(polls.get() + 1);
+            false
+        };
+        let complete = contour(&drive, &field, &peaks, 2., &[ti], 0.001, &count).unwrap();
+        assert_eq!(complete.len(), 1);
+        assert!(
+            polls.get() > 32,
+            "poll inside a face, not only between faces"
+        );
+
+        // All geometry is in one face. Later cutoffs exercise its recursive
+        // refinement, path chaining and simplification without timing/thread races.
+        for after in [0, 1, 16, polls.get() / 2, polls.get() - 1] {
+            let calls = Cell::new(0usize);
+            let stop = || {
+                let n = calls.get();
+                calls.set(n + 1);
+                n >= after
+            };
+            let error = contour(&drive, &field, &peaks, 2., &[ti], 0.001, &stop).unwrap_err();
+            assert_eq!(error, "geodesic planning cancelled");
+            assert_eq!(calls.get(), after + 1, "stop at the first cancelled poll");
+        }
+    }
+
+    #[test]
     fn contours_lie_on_the_exact_iso_curves() {
         let never = AtomicBool::new(false);
         // Two coarse triangles of a plane (bisected only to 8 mm): rings
@@ -3835,7 +3927,16 @@ mod tests {
         let faces: Vec<u32> = (0..drive.t.len() as u32).collect();
         let tol = 0.001;
         for r in [0.75, 3., 7.5] {
-            let paths = contour(&drive, &field, &peaks_of(&drive, &field), r, &faces, tol);
+            let paths = contour(
+                &drive,
+                &field,
+                &peaks_of(&drive, &field),
+                r,
+                &faces,
+                tol,
+                &never,
+            )
+            .unwrap();
             assert_eq!(paths.len(), 1, "one closed ring at {r}");
             let ring = &paths[0];
             assert!(norm(sub(ring[0].0, ring[ring.len() - 1].0)) < 1e-12);
@@ -3847,7 +3948,16 @@ mod tests {
             }
         }
         // A ring cut by the plane's edge: an open arc ending on it.
-        let paths = contour(&drive, &field, &peaks_of(&drive, &field), 12., &faces, tol);
+        let paths = contour(
+            &drive,
+            &field,
+            &peaks_of(&drive, &field),
+            12.,
+            &faces,
+            tol,
+            &never,
+        )
+        .unwrap();
         assert!(!paths.is_empty());
         for path in &paths {
             for (q, _) in path {
@@ -3923,6 +4033,7 @@ mod tests {
                 drive: &drive,
                 field: &field,
                 peaks: &peaks,
+                cancel: &never,
                 level,
                 tol: 0.005,
                 nodes: vec![],
@@ -3931,7 +4042,7 @@ mod tests {
                 links: vec![],
             };
             for &f in &faces {
-                iso.face(f);
+                iso.face(f).unwrap();
             }
             let mut degree: HashMap<u32, usize> = HashMap::new();
             for &(a, b, _, _) in &iso.links {
@@ -3988,7 +4099,7 @@ mod tests {
             for k in levels {
                 let (a, b) = ((0.5 + k as f64) * 1.5, (1.5 + k as f64) * 1.5);
                 let mut sources = vec![];
-                for path in contour(&drive, &field, &peaks, a, &faces, tol) {
+                for path in contour(&drive, &field, &peaks, a, &faces, tol, &never).unwrap() {
                     for w in path.windows(2) {
                         let (q0, q1) = (w[0].0, w[1].0);
                         assert!(
@@ -4008,7 +4119,7 @@ mod tests {
                 }
                 let near =
                     Field::compute(&drive.v, &drive.t, &drive.topo, &sources, 3., &never).unwrap();
-                for path in contour(&drive, &field, &peaks, b, &faces, tol) {
+                for path in contour(&drive, &field, &peaks, b, &faces, tol, &never).unwrap() {
                     for (q, _) in path {
                         let s = near.at(locate(q), q);
                         assert!((s - 1.5).abs() <= tol + 1e-6, "level {k}: {q:?} {s}");

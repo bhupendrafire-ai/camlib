@@ -1,0 +1,3 @@
+# Expected NC programs are compared byte for byte (tests/rust_post.rs):
+# never convert their line endings on checkout.
+fixtures/posts/rust/*.nc -text

@@ -116,6 +116,7 @@ class RecordedRun:
         tool_change=None,
         rapid_retracts=True,
         turning=None,
+        initial_stock=None,
     ):
         if not 1 <= batch_size <= 4096 or checkpoint_every <= 0 or checkpoint_changed_cells <= 0:
             raise ValueError("invalid bounded batching/checkpoint policy")
@@ -163,6 +164,7 @@ class RecordedRun:
             tool_change=tool_change,
             rapid_retracts=rapid_retracts,
             turning=turning,
+            initial_stock=initial_stock,
             _on_spawn=self._spawned,
         )
         self._verification = verification.to_dict() if hasattr(verification, "to_dict") else verification
@@ -673,7 +675,13 @@ class RecordedRun:
                         source=finding["source"],
                     )
                     if "cell_range" in finding:
-                        sample.update(cell_range=finding["cell_range"], contact_point_mm=finding["contact_point_mm"])
+                        sample.update(
+                            cell_range=finding["cell_range"],
+                            contact_point_mm=finding["contact_point_mm"],
+                            obstruction_top_mm=finding.get("obstruction_top_mm"),
+                            lowest_tip_z_mm=finding.get("lowest_tip_z_mm"),
+                            max_clear_radius_mm=finding.get("max_clear_radius_mm"),
+                        )
                 else:
                     sample = dict(
                         kind="material",

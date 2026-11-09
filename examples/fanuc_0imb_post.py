@@ -19,13 +19,15 @@ def _dialect(
     chip_break_return_mm=None,
     fine_bore_edge_deg=None,
     rigid_tapping=False,
+    rigid_tapping_m29=False,
     inspection_plus_fast_feed_mm_min=None,
     inspection_plus_switching=False,
 ):
     if set(m_codes) != _OEM or len(set(m_codes.values())) != len(_OEM):
         raise ValueError('bind distinct OEM tool/spindle/flood/off M functions')
-    if any(not re.fullmatch(r'M[1-9][0-9]?', c) or int(c[1:]) in (1, 2, 30, 98, 99) for c in m_codes.values()):
-        raise ValueError('OEM functions need unreserved M codes below 100')
+    reserved = (1, 2, 30, 98, 99) + ((29,) if rigid_tapping_m29 else ())
+    if any(not re.fullmatch(r'M[1-9][0-9]?', c) or int(c[1:]) in reserved for c in m_codes.values()):
+        raise ValueError('OEM functions need unreserved M codes below 100 (M29 selects rigid tapping when declared)')
     # Canned drilling: G81, G82 (P whole milliseconds), G98 initial-level
     # return; G83/G73 only with their return amounts (parameters 5115/5114).
     commands = (
@@ -51,13 +53,16 @@ def _dialect(
             # §13.1.3 G76: oriented spindle stop (OSS) and shift Q in the
             # direction of parameter 5101 RD1/RD2, only with the declared edge.
             fine_bore_cycle='G76' if fine_bore_edge_deg is not None else None,
-            # §13.2.1/13.2.2 rigid tapping, only with parameter No. 5200#0 (G84)
-            # = 1 ("Specify G84 for rigid tapping"), so no M29 is needed: G84
-            # (right hand, spindle CW in, CCW out) and G74 (left hand, CCW in,
-            # CW out) X Y Z R F, F = lead x S in G94, cancelled by G80. The
-            # spindle turns in the cycle's direction beforehand (§13.1.2).
-            tap_cycle='G84' if rigid_tapping else None,
-            tap_cycle_left='G74' if rigid_tapping else None,
+            # §13.2.1/13.2.2 rigid tapping: G84 (right hand, spindle CW in,
+            # CCW out) and G74 (left hand, CCW in, CW out) X Y Z R F, F = lead
+            # x S in G94, cancelled by G80. The spindle turns in the cycle's
+            # direction beforehand (§13.1.2). Rigid mode is selected either by
+            # parameter No. 5200#0 (G84) = 1 ("Specify G84 for rigid
+            # tapping", rigid_tapping) or, with 5200#0 = 0, by "M29 S*****
+            # before a tapping command" (rigid_tapping_m29), the form of the
+            # manual's examples; the post writes that M29 block.
+            tap_cycle='G84' if rigid_tapping or rigid_tapping_m29 else None,
+            tap_cycle_left='G74' if rigid_tapping or rigid_tapping_m29 else None,
             **m_codes,
         )
         .commands
@@ -97,6 +102,9 @@ class ReferenceMachine(Machine):
     fine_bore_edge_deg: float | None = None
     # Parameter No. 5200#0 (G84) = 1: G84/G74 are rigid tapping cycles.
     rigid_tapping: bool = False
+    # Parameter No. 5200#0 (G84) = 0: rigid mode is selected by M29 S in the
+    # block before G84/G74 (§13.2.1/13.2.2).
+    rigid_tapping_m29: bool = False
     # Renishaw Inspection Plus installed (H-2000-6031): its fast feed #119
     # (settings macro O9724), and whether cycles switch the probe on/off
     # with O9832/O9833. None: no probing.
@@ -115,8 +123,12 @@ class ReferenceMachine(Machine):
             )
         if type(self.optional_stop_enabled) is not bool:
             raise ValueError('declare optional-stop switch state')
-        if type(self.rigid_tapping) is not bool:
-            raise ValueError('declare rigid tapping (parameter No. 5200#0 G84) as a boolean')
+        if type(self.rigid_tapping) is not bool or type(self.rigid_tapping_m29) is not bool:
+            raise ValueError('declare rigid tapping (parameter No. 5200#0 G84) as booleans')
+        if self.rigid_tapping and self.rigid_tapping_m29:
+            raise ValueError(
+                'declare one rigid tapping premise: rigid_tapping (5200#0 = 1) or rigid_tapping_m29 (5200#0 = 0)'
+            )
         if type(self.program_number) is not int or not 1 <= self.program_number <= 7999:
             raise ValueError('reference program number must be 1..7999')
         if self.traverse_feed_mm_min is None or self.arcs or self.helices or self.planes != ('xy',):
@@ -141,6 +153,7 @@ class ReferenceMachine(Machine):
                 self.chip_break_return_mm,
                 self.fine_bore_edge_deg,
                 self.rigid_tapping,
+                self.rigid_tapping_m29,
                 self.inspection_plus_fast_feed_mm_min,
                 self.inspection_plus_switching,
             )
@@ -177,6 +190,7 @@ def define_machine(
     chip_break_return_mm=None,
     fine_bore_edge_deg=None,
     rigid_tapping=False,
+    rigid_tapping_m29=False,
     inspection_plus_fast_feed_mm_min=None,
     inspection_plus_switching=False,
     **settings,
@@ -186,6 +200,8 @@ def define_machine(
     startup_standard_modes means length-offset A, G49, Cartesian, no scaling,
     rotation, mirror, macro/AI modes. H values equal declared physical gauge lengths.
     OEM ATC routes are external; table entries state actual tip poses after M6.
+    rigid_tapping declares parameter No. 5200#0 = 1 (G84/G74 alone are rigid);
+    rigid_tapping_m29 declares 5200#0 = 0 with rigid mode selected by M29 S.
     """
     return ReferenceMachine(
         name,
@@ -195,11 +211,13 @@ def define_machine(
             peck_return_mm,
             chip_break_return_mm,
             fine_bore_edge_deg,
-            rigid_tapping,
-            inspection_plus_fast_feed_mm_min,
-            inspection_plus_switching,
+            rigid_tapping=rigid_tapping,
+            rigid_tapping_m29=rigid_tapping_m29,
+            inspection_plus_fast_feed_mm_min=inspection_plus_fast_feed_mm_min,
+            inspection_plus_switching=inspection_plus_switching,
         ),
         rigid_tapping=rigid_tapping,
+        rigid_tapping_m29=rigid_tapping_m29,
         inspection_plus_fast_feed_mm_min=inspection_plus_fast_feed_mm_min,
         inspection_plus_switching=inspection_plus_switching,
         planes=('xy',),
@@ -256,6 +274,15 @@ class Fanuc0iMBPost(GCodePost):
             *self.words(('Z', 'F'), (self.active_tool.position_after_mm[2], self.machine.traverse_feed_mm_min)),
         )
 
+    def tap(self, motion):
+        # §13.2.1/13.2.2 with 5200#0 = 0: "M29 S***** before a tapping
+        # command", S the running speed, directly before G84/G74: an S word or
+        # axis move between them is P/S alarm 203/204 (Appendix G).
+        c = motion.curve
+        if self.machine.rigid_tapping_m29 and c.end[2] < c.start[2] and getattr(self, '_rpm', 0):
+            self.emit('M29', self.word(self.machine.dialect.speed_word, self._rpm, dimensional=False))
+        super().tap(motion)
+
     def on_finish(self):
         # Stop codes only where the tracked state is on or unknown.
         if getattr(self, '_spindle_on', True) is not False:
@@ -275,6 +302,8 @@ class Fanuc0iMBDecoder(NativeGCodeDecoder):
     def __init__(self, machine, program):
         super().__init__(machine, program)
         self.opened = self.numbered = self.end_seen = self.closed = False
+        # M29 S read; the next block must be the G84/G74 it selects.
+        self.rigid_armed = False
 
     def validate_initialized(self):
         super().validate_initialized()
@@ -319,6 +348,23 @@ class Fanuc0iMBDecoder(NativeGCodeDecoder):
         values = {w: float(v) for w, v in pieces if w != 'G'}
         if len(values) != len(pieces) - len(gs) or any(not math.isfinite(v) or abs(v) > 1e9 for v in values.values()):
             raise ValueError('duplicate/nonfinite FANUC words')
+        tapping = gs in ([84.0], [74.0])
+        if self.rigid_armed and not tapping:
+            # Appendix G: P/S 203 (position of M29 or S) and 204 (axis move
+            # between the M29 block and G84/G74).
+            raise ValueError('M29 must be directly followed by its G84/G74 rigid tapping block')
+        # Without the premise, M29 is an ordinary (OEM-bound or undeclared) M code.
+        if values.get('M') == 29 and self.machine.rigid_tapping_m29:
+            if gs or set(values) != {'M', 'S'}:
+                raise ValueError('write M29 S alone in the block before G84/G74')
+            if self.cycle_active or self.rpm <= 0 or values['S'] != self.rpm:
+                raise ValueError('M29 S must repeat the running spindle speed, outside a canned cycle')
+            self.rigid_armed = True
+            return []
+        if tapping:
+            if self.machine.rigid_tapping_m29 and not self.rigid_armed:
+                raise ValueError('rigid tapping under 5200#0 = 0 needs M29 S in the block before G84/G74')
+            self.rigid_armed = False
         precision = 3 if self.machine.output_units == 'mm' else 4
         for word, text in pieces:
             if word in 'XYZIJKFRQ':

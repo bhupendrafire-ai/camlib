@@ -129,6 +129,7 @@ pub struct StreamManifest {
     pub version: u32,
     pub run: RunIdentity,
     pub stock: RunStockSpec,
+    pub initial_stock: Option<crate::stock::InitialStock>,
     pub tools: Vec<ToolAssembly>,
     pub initial_position_mm: Vec3,
     pub sweep: SweepOptions,
@@ -240,11 +241,19 @@ impl StreamManifest {
         match &self.stock {
             RunStockSpec::Height(spec) => {
                 spec.grid()?;
+                if let Some(initial) = &self.initial_stock {
+                    initial.validate(spec)?;
+                }
                 if self.turning.is_some() {
                     return Err("a turning setup needs turning stock".into());
                 }
             }
             RunStockSpec::Turn(spec) => {
+                if self.initial_stock.is_some() {
+                    return Err(
+                        "height-field initial stock is not a turning stock declaration".into(),
+                    );
+                }
                 spec.validate()?;
                 let turning = self
                     .turning
@@ -558,6 +567,8 @@ pub struct StreamReceiver {
     controls: Option<ControlState>,
     /// The last committed motion's tool (None after a restore).
     last_tool: Option<String>,
+    /// Retained cells are not evidence of raw stock, even at cursor zero.
+    restored_from_checkpoint: bool,
 }
 impl StreamProducer {
     pub fn new(manifest: StreamManifest) -> Result<Self, String> {
@@ -632,7 +643,11 @@ impl StreamProducer {
                 .verification
                 .as_ref()
                 .map(|_| {
-                    crate::stream_verification::Runtime::prepare(&state.manifest, state.sequence)
+                    crate::stream_verification::Runtime::prepare(
+                        &state.manifest,
+                        state.sequence,
+                        state.restored_from_checkpoint,
+                    )
                 })
                 .transpose()?
         };
@@ -722,26 +737,11 @@ impl StreamProducer {
         frame(RESTORED, body, limit)
     }
     pub fn restore_checkpoint(&mut self, bytes: &[u8], limit: usize) -> Result<(), String> {
-        self.state.restore_checkpoint(bytes, limit)?;
-        if !self.read_only
-            && self
-                .state
-                .manifest
-                .verification
-                .as_ref()
-                .is_some_and(|c| c.stock_contact.is_some())
-        {
-            self.state
-                .stock
-                .height_mut()?
-                .enable_contact_queries(&std::sync::atomic::AtomicBool::new(false))?;
-        }
-        if let Some(checks) = &mut self.checks {
-            checks.tracker = crate::stream_verification::Tracker::new(
-                checks.tracker.binding.clone(),
-                self.state.sequence,
-            );
-        }
+        let state = StreamReceiver::from_checkpoint(self.state.manifest.clone(), bytes, limit)?;
+        // Reuse construction so no proof counters, touched cells, active
+        // stages or history claims survive a stock replacement. Prepare the
+        // whole replacement before committing any part of the restored state.
+        *self = Self::from_state(state, self.read_only)?;
         Ok(())
     }
     /// Noncommitting prefix query. Consumers overlay it on the move-start stock;
@@ -864,6 +864,22 @@ impl StreamProducer {
         Ok((bytes, check, validation))
     }
     fn push_prepared_motion(
+        &mut self,
+        motion: Motion,
+        cached: Option<StockDelta>,
+        record: bool,
+        verified_cache: bool,
+        limit: usize,
+        cancel: &impl CancelSignal,
+    ) -> Result<PreparedMotionFrames, String> {
+        let result =
+            self.try_push_prepared_motion(motion, cached, record, verified_cache, limit, cancel);
+        if let Some(checks) = &mut self.checks {
+            checks.finish_motion(result.is_ok());
+        }
+        result
+    }
+    fn try_push_prepared_motion(
         &mut self,
         motion: Motion,
         cached: Option<StockDelta>,
@@ -1097,7 +1113,12 @@ impl StreamReceiver {
     pub fn new(manifest: StreamManifest) -> Result<Self, String> {
         manifest.validate()?;
         let stock = match &manifest.stock {
-            RunStockSpec::Height(spec) => RunStock::Height(Box::new(Stock::new(spec.clone())?)),
+            RunStockSpec::Height(spec) => {
+                RunStock::Height(Box::new(match &manifest.initial_stock {
+                    Some(initial) => Stock::from_initial(spec.clone(), initial)?,
+                    None => Stock::new(spec.clone())?,
+                }))
+            }
             RunStockSpec::Turn(spec) => RunStock::Turn(TurnStock::new(spec.clone())?),
         };
         let identity = identity_bytes(&manifest)?;
@@ -1111,6 +1132,7 @@ impl StreamReceiver {
             last_motion_id: None,
             finished: false,
             last_tool: None,
+            restored_from_checkpoint: false,
         })
     }
     /// The committed height-field stock (milling and thermal runs).
@@ -1356,6 +1378,7 @@ impl StreamReceiver {
             finished: false,
             controls: fields.controls,
             last_tool: None,
+            restored_from_checkpoint: true,
         })
     }
     /// A single retained file, parsed into final cell storage in bounded blocks.
@@ -1445,11 +1468,14 @@ impl StreamReceiver {
         cells: Vec<HeightBounds>,
     ) -> Result<Self, String> {
         let identity = identity_bytes(&manifest)?;
-        let stock = Stock::from_snapshot(StockSnapshot {
+        let mut stock = Stock::from_snapshot(StockSnapshot {
             spec: manifest.stock.height()?.clone(),
             generation: fields.generation,
             cells,
         })?;
+        if let Some(initial) = &manifest.initial_stock {
+            stock.initial_volume(initial)?;
+        }
         Ok(Self {
             manifest,
             identity,
@@ -1460,6 +1486,7 @@ impl StreamReceiver {
             finished: false,
             controls: fields.controls,
             last_tool: None,
+            restored_from_checkpoint: true,
         })
     }
     /// A lathe move's first `fraction` from the stock at its start (the
@@ -1925,6 +1952,13 @@ pub fn read_frame(reader: &mut impl Read, limit: usize) -> Result<Option<Vec<u8>
     Ok(Some(output))
 }
 
+/// Frame kinds a frame reader in this crate may dispatch on.
+pub(crate) const CHUNK_KIND: u16 = CHUNK;
+pub(crate) const OPERATION_KIND: u16 = OPERATION;
+/// The kind of a complete frame, from its validated header.
+pub(crate) fn frame_kind(bytes: &[u8]) -> Result<u16, String> {
+    Ok(check_header(bytes, MAX_FRAME_BYTES)?.0)
+}
 fn point_valid(p: Vec3) -> bool {
     p.iter().all(|v| v.is_finite() && v.abs() <= 1e6)
 }

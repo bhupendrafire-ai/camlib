@@ -10,6 +10,7 @@ behind the design are in [DECISIONS.md](DECISIONS.md).
 |---|---|---|
 | Rust engine | `src/` (crate `camlib`) | Geometry, toolpath planning, stock, verification, posting checks |
 | Stream process | `src/bin/sim_stream.rs` (`cam-sim-stream`) | Runs a setup and streams binary frames on stdout |
+| Rust post | `src/gcode/`, `src/post_job.rs`, `src/bin/post_job.rs` (`cam-post`) | The default post, its decoder and the export gate without Python (JSON in, JSON out; issue #120) |
 | Python extension | `bindings/python/` (`camlib._native`) | Buffer kernels, posting intent and decoding, region engine, native receivers |
 | Python API | `python/camlib/` | Jobs and setups, operations, tools, machines and posts, runs, playback, export |
 
@@ -145,7 +146,12 @@ whose old value doesn't match its own stock.
    controller decoder) reads the written blocks back into motion, which is
    compared with the source move within the machine's tolerance. A mismatch
    fails the post. The decoder never trusts the post that produced the output.
-5. Arcs that can't be written exactly at the machine's precision are refused,
+5. Without Python, `src/gcode/` holds a port of the default post and decoder
+   (`GCodePost`, `NativeGCodeDecoder`) driven by the same intent checker, and
+   `src/post_job.rs` the whole `Job.post_nc` run (stock replay, machine model,
+   export gate). Their output must stay byte-identical to the Python default
+   post's (`python/tests/test_rust_post.py`); change both together.
+6. Arcs that can't be written exactly at the machine's precision are refused,
    or become checked segments with `LoweringOptions(native_arcs=True)`.
    `camlib.dynamics.schedule` gives acceleration-aware timing and optional feed
    scheduling.

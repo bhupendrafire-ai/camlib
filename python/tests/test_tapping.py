@@ -390,6 +390,99 @@ class LeftHandTappingTest(unittest.TestCase):
             posted_text(j, machine(j), WrongSpindle, NativeGCodeDecoder)
 
 
+class FanucM29RigidTappingTest(unittest.TestCase):
+    """#96: with parameter No. 5200#0 = 0 the FANUC 0i-MB selects rigid
+    tapping by M29 S in the block before G84/G74 (B-63844EN/02 §13.2.1-13.2.2)."""
+
+    def post(self, hand="right", post=None, **settings):
+        fanuc = example("fanuc_0imb_post")
+        j = job(lambda tap: tapping(tap, hand=hand), tool_change=CHANGE)
+        m = fanuc_machine(fanuc, j, **({"rigid_tapping_m29": True} | settings))
+        return j.post_nc(
+            "top",
+            machine=m,
+            post=post or fanuc.Fanuc0iMBPost,
+            decoder=fanuc.Fanuc0iMBDecoder,
+            accept={"unchecked_machine"},
+        ).text.splitlines()
+
+    def test_golden_m29_s_before_g84_right_and_g74_left(self):
+        for hand, code, spindle in (("right", "G84", "M3"), ("left", "G74", "M4")):
+            with self.subTest(hand):
+                nc = self.post(hand)
+                cycles = [i for i, line in enumerate(nc) if line.startswith(("G74", "G84"))]
+                self.assertEqual(
+                    [nc[i] for i in cycles], [f"{code} X8. Y8. Z4. R11. F600.", f"{code} X20. Y8. Z4. R11. F600."]
+                )
+                for i in cycles:
+                    # M29 repeats the running speed, directly before the cycle.
+                    self.assertEqual(nc[i - 1], "M29 S600")
+                    self.assertEqual(nc[i + 1], "G80")
+                    self.assertIn(spindle, spindle_before(nc, i).split())
+                self.assertEqual(sum(line.startswith("M29") for line in nc), 2)
+
+    def test_g84_without_m29_is_refused_under_the_premise(self):
+        from camlib.post import GCodePost
+
+        fanuc = example("fanuc_0imb_post")
+
+        class NoM29(fanuc.Fanuc0iMBPost):
+            def tap(self, motion):
+                GCodePost.tap(self, motion)
+
+        for hand in ("right", "left"):
+            with self.subTest(hand), self.assertRaisesRegex(Exception, "needs M29 S in the block before G84/G74"):
+                self.post(hand, post=NoM29)
+
+    def test_m29_s_must_match_the_spindle_and_sit_directly_before_the_cycle(self):
+        from camlib.post import GCodePost
+
+        fanuc = example("fanuc_0imb_post")
+
+        class WrongSpeed(fanuc.Fanuc0iMBPost):
+            def tap(self, motion):
+                if motion.curve.end[2] < motion.curve.start[2]:
+                    self.emit("M29", "S" + str(self._rpm + 1))
+                GCodePost.tap(self, motion)
+
+        class Between(fanuc.Fanuc0iMBPost):
+            def tap(self, motion):
+                if motion.curve.end[2] < motion.curve.start[2]:
+                    self.emit("M29", "S" + str(self._rpm))
+                    self.emit("G1", *self.words(("Z", "F"), (motion.curve.start[2], 3000)))
+                GCodePost.tap(self, motion)
+
+        with self.assertRaisesRegex(Exception, "M29 S must repeat the running spindle speed"):
+            self.post(post=WrongSpeed)
+        with self.assertRaisesRegex(Exception, "M29 must be directly followed by its G84/G74"):
+            self.post(post=Between)
+
+    def test_premises_are_explicit_and_exclusive(self):
+        fanuc = example("fanuc_0imb_post")
+        # 5200#0 = 1: G84 alone, M29 is not written and not accepted.
+        nc = self.post(rigid_tapping_m29=False, rigid_tapping=True)
+        self.assertFalse(any(line.startswith("M29") for line in nc))
+
+        class StrayM29(fanuc.Fanuc0iMBPost):
+            def tap(self, motion):
+                if motion.curve.end[2] < motion.curve.start[2]:
+                    self.emit("M29", "S" + str(self._rpm))
+                super().tap(motion)
+
+        with self.assertRaisesRegex(Exception, "undeclared controller command M29"):
+            self.post(post=StrayM29, rigid_tapping_m29=False, rigid_tapping=True)
+        # Neither premise: tapping is refused, as before.
+        with self.assertRaisesRegex(Exception, "declares no tapping cycle"):
+            self.post(rigid_tapping_m29=False)
+        with self.assertRaisesRegex(ValueError, "declare one rigid tapping premise"):
+            self.post(rigid_tapping=True)
+        # M29 cannot also be bound to an OEM function under the premise.
+        oem = dict(tool_change="M6", spindle_cw="M3", spindle_ccw="M4", spindle_off="M5", coolant_off="M29", flood="M8")
+        with self.assertRaisesRegex(ValueError, "M29 selects rigid tapping"):
+            fanuc._dialect(oem, rigid_tapping_m29=True)
+        fanuc._dialect(oem)
+
+
 class ReamingTest(unittest.TestCase):
     def test_reams_drilled_holes_feed_in_feed_out_and_refuses_undrilled(self):
         holder = (HolderSection(35, 60, 6, 6),)
