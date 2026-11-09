@@ -205,12 +205,26 @@ impl MaterialGeometry for PreparedSurfaceTarget {
             }
         }
     }
+    /// Only cells charge (larger tiles are mixed without a query). Per
+    /// cell the envelope query charges at most every hierarchy node, every
+    /// facet, and per candidate facet 3 plus every open edge so far (at
+    /// most 3 per facet): N + T + T(3 + 3T); the inner patches charge
+    /// their segments once each.
+    fn boundary_tests_needed(&self, cells: u64, _tiles: u64) -> u64 {
+        let t = self.surface.prism_count() as u64;
+        let per_cell = (self.surface.node_count() as u64)
+            .saturating_add(t)
+            .saturating_add(t.saturating_mul(3u64.saturating_add(t.saturating_mul(3))))
+            .saturating_add(self.patches.segments());
+        cells.saturating_mul(per_cell)
+    }
     fn bounds(
         &self,
         xy: [f64; 4],
         leaf: bool,
         spec: &StockSpec,
         arithmetic: f64,
+        limit: u64,
         stats: &mut Stats,
         cancel: &impl CancelSignal,
     ) -> Result<Option<(FootprintClass, [f64; 2])>, String> {
@@ -227,7 +241,7 @@ impl MaterialGeometry for PreparedSurfaceTarget {
             outer,
             self.options.geometry_tolerance_mm + arithmetic,
             &mut stats.estimated_boundary_tests,
-            self.options.max_boundary_tests,
+            limit,
             cancel,
         )?
         else {
@@ -243,10 +257,7 @@ impl MaterialGeometry for PreparedSurfaceTarget {
             xy,
             height[0],
             arithmetic,
-            (
-                &mut stats.estimated_boundary_tests,
-                self.options.max_boundary_tests,
-            ),
+            (&mut stats.estimated_boundary_tests, limit),
             cancel,
         )?
         else {

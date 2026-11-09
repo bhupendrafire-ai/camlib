@@ -31,8 +31,9 @@
 //!   chord's point at f, so the chord's sections grow radially by that
 //!   (and lift by it when the arc's plane is not XY).
 //!
-//! A cell is decided only when the stream started from the raw stock (the
-//! whole history was proven), and never from a definite gouge.
+//! A cell is decided only when the whole history since the raw stock was
+//! proven (the stream started there, or resumed from a producer checkpoint
+//! that kept this proof's state, #108), and never from a definite gouge.
 use super::*;
 use crate::flat::{Index, Section, enclosing_sections};
 use crate::motion::{Curve, Motion, Plane, Vec3};
@@ -49,8 +50,10 @@ pub struct SweepProofReport {
     pub surface_error_mm: f64,
     pub proven_moves: u64,
     pub unproven_moves: u64,
-    /// Whether every motion since the raw stock was seen (a resumed stream
-    /// proves nothing about the motions before it).
+    /// Whether every motion since the raw stock was seen: true for a stream
+    /// started from the raw stock, or resumed from a producer checkpoint
+    /// that kept the proof state (#108); false after resuming from a
+    /// checkpoint without it (the motions before it are unseen).
     pub history_complete: bool,
     /// The report's possible-only gouge cells the proof decides (no
     /// unproven move touches them): when it equals the report's
@@ -120,6 +123,46 @@ impl Geometry {
         }
         Ok(true)
     }
+}
+
+/// A proof state's fixed fields: history flag, proven and unproven counts,
+/// cell count, encoding, payload length.
+const STATE_FIXED: usize = 1 + 8 + 8 + 8 + 1 + 8;
+/// Touched cells as raw bits (cell i is bit i % 8 of byte i / 8).
+const STATE_BITS: u8 = 0;
+/// Touched cells as alternating run lengths (LEB128), untouched first.
+const STATE_RUNS: u8 = 1;
+
+fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push(v as u8 | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+/// A canonical LEB128 value (no redundant trailing groups).
+fn get_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
+    let mut v = 0u64;
+    for shift in (0..64).step_by(7) {
+        let b = *bytes.get(*at)?;
+        *at += 1;
+        if shift == 63 && b > 1 {
+            return None;
+        }
+        v |= u64::from(b & 0x7f) << shift;
+        if b & 0x80 == 0 {
+            return (b != 0 || shift == 0).then_some(v);
+        }
+    }
+    None
+}
+
+/// A decoded checkpoint state (see `SweepProof::state`).
+pub(crate) struct ProofState {
+    history_complete: bool,
+    proven: u64,
+    unproven: u64,
+    touched: Vec<bool>,
 }
 
 pub(crate) struct SweepProof {
@@ -510,6 +553,133 @@ impl SweepProof {
         self.history_complete && self.geometry.is_some() && !self.touched[cell]
     }
 
+    /// The largest `state` encoding for a grid of `cells` (raw bits plus the
+    /// fixed fields): a reader's bound before it allocates.
+    pub(crate) fn max_state_bytes(cells: usize) -> usize {
+        STATE_FIXED + cells.div_ceil(8)
+    }
+
+    /// The proof's state after the motions seen so far (#108), for a stream
+    /// checkpoint at the same cursor: whether the history is complete, the
+    /// proven and unproven counts, and the touched cells (one bit per cell,
+    /// run-length coded when that is smaller). Everything else the proof
+    /// holds is derived from the run's manifest.
+    pub(crate) fn state(&self) -> Vec<u8> {
+        let cells = self.touched.len();
+        let raw = {
+            let mut bits = vec![0u8; cells.div_ceil(8)];
+            for (i, _) in self.touched.iter().enumerate().filter(|(_, t)| **t) {
+                bits[i / 8] |= 1 << (i % 8);
+            }
+            bits
+        };
+        // Alternating run lengths, the first of untouched cells (may be 0).
+        let mut runs = Vec::new();
+        let (mut value, mut length) = (false, 0u64);
+        for &t in &self.touched {
+            if t != value {
+                put_varint(&mut runs, length);
+                (value, length) = (t, 0);
+            }
+            length += 1;
+        }
+        put_varint(&mut runs, length);
+        let (mode, payload) = if runs.len() < raw.len() {
+            (STATE_RUNS, runs)
+        } else {
+            (STATE_BITS, raw)
+        };
+        let mut out = Vec::with_capacity(STATE_FIXED + payload.len());
+        out.push(u8::from(self.history_complete));
+        out.extend_from_slice(&self.proven.to_le_bytes());
+        out.extend_from_slice(&self.unproven.to_le_bytes());
+        out.extend_from_slice(&(cells as u64).to_le_bytes());
+        out.push(mode);
+        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    /// Decode a checkpoint's `state` for this proof (its cursor and run
+    /// identity were checked by the stream). Refuses a state for another
+    /// grid or a malformed one; `apply_state` then continues from it.
+    pub(crate) fn decode_state(&self, state: &[u8]) -> Result<ProofState, String> {
+        let bad = || "invalid material proof state in checkpoint".to_string();
+        let u64_at = |at: usize| -> Result<u64, String> {
+            state
+                .get(at..at + 8)
+                .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+                .ok_or_else(bad)
+        };
+        if state.len() < STATE_FIXED || state[0] > 1 {
+            return Err(bad());
+        }
+        let (proven, unproven) = (u64_at(1)?, u64_at(9)?);
+        let cells = self.touched.len();
+        if u64_at(17)? != cells as u64 {
+            return Err("checkpoint material proof state is for another stock grid".into());
+        }
+        let mode = state[25];
+        let length = u64_at(26)?;
+        let payload = &state[STATE_FIXED..];
+        if payload.len() as u64 != length {
+            return Err(bad());
+        }
+        let mut touched = vec![false; cells];
+        match mode {
+            STATE_BITS => {
+                if payload.len() != cells.div_ceil(8)
+                    || (!cells.is_multiple_of(8) && payload[payload.len() - 1] >> (cells % 8) != 0)
+                {
+                    return Err(bad());
+                }
+                for (i, t) in touched.iter_mut().enumerate() {
+                    *t = payload[i / 8] >> (i % 8) & 1 == 1;
+                }
+            }
+            STATE_RUNS => {
+                let (mut at, mut cell, mut value) = (0, 0usize, false);
+                while at < payload.len() {
+                    let run = get_varint(payload, &mut at).ok_or_else(bad)?;
+                    // Only the first run (untouched) may be empty.
+                    if (run == 0 && cell != 0) || run > (cells - cell) as u64 {
+                        return Err(bad());
+                    }
+                    touched[cell..cell + run as usize].fill(value);
+                    cell += run as usize;
+                    value = !value;
+                }
+                if cell != cells {
+                    return Err(bad());
+                }
+            }
+            _ => return Err(bad()),
+        }
+        Ok(ProofState {
+            history_complete: state[0] == 1,
+            proven,
+            unproven,
+            touched,
+        })
+    }
+
+    pub(crate) fn apply_state(&mut self, state: ProofState) {
+        self.history_complete = state.history_complete;
+        self.proven = state.proven;
+        self.unproven = state.unproven;
+        self.touched = state.touched;
+    }
+
+    /// Forget every motion: the state of a stream at cursor `completed`
+    /// with nothing restored (a fresh run when 0; otherwise the history
+    /// before the cursor is unseen).
+    pub(crate) fn reset(&mut self, completed: u64) {
+        self.history_complete = completed == 0;
+        self.proven = 0;
+        self.unproven = 0;
+        self.touched.fill(false);
+    }
+
     pub(crate) fn report(&self, decided_cells: usize) -> SweepProofReport {
         SweepProofReport {
             tolerance_mm: self.tolerance,
@@ -520,7 +690,7 @@ impl SweepProof {
             decided_cells,
             unavailable: self.unavailable.clone().or_else(|| {
                 (!self.history_complete)
-                    .then(|| "the stream resumed after motions this check did not see".to_string())
+                    .then(|| "the stream resumed from a checkpoint without this check's proof state, after motions it did not see (resume from the producer's own checkpoint, which keeps it)".to_string())
             }),
         }
     }
@@ -940,6 +1110,106 @@ mod tests {
         };
         assert!(arc.prepare(1e-6).is_err());
         assert!(proves(&mut p, &flat, arc));
+    }
+
+    #[test]
+    fn proof_state_round_trips_in_both_encodings_and_refuses_malformed_states() {
+        let cells = 100 * 100;
+        let mut seed = 0x2545f4914f6cdd1du64;
+        let mut rand = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        // Footprint rectangles (runs win) and scattered cells (bits win),
+        // plus the empty and full maps.
+        let mut patterns: Vec<Vec<bool>> = vec![vec![false; cells], vec![true; cells]];
+        let mut rects = vec![false; cells];
+        for _ in 0..5 {
+            let (x0, y0) = ((rand() % 90) as usize, (rand() % 90) as usize);
+            for y in y0..y0 + 8 {
+                rects[y * 100 + x0..y * 100 + x0 + 8].fill(true);
+            }
+        }
+        patterns.push(rects);
+        patterns.push((0..cells).map(|_| rand() % 3 == 0).collect());
+        let mut modes = std::collections::HashSet::new();
+        for touched in patterns {
+            let mut p = proof(0.005, 0.0005, true);
+            assert_eq!(p.touched.len(), cells);
+            p.touched = touched.clone();
+            (p.proven, p.unproven, p.history_complete) = (rand() >> 8, rand() >> 8, false);
+            let state = p.state();
+            assert!(state.len() <= SweepProof::max_state_bytes(cells));
+            modes.insert(state[25]);
+            let mut q = proof(0.005, 0.0005, true);
+            let decoded = q.decode_state(&state).unwrap();
+            q.apply_state(decoded);
+            assert_eq!(
+                (&q.touched, q.proven, q.unproven, q.history_complete),
+                (&touched, p.proven, p.unproven, false)
+            );
+            assert_eq!(q.state(), state);
+        }
+        assert_eq!(modes.len(), 2, "both encodings exercised");
+
+        let mut p = proof(0.005, 0.0005, true);
+        p.touched[4321] = true;
+        let runs = p.state();
+        assert_eq!(runs[25], STATE_RUNS);
+        p.touched = (0..cells).map(|i| i % 2 == 0).collect();
+        let bits = p.state();
+        assert_eq!(bits[25], STATE_BITS);
+        let q = proof(0.005, 0.0005, true);
+        let refuse = |state: Vec<u8>| assert!(q.decode_state(&state).is_err(), "{state:?}");
+        // Truncated, trailing byte, bad history flag, unknown encoding.
+        refuse(runs[..runs.len() - 1].to_vec());
+        refuse([runs.clone(), vec![0]].concat());
+        refuse([vec![2], runs[1..].to_vec()].concat());
+        let mut bad = runs.clone();
+        bad[25] = 7;
+        refuse(bad);
+        // Another grid's state.
+        let mut bad = bits.clone();
+        bad[17..25].copy_from_slice(&(cells as u64 + 8).to_le_bytes());
+        refuse(bad);
+        // Runs: too short a total, an empty inner run, overlong and
+        // non-canonical varints.
+        let with_runs = |runs: &[u8]| {
+            let mut state = bits[..STATE_FIXED].to_vec();
+            state[25] = STATE_RUNS;
+            state[26..34].copy_from_slice(&(runs.len() as u64).to_le_bytes());
+            state.extend_from_slice(runs);
+            state
+        };
+        let mut ok = Vec::new();
+        put_varint(&mut ok, cells as u64);
+        assert!(q.decode_state(&with_runs(&ok)).is_ok());
+        let mut short = Vec::new();
+        put_varint(&mut short, cells as u64 - 1);
+        refuse(with_runs(&short));
+        let mut empty = Vec::new();
+        for v in [10, 0, cells as u64 - 10] {
+            put_varint(&mut empty, v);
+        }
+        refuse(with_runs(&empty));
+        let mut over = Vec::new();
+        put_varint(&mut over, cells as u64 + 1);
+        refuse(with_runs(&over));
+        refuse(with_runs(&[0x90, 0xce, 0x00]));
+        refuse(with_runs(&[0xff; 11]));
+        // Bits: a set bit past the last cell (a grid of 9997 cells).
+        let mut p = proof(0.005, 0.0005, true);
+        p.touched = (0..cells - 3).map(|i| i % 2 == 0).collect();
+        let mut odd = p.state();
+        assert_eq!(odd[25], STATE_BITS);
+        let mut q = proof(0.005, 0.0005, true);
+        q.touched.truncate(cells - 3);
+        assert!(q.decode_state(&odd).is_ok());
+        let last = odd.len() - 1;
+        odd[last] |= 0x80;
+        assert!(q.decode_state(&odd).is_err());
     }
 
     #[test]

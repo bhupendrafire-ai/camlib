@@ -57,6 +57,10 @@ def _material(report):
         text += f", residual {residual['assessment']} ({_cells(residual)})"
     if not report["complete"]:
         text += ", analysis incomplete"
+        stop = (report.get("stats") or {}).get("stopped_by")
+        if stop is not None:
+            # Which work budget stopped it, and what would complete it (#108).
+            text += f" ({stop['message']})"
     proof = report.get("sweep_proof")
     if proof is not None and proof["decided_cells"] != gouge["possible_only_cells"]:
         if proof.get("unavailable"):

@@ -130,7 +130,7 @@ fn source_premises_work_exhaustion_cancellation_and_identity_remain_explicit() {
     );
     let limited = d
         .prepare(Options {
-            max_boundary_tests: 1,
+            max_boundary_tests: Some(1),
             ..Options::default()
         })
         .unwrap();

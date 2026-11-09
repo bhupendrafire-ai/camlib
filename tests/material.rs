@@ -192,7 +192,7 @@ fn capped_analysis_keeps_upper_volume_and_findings_truncation_does_not_change_su
     enclose(capped.residual.volume_mm3, 80.);
     let capped = definition
         .prepare(Options {
-            max_boundary_tests: 1,
+            max_boundary_tests: Some(1),
             ..Options::default()
         })
         .unwrap()
@@ -297,7 +297,7 @@ fn empty_target_preserves_stock_and_invalid_definitions_contexts_are_rejected() 
     assert!(
         target(rectangle(-2., -2., 6., 6.))
             .prepare(Options {
-                max_tile_nodes: 0,
+                max_tile_nodes: Some(0),
                 ..Options::default()
             })
             .is_err()
