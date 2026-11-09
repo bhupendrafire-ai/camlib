@@ -41,6 +41,24 @@ _PAIR = struct.Struct("<dd")
 _ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 
+# Move kinds in their wire order (src/stream.rs).
+_MOVE_KINDS = (
+    "rapid",
+    "cut",
+    "plunge",
+    "lead",
+    "link",
+    "retract",
+    "tap",
+    "shift",
+    "thread",
+    "probe_position",
+    "probe_measure",
+    "probe_touch",
+    "probe_return",
+)
+
+
 class ProtocolError(ValueError):
     pass
 
@@ -55,6 +73,56 @@ class CamWarning(UserWarning):
 
 class SimulationError(RuntimeError):
     pass
+
+
+_REACH_MARKER = "camlib-reach-refusal: "
+
+
+@dataclass(frozen=True)
+class ReachRefusal:
+    """Why a tool assembly cannot reach the depth an operation needs.
+
+    ``limit`` is ``"cutting_length"``, ``"neck"``, ``"shank"`` or ``"holder"``
+    (``holder_section`` gives which). Depths are measured down from
+    ``top_z_mm`` (the operation's top for the cutting length, the
+    obstruction's top for a neck, shank or holder section) to ``z_mm``, the
+    lowest tip Z the operation needs: ``depth_needed_mm = top_z_mm - z_mm``.
+    ``depth_available_mm`` is how far below that top the tip can go before the
+    limiting part meets it (the cutting length, or the part's bottom height
+    above the tip)."""
+
+    operation: str
+    tool: str
+    limit: str
+    holder_section: int | None
+    depth_needed_mm: float
+    depth_available_mm: float
+    top_z_mm: float
+    z_mm: float
+
+
+class ReachRefused(SimulationError):
+    """A planning refusal because the tool assembly cannot reach: the
+    message is the engine's, and ``refusal`` holds the typed reason."""
+
+    def __init__(self, message, refusal):
+        super().__init__(message)
+        self.refusal = refusal
+
+
+def _stream_error(diagnostic):
+    """The error for a native stream's diagnostic: ``ReachRefused`` when the
+    engine refused for reach (its marker line is removed from the message),
+    otherwise ``SimulationError``."""
+    at = diagnostic.rfind(_REACH_MARKER)
+    if at < 0:
+        return SimulationError(diagnostic)
+    try:
+        data, _ = json.JSONDecoder().raw_decode(diagnostic, at + len(_REACH_MARKER))
+        refusal = ReachRefusal(**data)
+    except (ValueError, TypeError):
+        return SimulationError(diagnostic)
+    return ReachRefused(diagnostic[:at].rstrip("\n"), refusal)
 
 
 class StockMesh:
@@ -286,6 +354,42 @@ class StockSpec:
 
 
 @dataclass(frozen=True)
+class InitialStock:
+    """Declared whole-cell top-down blank bounds in the setup frame.
+
+    ``bounds_mm`` has one (lower, upper) pair per StockSpec grid cell, in
+    row-major XY order. The caller establishes that the bounds cover the real
+    blank, its placement and source error. Cavities under overhangs are not
+    represented. This is a new stock premise, never a snapshot-proof shortcut.
+    """
+
+    source_id: str
+    revision: str
+    source_sha256: str
+    bounds_mm: tuple
+    source_to_setup: object
+    uncertainty_mm: float
+
+    def __post_init__(self):
+        if not isinstance(self.bounds_mm, (list, tuple)) or any(
+            not isinstance(pair, (list, tuple)) or len(pair) != 2 for pair in self.bounds_mm
+        ):
+            raise TypeError('initial stock bounds need a finite collection of lower/upper pairs')
+        object.__setattr__(self, 'bounds_mm', tuple(tuple(pair) for pair in self.bounds_mm))
+
+    def to_dict(self):
+        return dict(
+            source_id=self.source_id,
+            revision=self.revision,
+            source_sha256=self.source_sha256,
+            source_to_setup=asdict(self.source_to_setup),
+            uncertainty_mm=self.uncertainty_mm,
+            representation='whole_cell_top_down',
+            bounds=[dict(lower_mm=lo, upper_mm=hi) for lo, hi in self.bounds_mm],
+        )
+
+
+@dataclass(frozen=True)
 class ToolChangePosition:
     """Where the machine leaves a new tool, in work coordinates: the spindle
     gauge line at ``gauge_z_mm`` (e.g. Z home, where M6 sends it) over
@@ -484,7 +588,7 @@ class _Decoder:
         feed_flag, feed = self.unpack("<Bd")
         curve_kind = self.number("<B")
         start, end = self.unpack("<3d"), self.unpack("<3d")
-        if kind > 8 or curve_kind > 2 or feed_flag > 1 or (not feed_flag and feed != 0):
+        if kind >= len(_MOVE_KINDS) or curve_kind > 2 or feed_flag > 1 or (not feed_flag and feed != 0):
             raise ProtocolError("invalid motion/curve/feed discriminator")
         curve = {"kind": ("line", "arc", "helix")[curve_kind], "start": start, "end": end}
         if curve_kind:
@@ -497,7 +601,7 @@ class _Decoder:
             "id": identifier,
             "operation": operation,
             "tool": tool,
-            "kind": ("rapid", "cut", "plunge", "lead", "link", "retract", "tap", "shift", "thread")[kind],
+            "kind": _MOVE_KINDS[kind],
             "feed_mm_min": feed if feed_flag else None,
             "curve": curve,
         }
@@ -676,6 +780,9 @@ class VerificationUpdate:
                     source="stock",
                     cell_range=finding["cell_range"],
                     contact_point_mm=finding["contact_point_mm"],
+                    obstruction_top_mm=finding.get("obstruction_top_mm"),
+                    lowest_tip_z_mm=finding.get("lowest_tip_z_mm"),
+                    max_clear_radius_mm=finding.get("max_clear_radius_mm"),
                 )
 
 
@@ -763,7 +870,7 @@ class StockState:
         if (
             not required
             <= set(m)
-            <= required | {"operations", "verification", "geometry", "tool_change", "rapid_retracts"}
+            <= required | {"operations", "verification", "geometry", "tool_change", "rapid_retracts", "initial_stock"}
             or type(m["version"]) is not int
             or m["version"] not in (1, 2)
         ):
@@ -802,7 +909,16 @@ class StockState:
             except (ValueError, TypeError, UnicodeError) as error:
                 raise ProtocolError(str(error)) from error
         self._heights = _height_storage(count * 2)
-        if "mesh" in spec:
+        self._initial_volume = None
+        if 'initial_stock' in m:
+            try:
+                _native_buffers.initialise_declared_stock(self._heights, self.canonical_manifest.decode())
+                self._initial_volume = _native_buffers.volume(
+                    self._heights, self.min_mm[2], self.max_mm[2], self.dx * self.dy
+                )[:2]
+            except (ValueError, TypeError) as error:
+                raise ProtocolError(str(error)) from error
+        elif "mesh" in spec:
             # The run starts from the mesh, converted as the engine does.
             try:
                 _native_buffers.initialise_stock(self._heights, json.dumps(spec, allow_nan=False))
@@ -829,6 +945,8 @@ class StockState:
         ):
             raise ProtocolError("invalid tool change pose")
         self._tool_change = change
+        # Fresh native-initialized cells match the manifest's initial premise.
+        # Restoring any checkpoint resets this flag, even at move zero.
         self._token, self._initial_full_stock = object(), True
 
     def tool_change_tip(self, tool, position=None):
@@ -941,7 +1059,10 @@ class StockState:
                 raise ProtocolError("programmed feed must be positive and finite")
         if self._control_context is not None:
             try:
-                self._control_context.check_tool(motion['tool'], motion['kind'] in ('rapid', 'shift'))
+                # Rapids, oriented shifts and probing moves need no running spindle.
+                self._control_context.check_tool(
+                    motion['tool'], motion['kind'] in ('rapid', 'shift') or motion['kind'].startswith('probe_')
+                )
             except ValueError as error:
                 raise ProtocolError(str(error)) from error
 
@@ -1127,6 +1248,12 @@ class StockState:
 
     def volume(self):
         values = _native_buffers.volume(self._heights, self.min_mm[2], self.max_mm[2], self.dx * self.dy)
+        return self._volume_from_bounds(values)
+
+    def _volume_from_bounds(self, values):
+        if self._initial_volume is not None:
+            lo, hi = values[:2]
+            values = (lo, hi, max(0, self._initial_volume[0] - hi), max(0, self._initial_volume[1] - lo))
         return dict(
             zip(("remaining_lower_mm3", "remaining_upper_mm3", "removed_lower_mm3", "removed_upper_mm3"), values)
         )
@@ -1405,6 +1532,60 @@ class MaterialStage:
     after_operation: str
 
 
+def simulation_manifest(
+    stock,
+    tools,
+    *,
+    revision,
+    initial_position_mm,
+    run_id=None,
+    sweep=None,
+    operations=(),
+    verification=None,
+    stream_version=1,
+    tool_change=None,
+    rapid_retracts=True,
+    turning=None,
+    initial_stock=None,
+):
+    """The JSON stream manifest a ``Simulation`` sends to ``cam-sim-stream``
+    (also the setup manifest of a ``camlib.post.post_job`` input)."""
+    if type(stream_version) is not int or stream_version not in (1, 2) or stream_version == 2 and operations:
+        raise ValueError('stream_version must be 1 or 2; version 2 uses authored typed events')
+    manifest = {
+        "version": stream_version,
+        "run": {"id": run_id or uuid.uuid4().hex, "revision": revision},
+        "stock": stock.to_dict() if hasattr(stock, "to_dict") else stock,
+        "tools": [t.to_dict() if hasattr(t, "to_dict") else t for t in tools],
+        "initial_position_mm": initial_position_mm,
+        "sweep": dict(sweep) if isinstance(sweep, dict) else asdict(sweep or SweepOptions()),
+    }
+    if operations:
+        if not isinstance(operations, (list, tuple)):
+            raise TypeError("operations must be a list or tuple (a finite collection)")
+        definitions = list(operations)
+        manifest["operations"] = [op.to_dict() if hasattr(op, "to_dict") else op for op in definitions]
+    if initial_stock is not None:
+        manifest["initial_stock"] = initial_stock.to_dict() if hasattr(initial_stock, "to_dict") else initial_stock
+    if verification is not None:
+        manifest["verification"] = verification.to_dict() if hasattr(verification, "to_dict") else verification
+    if tool_change is not None:
+        manifest["tool_change"] = tool_change.to_dict() if hasattr(tool_change, "to_dict") else dict(tool_change)
+    if type(rapid_retracts) is not bool:
+        raise ValueError("rapid_retracts must be a bool")
+    if turning is not None:
+        # A lathe run: its turning setup plans and checks every move.
+        if operations or verification is not None or tool_change is not None:
+            raise ValueError("a lathe run takes its operations from its turning setup (no milling checks/poses)")
+        manifest["turning"] = turning
+    elif rapid_retracts:
+        manifest["rapid_retracts"] = True
+    from ._geometry import share_geometry
+
+    manifest = share_geometry(manifest)
+    return manifest
+
+
 class Simulation:
     """Synchronous headless API; each yielded update includes authoritative stock.
 
@@ -1429,39 +1610,24 @@ class Simulation:
         tool_change=None,
         rapid_retracts=True,
         turning=None,
+        initial_stock=None,
         _on_spawn=None,
     ):
-        if type(stream_version) is not int or stream_version not in (1, 2) or stream_version == 2 and operations:
-            raise ValueError('stream_version must be 1 or 2; version 2 uses authored typed events')
-        manifest = {
-            "version": stream_version,
-            "run": {"id": run_id or uuid.uuid4().hex, "revision": revision},
-            "stock": stock.to_dict() if hasattr(stock, "to_dict") else stock,
-            "tools": [t.to_dict() if hasattr(t, "to_dict") else t for t in tools],
-            "initial_position_mm": initial_position_mm,
-            "sweep": dict(sweep) if isinstance(sweep, dict) else asdict(sweep or SweepOptions()),
-        }
-        if operations:
-            if not isinstance(operations, (list, tuple)):
-                raise TypeError("operations must be a list or tuple (a finite collection)")
-            definitions = list(operations)
-            manifest["operations"] = [op.to_dict() if hasattr(op, "to_dict") else op for op in definitions]
-        if verification is not None:
-            manifest["verification"] = verification.to_dict() if hasattr(verification, "to_dict") else verification
-        if tool_change is not None:
-            manifest["tool_change"] = tool_change.to_dict() if hasattr(tool_change, "to_dict") else dict(tool_change)
-        if type(rapid_retracts) is not bool:
-            raise ValueError("rapid_retracts must be a bool")
-        if turning is not None:
-            # A lathe run: its turning setup plans and checks every move.
-            if operations or verification is not None or tool_change is not None:
-                raise ValueError("a lathe run takes its operations from its turning setup (no milling checks/poses)")
-            manifest["turning"] = turning
-        elif rapid_retracts:
-            manifest["rapid_retracts"] = True
-        from ._geometry import share_geometry
-
-        manifest = share_geometry(manifest)
+        manifest = simulation_manifest(
+            stock,
+            tools,
+            revision=revision,
+            initial_position_mm=initial_position_mm,
+            run_id=run_id,
+            sweep=sweep,
+            operations=operations,
+            verification=verification,
+            stream_version=stream_version,
+            tool_change=tool_change,
+            rapid_retracts=rapid_retracts,
+            turning=turning,
+            initial_stock=initial_stock,
+        )
         self._regeneration = regeneration
         self.executable = _executable("cam-sim-stream", executable)
         self._errors = tempfile.TemporaryFile()
@@ -1494,7 +1660,7 @@ class Simulation:
             self._process.stdin.write(raw)
             self._process.stdin.flush()
         except (OSError, ValueError) as error:
-            raise SimulationError(self._diagnostic()) from error
+            raise _stream_error(self._diagnostic()) from error
 
     def _diagnostic(self):
         if self.cancelled:
@@ -1524,7 +1690,7 @@ class Simulation:
         if not self._fill(20):
             if len(self._buffer) > self._at:
                 raise ProtocolError("truncated simulation stream")
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         magic, version, kind, length, _ = _HEADER.unpack_from(self._buffer, self._at)
         if magic != b"CAMLSTRM" or version != 1 or kind not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
             raise ProtocolError("unsupported stream header")
@@ -1541,7 +1707,7 @@ class Simulation:
         committed-motion frames already buffered (at least one, reading if
         needed); None when the next frame is another kind."""
         if not self._fill(20):
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         kind = _HEADER.unpack_from(self._buffer, self._at)[2]
         if kind not in (1, 10) and not (kind == 8 and checks and self._last_motion_frame is not None):
             return None
@@ -1802,7 +1968,10 @@ class Simulation:
                         or data["report"].get("geometric_residual_status") not in ("estimated", "unknown")
                     ):
                         raise ProtocolError("operation end order mismatch")
-                    if active_cuts == 0:
+                    if definitions[completed_operations].get("kind") == "probe":
+                        # Probing and tool setting never cut, by design.
+                        pass
+                    elif active_cuts == 0:
                         warnings.warn(
                             f"operation {active!r} produced no cutting motion (region smaller "
                             "than the tool, outside the stock, or already cleared)",
@@ -1845,7 +2014,7 @@ class Simulation:
                 if self._verification is not None:
                     self._verification.finish(self.state.completed)
                 if self._process.wait(timeout=5) != 0:
-                    raise SimulationError(self._diagnostic())
+                    raise _stream_error(self._diagnostic())
                 self._pending, self.end_frame = 0, frame
                 return
             else:
@@ -1869,7 +2038,7 @@ class Simulation:
         if not self.state.finished:
             raise ProtocolError("native simulation did not send explicit finish")
         if self._process.wait(timeout=5) != 0:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         self.end_frame = frame
         if self._verification is not None:
             self._verification.finish(self.state.completed)
@@ -1943,21 +2112,21 @@ class PrefixSession:
 
     def _next(self):
         if self._closed:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         frame = Frame.read(self._process.stdout)
         if frame is None:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         return frame
 
     def _send(self, command):
         if self._closed:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         raw = json.dumps(command, allow_nan=False, separators=(",", ":")).encode() + b"\n"
         try:
             self._process.stdin.write(raw)
             self._process.stdin.flush()
         except (OSError, ValueError) as error:
-            raise SimulationError(self._diagnostic()) from error
+            raise _stream_error(self._diagnostic()) from error
 
     def _matching_state(self, state):
         if state.fraction or state.finished or state._digest != self._digest:

@@ -1742,3 +1742,328 @@ class TrochoidalSlot:
         if "path_mm" in result:
             result["path_mm"] = [list(vertex) for vertex in result["path_mm"]]
         return result
+
+
+# Probing and tool setting (issue #7). camlib plans, simulates and posts the
+# cycles; it never reads results back from a machine.
+
+
+def _probe_point(value, n, what):
+    point = tuple(float(v) for v in value)
+    if len(point) != n or not all(math.isfinite(v) for v in point):
+        raise ValueError(f"{what} needs {n} finite coordinates")
+    return point
+
+
+@dataclass(frozen=True)
+class _Probing:
+    """Common probing parameters. ``clearance_z_mm`` is the plane rapids
+    reach the cycle over and, for stylus cycles, the protected retract
+    height. The surface is expected within ``search_mm`` of nominal: the
+    measuring move is checked clear until ``search_mm`` before the expected
+    contact and searches ``search_mm`` beyond it."""
+
+    id: str
+    tool: object
+    clearance_z_mm: float = field(kw_only=True)
+    search_mm: float = field(kw_only=True)
+    measure_feed_mm_min: float = field(kw_only=True)
+    return_feed_mm_min: float = field(kw_only=True)
+    tool_number: int = field(kw_only=True)
+    length_register: int = field(kw_only=True)
+    work_offset: int = field(default=1, kw_only=True)
+    tolerance_mm: float | None = field(default=None, kw_only=True)
+
+    def _dict(self, feature, result, **extra):
+        data = {
+            "kind": "probe",
+            "id": self.id,
+            "tool": getattr(self.tool, "id", self.tool),
+            "tool_number": self.tool_number,
+            "length_register": self.length_register,
+            "work_offset": self.work_offset,
+            "clearance_z_mm": self.clearance_z_mm,
+            "feature": feature,
+            "result": result,
+            "search_mm": self.search_mm,
+            "measure_feed_mm_min": self.measure_feed_mm_min,
+            "return_feed_mm_min": self.return_feed_mm_min,
+            **extra,
+        }
+        if self.tolerance_mm is not None:
+            data["tolerance_mm"] = self.tolerance_mm
+        return data
+
+
+@dataclass(frozen=True)
+class _StylusProbing(_Probing):
+    """A cycle with a probe (``camlib.ProbeTool``) that corrects work offset
+    ``update_work_offset`` (1 = G54 .. 9) by the measured error: new offset =
+    active offset + error, in the axes the feature measures. Every move below
+    the clearance plane that is not a measuring move is protected: the
+    machine stops if the stylus triggers."""
+
+    position_feed_mm_min: float = field(kw_only=True)
+    update_work_offset: int = field(kw_only=True)
+
+    def _stylus(self, feature):
+        return self._dict(
+            feature,
+            {"kind": "work_offset", "number": self.update_work_offset},
+            position_feed_mm_min=self.position_feed_mm_min,
+        )
+
+
+def _axis(axis, allowed):
+    if axis not in allowed:
+        raise ValueError(f"axis must be one of {allowed}")
+    return axis
+
+
+@dataclass(frozen=True)
+class ProbeSurface(_StylusProbing):
+    """One surface square to ``axis`` ('x', 'y' or 'z') at ``surface_mm``,
+    measured from ``start_mm`` (the probe tip) along that axis toward it and
+    back (Renishaw Inspection Plus O9811). A Z surface is probed from above."""
+
+    start_mm: tuple = field(kw_only=True)
+    axis: str = field(kw_only=True)
+    surface_mm: float = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "start_mm", _probe_point(self.start_mm, 3, "start_mm"))
+        _axis(self.axis, ("x", "y", "z"))
+
+    def to_dict(self):
+        return self._stylus(
+            {"kind": "surface", "start_mm": self.start_mm, "axis": self.axis, "surface_mm": self.surface_mm}
+        )
+
+
+@dataclass(frozen=True)
+class ProbeOutsideCorner(_StylusProbing):
+    """An outside corner at ``corner_mm``; the part's material lies on the
+    ``material`` side ((+1 or -1, +1 or -1): +X and +Y of the corner for
+    (1, 1)). Each face is touched ``inset_mm`` along it from the corner,
+    from ``clearance_mm`` away, the probe tip at ``z_mm``: the Y face, then
+    the X face, each from the clearance plane."""
+
+    corner_mm: tuple = field(kw_only=True)
+    z_mm: float = field(kw_only=True)
+    material: tuple = field(kw_only=True)
+    inset_mm: float = field(kw_only=True)
+    clearance_mm: float = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "corner_mm", _probe_point(self.corner_mm, 2, "corner_mm"))
+        object.__setattr__(self, "material", tuple(int(v) for v in self.material))
+
+    def to_dict(self):
+        return self._stylus(
+            {
+                "kind": "outside_corner",
+                "corner_mm": self.corner_mm,
+                "z_mm": self.z_mm,
+                "material": self.material,
+                "inset_mm": self.inset_mm,
+                "clearance_mm": self.clearance_mm,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class ProbeInsideCorner(_StylusProbing):
+    """An inside corner at ``corner_mm``; the walls lie on the ``material``
+    side of the start point, which is ``clearance_mm`` from both walls. The
+    Y wall, then the X wall, from that one start point and back (Renishaw
+    Inspection Plus O9815 without I/J)."""
+
+    corner_mm: tuple = field(kw_only=True)
+    z_mm: float = field(kw_only=True)
+    material: tuple = field(kw_only=True)
+    clearance_mm: float = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "corner_mm", _probe_point(self.corner_mm, 2, "corner_mm"))
+        object.__setattr__(self, "material", tuple(int(v) for v in self.material))
+
+    def to_dict(self):
+        return self._stylus(
+            {
+                "kind": "inside_corner",
+                "corner_mm": self.corner_mm,
+                "z_mm": self.z_mm,
+                "material": self.material,
+                "clearance_mm": self.clearance_mm,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class ProbeBore(_StylusProbing):
+    """A bore of ``diameter_mm`` from its centre, the probe tip at ``z_mm``:
+    +X, -X, +Y, -Y (Renishaw Inspection Plus O9814). Corrects X and Y."""
+
+    center_mm: tuple = field(kw_only=True)
+    z_mm: float = field(kw_only=True)
+    diameter_mm: float = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "center_mm", _probe_point(self.center_mm, 2, "center_mm"))
+
+    def to_dict(self):
+        return self._stylus(
+            {"kind": "bore", "center_mm": self.center_mm, "z_mm": self.z_mm, "diameter_mm": self.diameter_mm}
+        )
+
+
+@dataclass(frozen=True)
+class ProbeBoss(_StylusProbing):
+    """A boss of ``diameter_mm`` from outside: +X, -X, +Y, -Y, each from
+    ``clearance_mm`` outside it, reached over the clearance plane."""
+
+    center_mm: tuple = field(kw_only=True)
+    z_mm: float = field(kw_only=True)
+    diameter_mm: float = field(kw_only=True)
+    clearance_mm: float = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "center_mm", _probe_point(self.center_mm, 2, "center_mm"))
+
+    def to_dict(self):
+        return self._stylus(
+            {
+                "kind": "boss",
+                "center_mm": self.center_mm,
+                "z_mm": self.z_mm,
+                "diameter_mm": self.diameter_mm,
+                "clearance_mm": self.clearance_mm,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class ProbePocket(_StylusProbing):
+    """A pocket (slot) ``width_mm`` wide across ``axis`` ('x' or 'y'), from
+    its centre: + then - (Renishaw Inspection Plus O9812 without Z)."""
+
+    center_mm: tuple = field(kw_only=True)
+    z_mm: float = field(kw_only=True)
+    axis: str = field(kw_only=True)
+    width_mm: float = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "center_mm", _probe_point(self.center_mm, 2, "center_mm"))
+        _axis(self.axis, ("x", "y"))
+
+    def to_dict(self):
+        return self._stylus(
+            {
+                "kind": "pocket",
+                "center_mm": self.center_mm,
+                "z_mm": self.z_mm,
+                "axis": self.axis,
+                "width_mm": self.width_mm,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class ProbeWeb(_StylusProbing):
+    """A web (rib) ``width_mm`` wide across ``axis`` ('x' or 'y'), from
+    outside: the + side then the - side, each from ``clearance_mm`` outside
+    it, reached over the clearance plane."""
+
+    center_mm: tuple = field(kw_only=True)
+    z_mm: float = field(kw_only=True)
+    axis: str = field(kw_only=True)
+    width_mm: float = field(kw_only=True)
+    clearance_mm: float = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "center_mm", _probe_point(self.center_mm, 2, "center_mm"))
+        _axis(self.axis, ("x", "y"))
+
+    def to_dict(self):
+        return self._stylus(
+            {
+                "kind": "web",
+                "center_mm": self.center_mm,
+                "z_mm": self.z_mm,
+                "axis": self.axis,
+                "width_mm": self.width_mm,
+                "clearance_mm": self.clearance_mm,
+            }
+        )
+
+
+@dataclass(frozen=True)
+class _ToolSetting(_Probing):
+    """Tool setting measures the cutting tool ``tool`` on a tool setter
+    declared in this setup's work coordinates, and stores the result in the
+    tool's ``length_register``. Declare the setter's body as a scene fixture
+    to check the moves around it. ``spindle_rpm`` (0: stopped) and
+    ``spindle_direction`` are the caller's: camlib assumes neither."""
+
+    spindle_rpm: float = field(kw_only=True)
+    spindle_direction: str | None = field(default=None, kw_only=True)
+
+    def _tool(self, feature, result):
+        extra = {"spindle_rpm": self.spindle_rpm}
+        if self.spindle_direction is not None:
+            extra["spindle_direction"] = self.spindle_direction
+        return self._dict(feature, {"kind": result, "register": self.length_register}, **extra)
+
+
+@dataclass(frozen=True)
+class ToolSetLength(_ToolSetting):
+    """Tool length: the tip comes down onto the setter's contact face at
+    ``contact_mm`` (the tip position at contact) from ``clearance_mm`` above
+    it. The controller's length register then holds the measured length (a
+    premise for the rest of the program). Set tool lengths before probing
+    the work offset in the same program: the setter is declared in that
+    offset's coordinates."""
+
+    contact_mm: tuple = field(kw_only=True)
+    clearance_mm: float = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "contact_mm", _probe_point(self.contact_mm, 3, "contact_mm"))
+
+    def to_dict(self):
+        return self._tool(
+            {"kind": "tool_length", "contact_mm": self.contact_mm, "clearance_mm": self.clearance_mm},
+            "tool_length",
+        )
+
+
+@dataclass(frozen=True)
+class ToolSetDiameter(_ToolSetting):
+    """Tool diameter: the cutter's side touches the setter's round contact
+    face (``setter_diameter_mm`` across, top at ``setter_top_z_mm``) from +X
+    and from -X, the tip ``depth_mm`` below the top, from ``clearance_mm``
+    away, crossing over ``clearance_mm`` above the top. The controller's tool
+    table entry then holds the measured radius (not wear: camlib's wear
+    compensation is refused for this tool afterwards)."""
+
+    setter_center_mm: tuple = field(kw_only=True)
+    setter_top_z_mm: float = field(kw_only=True)
+    setter_diameter_mm: float = field(kw_only=True)
+    depth_mm: float = field(kw_only=True)
+    clearance_mm: float = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "setter_center_mm", _probe_point(self.setter_center_mm, 2, "setter_center_mm"))
+
+    def to_dict(self):
+        return self._tool(
+            {
+                "kind": "tool_diameter",
+                "setter_center_mm": self.setter_center_mm,
+                "setter_top_z_mm": self.setter_top_z_mm,
+                "setter_diameter_mm": self.setter_diameter_mm,
+                "depth_mm": self.depth_mm,
+                "clearance_mm": self.clearance_mm,
+            },
+            "tool_radius",
+        )

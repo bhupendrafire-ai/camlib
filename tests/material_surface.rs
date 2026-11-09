@@ -248,3 +248,71 @@ fn a_source_base_below_stock_keeps_exact_clipped_material_volumes() {
     assert!(r.residual.volume_mm3[0] <= 56. && r.residual.volume_mm3[1] >= 56.);
     assert_eq!(r.gouge.definite_cells, 0);
 }
+
+#[test]
+fn local_mixed_cells_enclose_partial_area_without_inventing_positive_overlap() {
+    use camlib::planar::{Boundary, Component, PlanarRegion};
+
+    let mut snapshot = stock(6.).snapshot();
+    snapshot.spec.max_mm = [1., 1., 10.];
+    snapshot.cells.truncate(1);
+    let cancel = AtomicBool::new(false);
+    for (x0, x1, exact_volume) in [(0., 0.5, 0.5), (1.000001, 2., 0.)] {
+        let definition = Target {
+            version: 1,
+            units: "mm".into(),
+            id: "local-face".into(),
+            revision: "1".into(),
+            machining_region: PlanarRegion {
+                version: 1,
+                units: "mm".into(),
+                name: "face".into(),
+                boundary_error_mm: 0.,
+                components: vec![Component {
+                    outer: Boundary {
+                        vertices: vec![[x0, 0., 0.], [x1, 0., 0.], [x1, 1., 0.], [x0, 1., 0.]],
+                    },
+                    holes: vec![],
+                }],
+                source: serde_json::Value::Null,
+            },
+            floor_z_mm: 5.,
+            floor_error_mm: 0.,
+        };
+        let prepared = definition
+            .prepare(Options {
+                scope_to_region: true,
+                geometry_tolerance_mm: 0.01,
+                ..Options::default()
+            })
+            .unwrap();
+        // One square millimetre cell: actual 6 minus floor 5, scoped to
+        // exactly half its area, is 0.5 cubic mm. The other region only
+        // touches the cell's conservative guard and has zero overlap.
+        for (height, residual) in [(6., true), (4., false)] {
+            snapshot.cells[0] = HeightBounds {
+                lower_mm: height,
+                upper_mm: height,
+            };
+            let report = prepared
+                .check_stock(&Stock::from_snapshot(snapshot.clone()).unwrap(), &cancel)
+                .unwrap();
+            assert!(report.complete);
+            assert_eq!(report.stats.mixed_cells, 1);
+            let excess = if residual {
+                &report.residual
+            } else {
+                &report.gouge
+            };
+            assert_eq!(excess.definite_cells, 0);
+            assert_eq!(excess.assessment, Assessment::PossibleExcess);
+            assert_eq!(excess.volume_mm3[0], 0.);
+            assert!(excess.volume_mm3[1] >= exact_volume);
+            assert!(excess.volume_mm3[1] < 1.000001);
+            let finding = &report.findings[0];
+            assert_eq!(finding.target_class, FootprintClass::Mixed);
+            assert_eq!(finding.residual_height_mm[0], 0.);
+            assert_eq!(finding.gouge_height_mm[0], 0.);
+        }
+    }
+}

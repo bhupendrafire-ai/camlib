@@ -10,6 +10,7 @@ behind the design are in [DECISIONS.md](DECISIONS.md).
 |---|---|---|
 | Rust engine | `src/` (crate `camlib`) | Geometry, toolpath planning, stock, verification, posting checks |
 | Stream process | `src/bin/sim_stream.rs` (`cam-sim-stream`) | Runs a setup and streams binary frames on stdout |
+| Rust post | `src/gcode/`, `src/post_job.rs`, `src/bin/post_job.rs` (`cam-post`) | The default post, its decoder and the export gate without Python (JSON in, JSON out; issue #120) |
 | Python extension | `bindings/python/` (`camlib._native`) | Buffer kernels, posting intent and decoding, region engine, native receivers |
 | Python API | `python/camlib/` | Jobs and setups, operations, tools, machines and posts, runs, playback, export |
 
@@ -155,7 +156,12 @@ whose old value doesn't match its own stock.
    controller decoder) reads the written blocks back into motion, which is
    compared with the source move within the machine's tolerance. A mismatch
    fails the post. The decoder never trusts the post that produced the output.
-5. Arcs that can't be written exactly at the machine's precision are refused,
+5. Without Python, `src/gcode/` holds a port of the default post and decoder
+   (`GCodePost`, `NativeGCodeDecoder`) driven by the same intent checker, and
+   `src/post_job.rs` the whole `Job.post_nc` run (stock replay, machine model,
+   export gate). Their output must stay byte-identical to the Python default
+   post's (`python/tests/test_rust_post.py`); change both together.
+6. Arcs that can't be written exactly at the machine's precision are refused,
    or become checked segments with `LoweringOptions(native_arcs=True)`.
    `camlib.dynamics.schedule` gives acceleration-aware timing and optional feed
    scheduling.
@@ -177,7 +183,10 @@ whose old value doesn't match its own stock.
   the plan (decoded); finishing chords between samples (certified, not just
   sampled endpoints).
 - **Not proven:** posts have not been run on real machines (issue #20); camlib
-  cannot know the real work offsets, tool lengths or clamps. Display data (stock
+  cannot know the real work offsets, tool lengths or clamps. A probing cycle
+  (`src/probe.rs`) records what it stores on the controller (a work offset, a
+  tool length or radius) as a premise; the program after it is checked with
+  the declared values, not the measured ones. Display data (stock
   meshes, previews) is approximate. "Possible" material bounds include the stock
   grid's and the target mesh's resolution.
 
@@ -228,6 +237,8 @@ whose old value doesn't match its own stock.
 | Certain / possible | Lower and upper bounds of stock or of a check result |
 | Certified chord | A straight move between two samples proven within tolerance of the surface along its whole length |
 | Air cut | A feed move that removes no stock |
+| Protected move | A probe move that stops the machine if the stylus triggers (LinuxCNC G38.3 with a trip check, Renishaw O9810) |
+| Touch zone | The last `search_mm` of a probing measuring move, where the stylus is expected to touch; only there is the ball exempt from contact checks |
 | Rest machining | Cutting only material left by earlier operations, read from the stock |
 | R plane | The retract height of a drilling cycle |
 | Lowering | Rewriting moves a controller can't take exactly (for example arcs) as checked segments |

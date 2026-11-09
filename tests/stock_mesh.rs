@@ -573,3 +573,31 @@ fn an_empty_stock_has_no_mesh() {
     let e = height_field_mesh(&spec, &cells, &never()).unwrap_err();
     assert!(e.contains("no material"), "{e}");
 }
+
+#[test]
+fn a_mesh_stock_with_declared_initial_bounds_is_refused() {
+    // Two declarations of the starting material, a stock mesh (#121) and
+    // whole-cell initial bounds (#133), are ambiguous: refused, not merged.
+    let mesh = StockMesh::from_triangles(&box_triangles([0.; 3], [10.; 3])).unwrap();
+    let spec = MeshStockSpec::new(grid([0.; 3], [10.; 3], 1.), mesh).unwrap();
+    let mut m = manifest(spec.into());
+    m.initial_stock = Some(InitialStock {
+        source_id: "measured-blank".into(),
+        revision: "1".into(),
+        source_sha256: "a".repeat(64),
+        source_to_setup: WorkFrame::identity(),
+        uncertainty_mm: 0.,
+        representation: "whole_cell_top_down".into(),
+        bounds: vec![
+            HeightBounds {
+                lower_mm: 0.,
+                upper_mm: 10.,
+            };
+            100
+        ],
+    });
+    let e = m.validate().unwrap_err();
+    assert!(e.contains("declare the starting stock one way"), "{e}");
+    m.initial_stock = None;
+    m.validate().unwrap();
+}

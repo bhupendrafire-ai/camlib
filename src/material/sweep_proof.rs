@@ -7,29 +7,33 @@
 //! possible-gouge cell as within tolerance when no unproven motion's
 //! footprint touches it.
 //!
-//! Claim, for comparison tolerance τ and the mesh's declared surface error
+//! Claim, for effective gouge tolerance τ and the mesh's declared surface error
 //! e: no point the tool sweeps lies deeper than τ inside the true part P*.
 //!
 //! - M is the solid under the mesh (the height-field semantics of the
-//!   material check, with its base plane). P* lies within e of M; both are
-//!   down-closed, so P* eroded by e lies inside M: from a point p whose
-//!   e-ball is in P*, go straight down (the ball stays in P*) until the ray
-//!   enters M; that boundary point would be at least e from P*'s boundary.
+//!   material check, with its base plane). The declared outer source bound
+//!   gives P* ⊂ M ⊕ B_e. It does NOT give P* ⊖ B_e ⊂ M: a narrow missing
+//!   mesh strip can be filled by the true part without violating that bound.
 //! - Every tool section (flat to r0, then rising linearly; `flat::Section`)
 //!   is shrunk radially by a and lifted by a. Each point of the real tool is
 //!   within k·a of that eroded tool: k = √2 where the section is flat out
 //!   to r0 >= a (move the point a inward and a up), and √(1 + (1 + rise)²)
-//!   near a pointed tip. Ball and bull ends are replaced by their enclosing
-//!   flat end (a superset: sound, only conservative).
-//! - With k·a < τ - e, an eroded tool proven clear of M along the move
-//!   (`Index::sections_chord_clear`: contact against every triangle, the
-//!   gap bounded by concavity) proves the claim. A swept point q deeper
-//!   than τ in P* has an eroded-tool point p within k·a, deeper than e in
-//!   P*, hence strictly inside M, which the eroded tool does not enter.
+//!   near a pointed tip. Ball and bull ends retain the enclosing flat end.
+//!   Their real-shape material proof is separate work (#107). This enclosing
+//!   cylinder contains the real cutter, so no sampled clearance is inferred.
+//! - Prove (E ⊕ B_e) disjoint from M, where E is the eroded tool: sections
+//!   grow radially by e and lower by e, enclosing the spherical expansion.
+//!   Then E is disjoint from M ⊕ B_e and hence from P*. If a real swept
+//!   point q were deeper than τ in P*, its eroded-tool point p at distance
+//!   k·a < τ - e < τ would remain inside P*, a contradiction. Contact against
+//!   every triangle uses `Index::sections_chord_clear`, with its continuous
+//!   concavity bound; the source expansion is never replaced by samples.
 //! - Arcs and helices are proven chord by chord. A point at fraction f of a
 //!   sub-arc of half angle θ is within R[(1 - cos θ) + (θ - sin θ)] of the
-//!   chord's point at f, so the chord's sections grow radially by that
-//!   (and lift by it when the arc's plane is not XY).
+//!   chord's point at f. Sections grow by that deviation plus the actual
+//!   analytic-to-declared endpoint gap and a binary64 path guard. Non-XY
+//!   chords need the same vertical clearance; XY chords still spend the
+//!   numeric guard vertically, covering helix interpolation rounding.
 //!
 //! A cell is decided only when the stream started from the raw stock (the
 //! whole history was proven), and never from a definite gouge.
@@ -43,7 +47,7 @@ use std::collections::HashMap;
 #[serde(deny_unknown_fields)]
 pub struct SweepProofReport {
     /// The proven depth bound: no swept point deeper than this inside the
-    /// true part (the comparison tolerance).
+    /// true part (the effective gouge tolerance).
     pub tolerance_mm: f64,
     /// The target mesh's declared surface error, spent from the tolerance.
     pub surface_error_mm: f64,
@@ -79,6 +83,7 @@ enum Geometry {
         region: Box<crate::planar::PreparedRegion>,
         floor: Option<f64>,
         top: f64,
+        local: bool,
     },
 }
 
@@ -89,11 +94,12 @@ impl Geometry {
     /// rho plus h is proven; otherwise it is halved. A midpoint closer than
     /// rho is a real violation; a piece shorter than the arithmetic floor
     /// fails.
-    fn segment_inside(
+    fn segment_clearance(
         region: &crate::planar::PreparedRegion,
         p: [f64; 2],
         q: [f64; 2],
         rho: f64,
+        inside: bool,
     ) -> Result<bool, String> {
         let length = (q[0] - p[0]).hypot(q[1] - p[1]);
         let mut stack = vec![(0f64, 1f64)];
@@ -108,6 +114,7 @@ impl Geometry {
             let Some(c) = region.query(mid)?.signed_clearance_mm else {
                 return Ok(false);
             };
+            let c = if inside { c } else { -c };
             let half = length * (t1 - t0) / 2.;
             if c - half >= rho {
                 continue;
@@ -138,6 +145,8 @@ pub(crate) struct SweepProof {
     proven: u64,
     unproven: u64,
     tools: HashMap<String, Option<ToolProof>>,
+    /// Only newly marked cells need undo if stream publication fails.
+    pending: Option<(u64, u64, Vec<usize>)>,
     seen: Vec<u32>,
     stamp: u32,
 }
@@ -150,7 +159,7 @@ impl SweepProof {
         history_complete: bool,
         cancel: &impl CancelSignal,
     ) -> Result<Self, String> {
-        let tolerance = options.comparison_tolerance_mm;
+        let tolerance = options.gouge_tolerance();
         let surface_error = target.surface.surface_error_mm;
         let scale = spec
             .min_mm
@@ -181,7 +190,7 @@ impl SweepProof {
             (
                 None,
                 Some(format!(
-                    "the comparison tolerance {tolerance} mm does not exceed the target mesh's surface error {surface_error} mm: no move can be proven within it (raise comparison_tolerance_mm or export a finer mesh)"
+                    "the effective gouge tolerance {tolerance} mm and target mesh surface error {surface_error} mm leave no proof budget after numerical guards; refine the source enclosure or explicitly revise the declared gouge policy"
                 )),
             )
         };
@@ -214,7 +223,7 @@ impl SweepProof {
         let lateral =
             summary.boundary_error_mm + summary.numerical_guard_mm + options.geometry_tolerance_mm;
         let surface_error = lateral.max(target.floor_error_mm);
-        let tolerance = options.comparison_tolerance_mm;
+        let tolerance = options.gouge_tolerance();
         let scale = spec
             .min_mm
             .into_iter()
@@ -228,6 +237,7 @@ impl SweepProof {
                     region: Box::new(region),
                     floor: (target.floor_z_mm > spec.min_mm[2]).then_some(target.floor_z_mm),
                     top: spec.max_mm[2],
+                    local: options.scope_to_region,
                 }),
                 None,
             )
@@ -235,7 +245,7 @@ impl SweepProof {
             (
                 None,
                 Some(format!(
-                    "the comparison tolerance {tolerance} mm does not exceed the target's boundary and floor error {surface_error} mm: no move can be proven within it (raise comparison_tolerance_mm)"
+                    "the effective gouge tolerance {tolerance} mm and target boundary and floor error {surface_error} mm leave no proof budget after numerical guards; refine the source enclosure or explicitly revise the declared gouge policy"
                 )),
             )
         };
@@ -282,9 +292,26 @@ impl SweepProof {
             proven: 0,
             unproven: 0,
             tools: HashMap::new(),
+            pending: None,
             seen,
             stamp: 0,
         })
+    }
+
+    pub(crate) fn begin_motion(&mut self) {
+        self.pending = Some((self.proven, self.unproven, vec![]));
+    }
+
+    pub(crate) fn finish_motion(&mut self, commit: bool) {
+        if let Some((proven, unproven, touched)) = self.pending.take()
+            && !commit
+        {
+            self.proven = proven;
+            self.unproven = unproven;
+            for cell in touched {
+                self.touched[cell] = false;
+            }
+        }
     }
 
     fn tool(&mut self, tool: &PreparedAssembly) -> Result<(), String> {
@@ -307,10 +334,12 @@ impl SweepProof {
                         }
                     })
                     .fold(std::f64::consts::SQRT_2, f64::max);
-                let a = self.budget / k;
+                // Every section must survive. Dropping a narrow cutter while
+                // retaining its larger holder would not prove cutter clearance.
+                let min_radius = sections.iter().map(|s| s.r1).fold(f64::INFINITY, f64::min);
+                let a = (self.budget / k).min(min_radius / 2.);
                 let sections = sections
                     .iter()
-                    .filter(|s| s.r1 > a)
                     .map(|s| Section {
                         z0: s.z0 + s.rise * (a - s.r0).max(0.),
                         r0: (s.r0 - a).max(0.),
@@ -342,7 +371,7 @@ impl SweepProof {
         cancel: &impl CancelSignal,
     ) -> Result<(), String> {
         self.tool(tool)?;
-        let proven = self.prove(&tool.definition().id, &motion.curve, tolerance_mm, cancel)?;
+        let proven = self.prove(&tool.definition().id, motion, tolerance_mm, cancel)?;
         if proven {
             self.proven += 1;
             return Ok(());
@@ -376,7 +405,14 @@ impl SweepProof {
             && bounds.min[1] - pad <= self.spec.max_mm[1]
         {
             for y in y0..=y1 {
-                self.touched[y * self.nx + x0..=y * self.nx + x1].fill(true);
+                for cell in y * self.nx + x0..=y * self.nx + x1 {
+                    if !self.touched[cell] {
+                        if let Some((_, _, touched)) = &mut self.pending {
+                            touched.push(cell);
+                        }
+                        self.touched[cell] = true;
+                    }
+                }
             }
         }
         Ok(())
@@ -385,7 +421,7 @@ impl SweepProof {
     fn prove(
         &mut self,
         tool: &str,
-        curve: &Curve,
+        motion: &Motion,
         tolerance_mm: f64,
         cancel: &impl CancelSignal,
     ) -> Result<bool, String> {
@@ -393,32 +429,75 @@ impl SweepProof {
             return Ok(false);
         };
         let a = proof.erosion;
-        let chord = |p: Vec3,
-                     q: Vec3,
-                     grow: f64,
-                     lift: f64,
-                     seen: &mut [u32],
-                     stamp: &mut u32|
+        let source_error = self.surface_error;
+        let mut remaining_pairs = 1_000_000u64;
+        let mut chord = |p: Vec3,
+                         q: Vec3,
+                         grow: f64,
+                         lift: f64,
+                         seen: &mut [u32],
+                         stamp: &mut u32|
          -> Result<bool, String> {
             let sections = proof
                 .sections
                 .iter()
                 .map(|s| Section {
                     z0: s.z0,
-                    r0: s.r0 + grow,
-                    r1: s.r1 + grow,
+                    r0: s.r0 + source_error + grow,
+                    r1: s.r1 + source_error + grow,
                     rise: s.rise,
                 })
                 .collect::<Vec<_>>();
-            // The eroded tool is lifted by a; any extra lift is a required
-            // clearance for sub-arc deviation out of the XY plane.
+            // Enclose E ⊕ B_e by growing its radii by e and lowering it
+            // by e. Additional growth/lift encloses sub-arc deviation.
             match geometry {
                 Geometry::Mesh(index) => {
-                    Ok(index.sections_chord_clear(p, q, &sections, lift - a, seen, stamp))
+                    if cancel.is_cancelled() {
+                        return Err("material sweep proof cancelled".into());
+                    }
+                    let pairs = (index.len() as u64).saturating_mul(sections.len() as u64);
+                    if pairs > remaining_pairs {
+                        return Ok(false);
+                    }
+                    remaining_pairs -= pairs;
+                    Ok(index.sections_chord_clear(
+                        p,
+                        q,
+                        &sections,
+                        source_error + lift - a,
+                        seen,
+                        stamp,
+                    ))
                 }
-                Geometry::Prism { region, floor, top } => {
+                Geometry::Prism {
+                    region,
+                    floor,
+                    top,
+                    local,
+                } => {
                     // The eroded tool's lowest point along the chord.
-                    let tip = p[2].min(q[2]) + a - lift;
+                    let tip = p[2].min(q[2]) + a - source_error - lift;
+                    if *local {
+                        let Some(floor) = floor else {
+                            return Ok(true);
+                        };
+                        let rho = sections
+                            .iter()
+                            .filter(|s| tip + s.z0 < *floor)
+                            .map(|s| s.r1)
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        return if rho == f64::NEG_INFINITY {
+                            Ok(true)
+                        } else {
+                            Geometry::segment_clearance(
+                                region,
+                                [p[0], p[1]],
+                                [q[0], q[1]],
+                                rho,
+                                false,
+                            )
+                        };
+                    }
                     if let Some(f) = floor
                         && tip + sections.iter().map(|s| s.z0).fold(f64::INFINITY, f64::min) < *f
                     {
@@ -434,36 +513,47 @@ impl SweepProof {
                     if rho == f64::NEG_INFINITY {
                         return Ok(true);
                     }
-                    Geometry::segment_inside(region, [p[0], p[1]], [q[0], q[1]], rho)
+                    Geometry::segment_clearance(region, [p[0], p[1]], [q[0], q[1]], rho, true)
                 }
             }
         };
+        let curve = &motion.curve;
         match *curve {
             Curve::Line { start, end } => {
                 chord(start, end, 0., 0., &mut self.seen, &mut self.stamp)
             }
             Curve::Arc {
                 start,
+                end,
                 center,
                 plane,
                 sweep_rad,
-                ..
             }
             | Curve::Helix {
                 start,
+                end,
                 center,
                 plane,
                 sweep_rad,
-                ..
             } => {
                 let [u, v, _] = plane.axes();
                 let r = (start[u] - center[u]).hypot(start[v] - center[v]);
                 let prepared = curve.prepare(tolerance_mm)?;
+                let angle = (start[v] - center[v]).atan2(start[u] - center[u]) + sweep_rad;
+                let (sin, cos) = angle.sin_cos();
+                let endpoint_gap =
+                    (center[u] + r * cos - end[u]).hypot(center[v] + r * sin - end[v]);
+                // Zero admission tolerance requests only the shared binary64
+                // guard. Spend the actual endpoint gap, not the caller's
+                // potentially much larger circular admission tolerance.
+                let numeric_guard = crate::verification::path_error(motion, 0.);
+                let path_guard = endpoint_gap + numeric_guard;
                 // Adaptive sub-chords: a piece of half angle θ lies within
                 // d(θ) = R[(1 - cos θ) + (θ - sin θ)] of its chord at equal
                 // fractions (θ <= π/4 here), so its chord is proven with the
-                // sections grown by d (and lifted by d out of the XY
-                // plane). A piece that fails is halved (d falls about 4x)
+                // sections grown by d plus the fixed path guard (with the
+                // same vertical clearance out of XY). A piece that fails
+                // is halved (d falls about 4x; endpoint error does not)
                 // until d is a quarter of the erosion; failing there, the
                 // move is unproven. Open-air arcs prove in one chord.
                 let deviation = |f0: f64, f1: f64| {
@@ -487,9 +577,14 @@ impl SweepProof {
                         return Err("material sweep proof cancelled".into());
                     }
                     let d = deviation(f0, f1);
-                    let lift = if plane == Plane::Xy { 0. } else { d };
+                    let grow = d + path_guard;
+                    let lift = if plane == Plane::Xy {
+                        numeric_guard
+                    } else {
+                        grow
+                    };
                     let (p, q) = (prepared.position(f0)?, prepared.position(f1)?);
-                    if chord(p, q, d, lift, &mut self.seen, &mut self.stamp)? {
+                    if chord(p, q, grow, lift, &mut self.seen, &mut self.stamp)? {
                         continue;
                     }
                     if d <= a / 4. {
@@ -517,10 +612,16 @@ impl SweepProof {
             proven_moves: self.proven,
             unproven_moves: self.unproven,
             history_complete: self.history_complete,
-            decided_cells,
+            decided_cells: if self.history_complete && self.geometry.is_some() {
+                decided_cells
+            } else {
+                0
+            },
             unavailable: self.unavailable.clone().or_else(|| {
-                (!self.history_complete)
-                    .then(|| "the stream resumed after motions this check did not see".to_string())
+                (!self.history_complete).then(|| {
+                    "the check did not start from raw stock with complete motion history"
+                        .to_string()
+                })
             }),
         }
     }
@@ -699,6 +800,138 @@ mod tests {
                 assert!(deepest(&flat, &curve) <= tolerance - error);
             }
         }
+    }
+
+    #[test]
+    fn flat_profile_proves_analytic_inclined_tangency_only() {
+        // For z = 4 + m*x, contact is the maximum of m*rho - profile(rho).
+        // These closed-form supports are independent of section construction
+        // and the native planner: flat R*m, ball R*(sqrt(1+m²)-1), and
+        // bull (R-rc)*m + rc*(sqrt(1+m²)-1).
+        let m: f64 = 0.25;
+        let normal = (1. + m * m).sqrt();
+        let mut definition = target(0.);
+        let p = |x, y| [x, y, 4. + m * x];
+        definition.surface.triangles = vec![
+            [p(-10., -20.), p(30., -20.), p(30., 40.)],
+            [p(-10., -20.), p(30., 40.), p(-10., 40.)],
+        ]
+        .into();
+        definition.prepare(Options::default()).unwrap();
+        let tolerance = 0.02;
+        for (shape, rc) in [(CutterShape::Flat, 0.)] {
+            let prepared = tool(shape).prepare().unwrap();
+            let support = (3. - rc) * m + rc * (normal - 1.);
+            let rho = 3. - rc + rc * m / normal;
+            let profile = rc * (1. - 1. / normal);
+            for (penetration, expected) in [(0., true), (2. * tolerance, false)] {
+                let z = 6. + support - penetration * normal;
+                // The exact contact witness penetrates the half-space by
+                // precisely `penetration` along its unit normal.
+                let depth = (4. + m * (8. + rho) - (z + profile)) / normal;
+                assert!((depth - penetration).abs() < 1e-12);
+                let mut proof = SweepProof::new(
+                    &definition,
+                    Options {
+                        comparison_tolerance_mm: tolerance,
+                        ..Options::default()
+                    },
+                    &spec(),
+                    true,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+                assert_eq!(
+                    proves(&mut proof, &prepared, line([8., 5., z], [8., 15., z])),
+                    expected,
+                    "real shape {:?}, exact normal penetration {depth}",
+                    prepared.cutter().definition().shape,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_outer_error_protects_true_material_filling_a_narrow_mesh_slit() {
+        let mut tiny = tool(CutterShape::Flat);
+        tiny.cutter.diameter_mm = 0.01;
+        tiny.cutter.shank_diameter_mm = 0.01;
+        let tiny = tiny.prepare().unwrap();
+        let mut definition = target(0.05);
+        let rectangle = |x0, x1| {
+            let p = [[x0, 0., 10.], [x1, 0., 10.], [x1, 20., 10.], [x0, 20., 10.]];
+            vec![[p[0], p[1], p[2]], [p[0], p[2], p[3]]]
+        };
+        definition.surface.triangles = [rectangle(0., 9.98), rectangle(10.02, 20.)].concat().into();
+        let options = Options {
+            comparison_tolerance_mm: 0.1,
+            ..Options::default()
+        };
+        let deep = line([10., 5., 5.], [10., 15., 5.]);
+        // The full solid [0,20]² × [0,10] is a valid true source: every
+        // filled slit point is <= 0.02 mm from the mesh solid, below the
+        // declared 0.05 mm outer error. The real cutter's center at Z5 is
+        // independently 5 mm inside that solid, far beyond tolerance.
+        for enclosure in [SurfaceEnclosure::Bounded, SurfaceEnclosure::Offset] {
+            definition.source_enclosure = enclosure;
+            definition.prepare(options).unwrap();
+            let mut proof =
+                SweepProof::new(&definition, options, &spec(), true, &AtomicBool::new(false))
+                    .unwrap();
+            assert!(!proves(&mut proof, &tiny, deep.clone()));
+            // Truly clear above even the complete source outer offset.
+            assert!(proves(
+                &mut proof,
+                &tiny,
+                line([10., 5., 10.06], [10., 15., 10.06])
+            ));
+        }
+        // With an exact source, the slit really is empty: do not turn the
+        // source-error protection into an unconditional missing-mesh refusal.
+        definition.surface.surface_error_mm = 0.;
+        let mut exact =
+            SweepProof::new(&definition, options, &spec(), true, &AtomicBool::new(false)).unwrap();
+        assert!(proves(&mut exact, &tiny, deep));
+    }
+
+    #[test]
+    fn failed_motion_rolls_back_counts_and_only_its_newly_touched_cells() {
+        let flat = tool(CutterShape::Flat).prepare().unwrap();
+        let mut proof = proof(0.02, 0., true);
+        assert!(!proves(
+            &mut proof,
+            &flat,
+            line([-2., 5., 4.], [-2., 6., 4.])
+        ));
+        let touched = proof.touched.clone();
+        let counts = (proof.proven, proof.unproven);
+        proof.begin_motion();
+        assert!(!proves(
+            &mut proof,
+            &flat,
+            line([22., 12., 4.], [22., 13., 4.])
+        ));
+        assert_ne!(proof.touched, touched);
+        proof.finish_motion(false);
+        assert_eq!(proof.touched, touched);
+        assert_eq!((proof.proven, proof.unproven), counts);
+        proof.begin_motion();
+        assert!(proves(
+            &mut proof,
+            &flat,
+            line([-5., 5., 11.], [-5., 6., 11.])
+        ));
+        proof.finish_motion(false);
+        assert_eq!((proof.proven, proof.unproven), counts);
+        proof.begin_motion();
+        assert!(!proves(
+            &mut proof,
+            &flat,
+            line([22., 12., 4.], [22., 13., 4.])
+        ));
+        proof.finish_motion(true);
+        assert_ne!(proof.touched, touched);
+        assert_eq!(proof.unproven, counts.1 + 1);
     }
 
     #[test]
@@ -942,6 +1175,122 @@ mod tests {
         assert!(proves(&mut p, &flat, arc));
     }
 
+    fn admitted_endpoint_move(
+        definition: &SurfaceTarget,
+        plane: Plane,
+        coordinate: f64,
+        endpoint_offset: f64,
+        helix: bool,
+        expected: bool,
+    ) {
+        let mut tiny = tool(CutterShape::Flat);
+        tiny.cutter.diameter_mm = 0.1;
+        tiny.cutter.shank_diameter_mm = 0.1;
+        let tiny = tiny.prepare().unwrap();
+        let (start, mut end, center) = match plane {
+            Plane::Xy => (
+                [coordinate - 1., 10., 5.],
+                [coordinate + endpoint_offset, 9., 5.],
+                [coordinate, 10., 5.],
+            ),
+            Plane::Xz => (
+                [10., 10., coordinate + 1.],
+                [11., 10., coordinate + endpoint_offset],
+                [10., 10., coordinate],
+            ),
+            Plane::Yz => (
+                [10., 10., coordinate + 1.],
+                [10., 9., coordinate + endpoint_offset],
+                [10., 10., coordinate],
+            ),
+        };
+        if helix {
+            end[plane.axes()[2]] += 0.5;
+        }
+        let curve = if helix {
+            Curve::Helix {
+                start,
+                end,
+                center,
+                plane,
+                sweep_rad: std::f64::consts::FRAC_PI_2,
+            }
+        } else {
+            Curve::Arc {
+                start,
+                end,
+                center,
+                plane,
+                sweep_rad: std::f64::consts::FRAC_PI_2,
+            }
+        };
+        curve.prepare(0.1).unwrap();
+        let mut proof = SweepProof::new(
+            definition,
+            Options {
+                comparison_tolerance_mm: 0.005,
+                ..Options::default()
+            },
+            &spec(),
+            true,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        proof
+            .motion(&tiny, &motion(curve), 0.1, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(
+            proof.proven == 1,
+            expected,
+            "{plane:?}: coordinate {coordinate}, endpoint offset {endpoint_offset}, helix {helix}"
+        );
+        assert_eq!(proof.proven + proof.unproven, 1);
+    }
+
+    #[test]
+    fn admitted_endpoint_gap_cannot_hide_near_terminal_wall_penetration() {
+        let mut definition = target(0.);
+        definition.surface.triangles = cuboid([2., 0., 0.], [20., 20., 10.]).into();
+        definition.prepare(Options::default()).unwrap();
+        // A real flat cutter of radius 0.05 at phase 1-1e-4 has the
+        // independent witness x = 1.96 - sin(pi/2*1e-4) + 0.05.
+        // It is over 0.009 mm inside the x>=2 wall, before the declared
+        // endpoint jumps away to x=1.87. Both arcs and helices must refuse it.
+        let depth = 1.96 - (std::f64::consts::FRAC_PI_2 * 1e-4).sin() + 0.05 - 2.;
+        assert!(depth > 0.009);
+        for helix in [false, true] {
+            for (coordinate, offset, expected) in [
+                (1.96, -0.09, false),
+                (1.96, 0., false),  // Exact endpoint: the analytic path still cuts.
+                (1.95, 0., true),   // Exact tangent, despite 0.1 mm admission tolerance.
+                (1.7, -0.09, true), // A real admitted gap safely far from the wall.
+            ] {
+                admitted_endpoint_move(&definition, Plane::Xy, coordinate, offset, helix, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn admitted_endpoint_gap_also_guards_non_xy_vertical_clearance() {
+        let definition = target(0.);
+        // In either vertical plane, the analytic tip approaches z=9.99
+        // from above. At phase 1-1e-4, its exact depth below z=10 is:
+        let depth = 10. - (9.99 + (std::f64::consts::FRAC_PI_2 * 1e-4).sin());
+        assert!(depth > 0.009);
+        for plane in [Plane::Xz, Plane::Yz] {
+            for helix in [false, true] {
+                for (coordinate, offset, expected) in [
+                    (9.99, 0.09, false), // Declared endpoint z=10.08 hides the true dip.
+                    (9.99, 0., false),
+                    (10.01, 0., true), // Do not charge the unused admission tolerance.
+                    (10.3, 0.09, true),
+                ] {
+                    admitted_endpoint_move(&definition, plane, coordinate, offset, helix, expected);
+                }
+            }
+        }
+    }
+
     #[test]
     fn resumed_history_or_spent_tolerance_decides_nothing() {
         let flat = tool(CutterShape::Flat).prepare().unwrap();
@@ -971,5 +1320,17 @@ mod tests {
         let cell = |x: f64, y: f64| (((y + 15.) / 0.5) as usize) * 100 + ((x + 15.) / 0.5) as usize;
         assert!(!p.decides(cell(-2., 5.5)));
         assert!(p.decides(cell(30., 30.)));
+    }
+    #[test]
+    fn narrow_cutter_is_not_eroded_away_while_holder_stays_clear() {
+        let mut t = tool(CutterShape::Flat);
+        t.cutter.diameter_mm = 0.002;
+        t.cutter.shank_diameter_mm = 0.002;
+        t.cutter.cutting_length_mm = 0.1;
+        let prepared = t.prepare().unwrap();
+        let mut p = proof(0.1, 0., true);
+        assert!(!proves(&mut p, &prepared, line([5., 5., 9.], [6., 5., 9.])));
+        let retained = p.tools["t"].as_ref().unwrap();
+        assert!(retained.sections.iter().any(|s| s.z0 < 0.01 && s.r1 > 0.));
     }
 }

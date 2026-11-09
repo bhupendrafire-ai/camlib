@@ -171,6 +171,9 @@ class Options:
     max_boundary_tests: int = 50_000_000
     max_classified_cells: int = 0xFFFFFFFF
     max_findings: int = 1024
+    residual_tolerance_mm: float | None = None
+    gouge_tolerance_mm: float | None = None
+    scope_to_region: bool = False
 
 
 def _json(value):

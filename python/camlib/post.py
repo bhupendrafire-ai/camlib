@@ -109,6 +109,46 @@ class Chunk:
         return tuple(result)
 
 
+def post_job_input(job, setup_id, *, machine, lowering=None, accept=(), run_id=None):
+    """The JSON input of the Rust post (``post_job``, the ``cam-post``
+    command) for one setup of ``job``: its stream manifest (what
+    ``cam-sim-stream`` reads), program id and work frame, the machine
+    (``Machine.to_dict()``), optional ``LoweringOptions`` and the finding
+    kinds accepted for release. Plain JSON-ready data."""
+    from dataclasses import asdict
+
+    from .export import accepted
+    from .simulation import simulation_manifest
+
+    if not isinstance(machine, Machine):
+        raise TypeError('post_job_input needs a camlib.post.Machine')
+    setup = job.compile().setup(setup_id)
+    options = setup.simulation_options()
+    data = dict(
+        manifest=simulation_manifest(**options),
+        program_id=setup.id,
+        frame=asdict(setup.frame),
+        machine=machine.to_dict(),
+        accept=sorted(accepted(accept)),
+    )
+    if lowering is not None:
+        data['lowering'] = asdict(lowering)
+    if run_id is not None:
+        data['run_id'] = run_id
+    return data
+
+
+def post_job(input, *, cancel=None):
+    """Post a setup with the Rust default post, in this process: ``input``
+    as ``post_job_input`` gives it (or its JSON text). Returns the report:
+    ``released``, ``program`` (the NC text, only when released), ``refused``,
+    ``findings``, ``accepted``, ``unchecked``, ``machine``, ``posting``.
+    The program is the one ``Job.post_nc`` writes with the default
+    ``GCodePost``; see docs/posts.md."""
+    text = input if isinstance(input, str) else json.dumps(input, allow_nan=False)
+    return json.loads(native.post_job(text, cancel))
+
+
 def post_events(
     header: Program,
     events,

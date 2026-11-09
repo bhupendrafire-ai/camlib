@@ -1153,10 +1153,10 @@ impl RoughingPlan {
                 }
                 let cut_depth = layer_spec.max_mm[2] - z;
                 if cut_depth > tool.cutter.cutting_length_mm {
-                    return Err(format!(
+                    return Err(crate::reach::ReachRefusal::cutting_length(&op.id, &tool.id, layer_spec.max_mm[2], z, tool.cutter.cutting_length_mm).error(format_args!(
                         "roughing layer {i} at Z{z}: actual cut depth {cut_depth} mm exceeds cutting length {} mm; use a smaller stepdown or longer flutes",
                         tool.cutter.cutting_length_mm
-                    ));
+                    )));
                 }
                 let mut work = 0;
                 let shadow = target
