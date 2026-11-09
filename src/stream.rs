@@ -279,6 +279,14 @@ impl StreamManifest {
                 if self.turning.is_some() {
                     return Err("a turning setup needs turning stock".into());
                 }
+                if self.tools.iter().any(|t| t.cutter.shape.undercuts())
+                    || self
+                        .operations
+                        .iter()
+                        .any(|op| matches!(op, Operation::Undercut(_)))
+                {
+                    return Err("undercut cutters (lollipop, dovetail) and undercut operations cut under material a height field cannot hold; use tri-dexel stock (DexelStockSpec)".into());
+                }
             }
             RunStockSpec::Dexel(spec) => {
                 spec.grid()?;

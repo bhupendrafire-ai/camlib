@@ -12,7 +12,7 @@ level `Setup` is the job setup (`camlib.jobs.Setup`).
 | `camlib.operations` | Operations and entry/clearing strategies ([Operations](operations.md)), `Tabs`, `FineBore`, `ThermalCut`, `Lead`, `SmallHoles`, `MicroJoints`, `steep_and_shallow` |
 | `camlib.limits` | `Limits(contain=, avoid=)`, `AvoidArea(region, top_z_mm)` |
 | `camlib.cutting` | `cutting_data` → `CuttingData`: spindle speed and feed from surface speed and feed per tooth (chip thinning, ball effective diameter, rpm cap) |
-| `camlib.tools` | `EndMill`, `BallEndMill`, `BullEndMill`, `Drill`, `ChamferMill`, `ThreadMill`, `Tap`, `BoringBar`, `Torch`, `LaserHead`, `Neck`, `ToolAssembly`, `HolderSection` |
+| `camlib.tools` | `EndMill`, `BallEndMill`, `BullEndMill`, `Drill`, `ChamferMill`, `ThreadMill`, `TSlotCutter`, `KeyseatCutter`, `LollipopCutter`, `DovetailCutter`, `Tap`, `BoringBar`, `Torch`, `LaserHead`, `Neck`, `ToolAssembly`, `HolderSection` |
 | `camlib.planar` | `PlanarRegion` (`components`, reported `boundary_error_mm`), `Component`, `Boundary` (line/arc regions) |
 | `camlib.surface` | `SurfaceMesh` (triangle surfaces with a finite stated `surface_error_mm` in the inclusive range 0–0.1 mm; checked at construction) |
 | `camlib.simulation` | `StockSpec(min, max, cell_size, max_cells=)`, `DexelStockSpec(min, max, cell_size, max_rays=, max_intervals=)` (tri-dexel stock: undercuts), `SweepOptions` (chord error, tip step and work budgets of the stock sweep), `Simulation`, `ToolChangePosition`, `ToolChangeTable`, `SimulationError`, `CamWarning`, low-level streaming |

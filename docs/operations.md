@@ -450,6 +450,40 @@ where the controller and precision allow. Nothing protects the part except the
 configured checks, since the path is the programmer's. Supports
 `retract_z_mm`/`feed_z_mm`.
 
+## Undercut: `Undercut`
+
+Required: `paths`, `tip_z_mm`, `entry_mm`, `clearance_z_mm`; optional
+`exit_mm`. An undercut cutter (`TSlotCutter`, `KeyseatCutter`,
+`LollipopCutter`, `DovetailCutter`) follows tool-centre paths (`TracePath`) at
+one tip height, under material left by earlier operations: the wide bottom of
+a T-slot under a slot milled first, a keyseat in a wall, a dovetail on a slot
+or pocket wall. As established practice (Machinery's Handbook, milling
+cutters; cutter makers' application guides), the cutter goes down to depth
+in open space (`entry_mm`: outside the part, or a cleared pocket), cuts
+sideways and goes back up in open space (`exit_mm`, or back along each open
+path to its start and the entry). It never plunges into material.
+
+```python
+from camlib import TracePath, TraceLine, TSlotCutter, Undercut, DexelStockSpec
+
+cutter = TSlotCutter("tslot", diameter=10, width=2, neck_diameter=3,
+                     neck_length=10, overall_length=50, shank_diameter=6)
+op = Undercut("t-slot", tool, (TracePath((-8, 10), (TraceLine((38, 10)),)),),
+              tip_z_mm=3, entry_mm=(-8, 10), exit_mm=(38, 10), clearance_z_mm=20,
+              feed_mm_min=300, plunge_mm_min=100, spindle_rpm=6000,
+              coolant="flood", tool_number=2, length_register=2)
+```
+
+Undercut operations, and lollipop and dovetail cutters in any operation,
+need tri-dexel stock (`DexelStockSpec`); a height-field setup refuses them.
+The plan proves, on the run's height view, that the columns where the tool
+goes down and up are open for the whole assembly, and refuses otherwise. The
+tri-dexel sweep refuses a move whose neck, shank or holder may touch
+material (a neck wider than the slot above). Compare the result with the
+part with `DexelStockState.compare_solid` (a closed mesh of the part); the
+stream's material stages compare the height view, which cannot hold an
+undercut.
+
 ## Chamfer: `Chamfer`
 
 Required: `region`, `top_z_mm`, `width_mm`, `clearance_z_mm`. Chamfers the
@@ -1099,6 +1133,11 @@ a depth of cut beyond the cutting edge is refused.
 `Drill(point_angle=118)`, `ChamferMill(angle=90, tip_diameter=0)`,
 `ThreadMill(diameter=, tooth_height=, neck_diameter=, neck_length=)`,
 `Tap(drill_diameter=, thread_length=, shank_diameter=)`,
+`TSlotCutter(diameter=, width=, neck_diameter=, neck_length=)` and
+`KeyseatCutter` (a cutting disk on a narrower neck),
+`LollipopCutter(diameter=, neck_diameter=, neck_length=, cutting_length=None)`
+(a sphere on a neck), `DovetailCutter(diameter=, angle=, cutting_length=)`
+(widest at the tip, the flank `angle` degrees from the tip face),
 `BoringBar(diameter=, bar_diameter=, reach=, insert_length=1)`,
 `Torch(kerf_width=, nozzle_diameter=6, body_diameter=30)` and
 `LaserHead(kerf_width=, nozzle_diameter=3, body_diameter=25)` (complete
@@ -1132,7 +1171,7 @@ gives the `effective_diameter_mm` it used. camlib does not pick cutting data.
 
 ## Not supported
 
-Undercut operations (other than thread grooves and the stopped boring bar's
-shift) and 4/5-axis motion. Surfaces must be reachable from above (a part seen
-as a height map). Tri-dexel stock (`DexelStockSpec`) represents undercuts that
-moves cut; undercut tools and operations follow in issue #8.
+4/5-axis motion. Surface finishing needs surfaces reachable from above (a
+part seen as a height map). Undercuts are cut with `Undercut` on tri-dexel
+stock only; lollipop finishing along an undercut edge (a surface strategy)
+is not supported yet.

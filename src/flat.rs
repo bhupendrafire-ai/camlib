@@ -287,12 +287,21 @@ fn sections_of(
             r1: radius,
             rise: cutter.tip_height_at_radius(radius).ok_or("drill profile")? / radius,
         },
-        CutterShape::Ball | CutterShape::Bull { .. } if enclose_curved => Section {
-            z0: 0.,
-            r0: radius,
-            r1: radius,
-            rise: 0.,
-        },
+        // A lollipop or dovetail lies inside the cylinder of its widest
+        // radius from the tip up to its cutting length.
+        CutterShape::Ball
+        | CutterShape::Bull { .. }
+        | CutterShape::Lollipop
+        | CutterShape::Dovetail { .. }
+            if enclose_curved =>
+        {
+            Section {
+                z0: 0.,
+                r0: radius,
+                r1: radius,
+                rise: 0.,
+            }
+        }
         _ => {
             return Err(
                 "tool sections cover flat, chamfer and drill ends (a ball or bull-nose end is curved)"

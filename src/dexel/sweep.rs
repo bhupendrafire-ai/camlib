@@ -107,8 +107,10 @@ impl Piece {
 }
 
 /// The assembly's rotational envelope in the tool frame: a cutting part whose
-/// radius never decreases toward the spindle (every `CutterShape` but
-/// `Beam`), then non-cutting pieces (neck, shank, holder sections).
+/// radius widens from the tip to its widest section and may then narrow
+/// toward the spindle (unimodal: every `CutterShape` but `Beam`; lollipop and
+/// dovetail cutters narrow), then non-cutting pieces (neck, shank, holder
+/// sections).
 struct Profile<'a> {
     tool: &'a PreparedAssembly,
     radius: f64,
@@ -156,10 +158,7 @@ impl<'a> Profile<'a> {
     }
     /// Heights of the cutting part whose radius reaches `rho`.
     fn covered(&self, rho: f64) -> Option<[f64; 2]> {
-        self.tool
-            .cutter()
-            .tip_height_at_radius(rho.max(0.))
-            .map(|h| [h, self.cutting])
+        self.tool.cutter().heights_at_radius(rho.max(0.))
     }
     fn cut_radius(&self, h: f64) -> f64 {
         self.tool
@@ -167,14 +166,16 @@ impl<'a> Profile<'a> {
             .radius_at(h.clamp(0., self.cutting))
             .map_or(0., |s| s.radius_mm)
     }
-    /// Largest cutting radius over heights [h0, h1].
+    /// Largest cutting radius over heights [h0, h1]: at the widest section
+    /// when the window holds it, else at the window's nearer end (unimodal).
     fn cut_max(&self, h0: f64, h1: f64) -> Option<f64> {
-        (h1 >= 0. && h0 <= self.cutting).then(|| self.cut_radius(h1.min(self.cutting)))
+        let (lo, hi) = (h0.max(0.), h1.min(self.cutting));
+        (lo <= hi).then(|| self.cut_radius(self.tool.cutter().widest_height().clamp(lo, hi)))
     }
     /// Smallest cutting radius over [h0, h1], when that window lies inside
-    /// the cutting part.
+    /// the cutting part: at one of its ends (unimodal).
     fn cut_min(&self, h0: f64, h1: f64) -> Option<f64> {
-        (h0 >= 0. && h1 <= self.cutting).then(|| self.cut_radius(h0))
+        (h0 >= 0. && h1 <= self.cutting).then(|| self.cut_radius(h0).min(self.cut_radius(h1)))
     }
 }
 
@@ -617,7 +618,10 @@ impl DexelStock {
         }
         stats.changed_rays = changes.len();
         let (view_changes, _) = self.validate(&changes)?;
-        let buried = undercut > 0 || axis != Axis::PosZ;
+        // A cutter that narrows toward the spindle leaves material above its
+        // widest section in its footprint: never a height-field move.
+        let buried =
+            undercut > 0 || axis != Axis::PosZ || tool.cutter().definition().shape.undercuts();
         let view = self.view.derived_delta(
             tool,
             motion,

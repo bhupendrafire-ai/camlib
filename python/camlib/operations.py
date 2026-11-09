@@ -1677,6 +1677,54 @@ class Trace:
 
 
 @dataclass(frozen=True)
+class Undercut:
+    """Undercut milling with a T-slot, keyseat, lollipop or dovetail cutter:
+    the tool centre follows ``paths`` (``TracePath``) at the tip height
+    ``tip_z_mm``, under material left by earlier operations.
+
+    The tool goes down at ``entry_mm`` and back up at ``exit_mm`` (default:
+    back along each open path to its start, then to the entry): columns that
+    must be open for the whole tool, outside the part or in a cleared pocket.
+    The plan refuses a column it cannot prove open. Needs tri-dexel stock
+    (``DexelStockSpec``): its sweep refuses a move whose neck, shank or
+    holder may touch material.
+    """
+
+    id: str
+    tool: object
+    paths: tuple
+    tip_z_mm: float
+    entry_mm: tuple
+    clearance_z_mm: float
+    exit_mm: tuple | None = None
+    feed_mm_min: float = field(kw_only=True)
+    plunge_mm_min: float = field(kw_only=True)
+    tolerance_mm: float = 1e-5
+    spindle_rpm: float = field(kw_only=True)
+    work_offset: int = 1
+    tool_number: int = field(kw_only=True)
+    length_register: int = field(kw_only=True)
+    coolant: str = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "paths", tuple(self.paths))
+
+    def to_dict(self):
+        result = {field: getattr(self, field) for field in self.__dataclass_fields__}
+        result.update(
+            kind="undercut",
+            tool=getattr(self.tool, "id", self.tool),
+            paths=[path.to_dict() if hasattr(path, "to_dict") else path for path in self.paths],
+            entry_mm=[float(v) for v in self.entry_mm],
+        )
+        if self.exit_mm is None:
+            result.pop("exit_mm")
+        else:
+            result["exit_mm"] = [float(v) for v in self.exit_mm]
+        return result
+
+
+@dataclass(frozen=True)
 class TrochoidalSlot:
     """Slot of constant width with bounded steady cutting-edge engagement.
 

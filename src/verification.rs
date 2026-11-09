@@ -749,15 +749,37 @@ pub(crate) enum Radius {
     Constant(f64),
     Ball(f64),
     Bull(f64, f64),
-    Cone { radius: f64, tip: f64, slope: f64 },
-    Linear { z: f64, radius: f64, slope: f64 },
+    Cone {
+        radius: f64,
+        tip: f64,
+        slope: f64,
+    },
+    Linear {
+        z: f64,
+        radius: f64,
+        slope: f64,
+    },
+    /// A whole sphere of this radius from the tip (a lollipop cutter).
+    Sphere(f64),
 }
 impl Radius {
+    /// The largest radius over heights [lo, hi]: at an end, or at a
+    /// sphere's equator when the interval holds it.
+    pub(crate) fn max_over(self, lo: f64, hi: f64) -> f64 {
+        match self {
+            Self::Sphere(r) if lo <= r && r <= hi => r,
+            _ => self.at(lo).max(self.at(hi)),
+        }
+    }
     pub(crate) fn at(self, z: f64) -> f64 {
         match self {
             Self::Constant(r) => r,
             Self::Ball(r) => {
                 let z = z.min(r);
+                (z * (2. * r - z)).max(0.).sqrt()
+            }
+            Self::Sphere(r) => {
+                let z = z.clamp(0., 2. * r);
                 (z * (2. * r - z)).max(0.).sqrt()
             }
             Self::Bull(r, c) => {
@@ -790,6 +812,12 @@ pub(crate) fn parts(tool: &PreparedAssembly) -> Result<Vec<Part>, String> {
     let radius = match c.shape {
         CutterShape::Flat | CutterShape::Beam => Radius::Constant(r),
         CutterShape::Ball => Radius::Ball(r),
+        CutterShape::Lollipop => Radius::Sphere(r),
+        CutterShape::Dovetail { flank_angle_rad } => Radius::Linear {
+            z: 0.,
+            radius: r,
+            slope: -1. / flank_angle_rad.tan(),
+        },
         CutterShape::Bull { corner_radius_mm } => Radius::Bull(r, corner_radius_mm),
         CutterShape::Drill { point_angle_rad } => Radius::Cone {
             radius: r,
@@ -958,7 +986,7 @@ fn check_body<C: CancelSignal>(
             work.stats.pruned_intervals += 1;
             continue;
         }
-        let radius = part.radius.at(lo).max(part.radius.at(hi));
+        let radius = part.radius.max_over(lo, hi);
         if let Some((center, body_radius)) = body.outer_circle
             && let Some(distance) = circle_axis_distance(motion, path, [a, z], center)
             && distance > body_radius + radius + guard

@@ -104,6 +104,7 @@ pub mod thermal;
 pub mod tool;
 pub mod trace;
 pub mod turning;
+pub mod undercut;
 pub mod vcarve;
 pub mod verification;
 pub mod waterline;

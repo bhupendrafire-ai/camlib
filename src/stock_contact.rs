@@ -374,15 +374,21 @@ impl<C: CancelSignal> Search<'_, C> {
             - self.path.length_mm() * (span[1] - span[0]) / 2.)
             .max(box_distance))
     }
+    /// The cutter's lowest height at radius `r`, under which a pose removes
+    /// everything above it in its footprint. None for cutters that narrow
+    /// toward the spindle (lollipop, dovetail): they leave material above
+    /// their widest section, so they certify no removal here.
     fn bottom_at_radius(&self, r: f64) -> Option<f64> {
         let c = &self.tool.definition().cutter;
         let radius = c.diameter_mm / 2.;
-        if r > radius {
+        if r > radius || c.shape.undercuts() {
             return None;
         }
         Some(match c.shape {
-            CutterShape::Flat | CutterShape::Beam => 0.,
-            CutterShape::Ball => radius - (radius * radius - r * r).max(0.).sqrt(),
+            CutterShape::Flat | CutterShape::Beam | CutterShape::Dovetail { .. } => 0.,
+            CutterShape::Ball | CutterShape::Lollipop => {
+                radius - (radius * radius - r * r).max(0.).sqrt()
+            }
             CutterShape::Bull {
                 corner_radius_mm: k,
             } => {
