@@ -66,6 +66,7 @@ pub mod dynamics;
 pub mod empty_cut;
 pub mod engagement;
 pub mod facing;
+pub mod feed_policy;
 pub mod finishing;
 pub mod fixtures;
 pub mod flat;
