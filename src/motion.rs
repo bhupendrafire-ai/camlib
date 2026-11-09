@@ -396,12 +396,52 @@ pub enum MoveKind {
     /// G32): feed = lead x rpm. Cuts like a fed move; the post writes the
     /// lead, not a feed.
     Thread,
+    /// Protected probe positioning: a straight fed move of the probe that
+    /// stops the machine if the stylus triggers (LinuxCNC G38.3 with a
+    /// trigger check, Renishaw O9810). Only inside an `Event::Probe`.
+    /// Never removes stock; the whole assembly must stay clear of it.
+    ProbePosition,
+    /// The guarded measuring move up to `search_mm` before the expected
+    /// contact (the first part of one LinuxCNC G38.2 or macro gauging
+    /// move): no contact is expected here, so the whole assembly must stay
+    /// clear of stock and scene bodies. Never removes stock.
+    ProbeMeasure,
+    /// The last `search_mm` of the measuring move, ending at the expected
+    /// contact: the stylus ball (or the measured cutter on a tool setter)
+    /// is expected to touch here, so only the other parts are checked.
+    /// Never removes stock.
+    ProbeTouch,
+    /// The fed move back from a contact to where its measuring move
+    /// started. The ball starts touching, so only the other parts are
+    /// checked. Never removes stock.
+    ProbeReturn,
 }
 
 impl MoveKind {
     /// Clearance traverse: rapid, or a programmed traverse feed; never cuts.
     pub fn is_rapid(self) -> bool {
         matches!(self, MoveKind::Rapid | MoveKind::Shift)
+    }
+    /// A probing move (only inside an `Event::Probe`).
+    pub fn is_probe(self) -> bool {
+        matches!(
+            self,
+            MoveKind::ProbePosition
+                | MoveKind::ProbeMeasure
+                | MoveKind::ProbeTouch
+                | MoveKind::ProbeReturn
+        )
+    }
+    /// Whether the move may remove material: every fed move except a
+    /// probing move. Rapids, oriented shifts and probing moves never cut,
+    /// so no removal certificate may be drawn from them.
+    pub fn cuts(self) -> bool {
+        !self.is_rapid() && !self.is_probe()
+    }
+    /// A probing move on which the stylus (or the measured cutter) is
+    /// expected to be in contact: only the other assembly parts are checked.
+    pub fn expects_contact(self) -> bool {
+        matches!(self, MoveKind::ProbeTouch | MoveKind::ProbeReturn)
     }
 }
 
@@ -568,6 +608,18 @@ pub enum Event {
         side: CompensationSide,
         #[serde(default = "xy_plane", skip_serializing_if = "is_xy")]
         plane: Plane,
+    },
+    /// The next `covers` motions are one probing cycle (`crate::probe`):
+    /// protected positioning, guarded measuring moves to the expected
+    /// contacts and the returns, exactly as `ProbeCycle::legs` lays them
+    /// out. A post writes them as the controller's probing blocks (LinuxCNC
+    /// G38.x, or Renishaw Inspection Plus macro calls); the moves stay
+    /// authoritative, and the posted blocks are decoded back into them.
+    /// What the cycle stores on the controller (`cycle.result`) is a premise
+    /// for what follows, recorded here, not something camlib can check.
+    Probe {
+        cycle: crate::probe::ProbeCycle,
+        covers: u32,
     },
 }
 
@@ -843,6 +895,15 @@ pub struct ProgramValidator {
     beams: HashSet<String>,
     beam_on: bool,
     height_control: bool,
+    /// Probe tools, and every tool's cutter radius (a probe's ball).
+    probes: HashSet<String>,
+    radii: std::collections::HashMap<String, f64>,
+    /// The moves the running probing cycle still expects, next first.
+    probe_legs: std::collections::VecDeque<crate::probe::Leg>,
+    /// Work offsets a probing cycle has corrected, and tools whose full
+    /// radius a tool setter stored.
+    probed_offsets: Vec<u8>,
+    radius_set: HashSet<String>,
     pub summary: ProgramSummary,
 }
 impl ProgramValidator {
@@ -900,6 +961,20 @@ impl ProgramValidator {
                 .collect(),
             beam_on: false,
             height_control: false,
+            probes: program
+                .tools
+                .iter()
+                .filter(|t| matches!(t.cutter.shape, crate::tool::CutterShape::Probe))
+                .map(|t| t.id.clone())
+                .collect(),
+            radii: program
+                .tools
+                .iter()
+                .map(|t| (t.id.clone(), t.cutter.diameter_mm / 2.))
+                .collect(),
+            probe_legs: Default::default(),
+            probed_offsets: vec![],
+            radius_set: HashSet::new(),
             summary: ProgramSummary {
                 motions: 0,
                 events: 0,
@@ -938,6 +1013,9 @@ impl ProgramValidator {
         let mut height_control = self.height_control;
         let mut css = self.css;
         let mut feed_rev = self.feed_rev;
+        let mut probe_legs = self.probe_legs.clone();
+        let mut probed_offsets = self.probed_offsets.clone();
+        let mut radius_set = self.radius_set.clone();
         let beam_tool = |t: &Option<String>| t.as_ref().is_some_and(|t| self.beams.contains(t));
         let tools = &self.tools;
         let capabilities = self.capabilities.as_ref();
@@ -961,17 +1039,47 @@ impl ProgramValidator {
                     "only oriented-spindle shifts until the spindle restarts after an oriented stop",
                 ));
             }
+            let mut in_probe = false;
             if covered > 0 {
-                if !matches!(
+                if let Some(leg) = probe_legs.pop_front() {
+                    // A probing cycle covers exactly the moves it lays out.
+                    let Event::Motion { motion } = event else {
+                        return Err(error("a probing cycle covers only its own moves"));
+                    };
+                    if motion.kind != leg.kind
+                        || !matches!(motion.curve, Curve::Line { .. })
+                        || distance(motion.curve.end(), leg.end) > self.tolerance_mm
+                        || motion.feed_mm_min != leg.feed_mm_min
+                    {
+                        return Err(error(&format!(
+                            "a probing cycle's next move is a {:?} line to {:?} at feed {:?}, not this {:?} move to {:?} at {:?}",
+                            leg.kind,
+                            leg.end,
+                            leg.feed_mm_min,
+                            motion.kind,
+                            motion.curve.end(),
+                            motion.feed_mm_min
+                        )));
+                    }
+                    in_probe = true;
+                } else if !matches!(
                     event,
                     Event::Dwell { .. } | Event::Spindle { .. } | Event::SpindleOrient { .. }
-                ) && !matches!(event, Event::Motion { motion } if motion.kind != MoveKind::Tap)
+                ) && !matches!(event, Event::Motion { motion } if motion.kind != MoveKind::Tap && !motion.kind.is_probe())
                 {
                     return Err(error(
                         "a canned cycle covers only the motions, dwell and spindle stop/restart of its hole",
                     ));
                 }
                 covered -= 1;
+            }
+            if let Event::Motion { motion } = event
+                && motion.kind.is_probe()
+                && !in_probe
+            {
+                return Err(error(
+                    "probing moves belong to a probing cycle (Event::Probe) that covers them",
+                ));
             }
             // While compensation is on or changing: only XY-plane motion.
             if (compensation != CompensationSide::Off || compensation_move)
@@ -1140,6 +1248,13 @@ impl ProgramValidator {
                             "cutter compensation must alternate on/off, each with its own straight XY move",
                         ));
                     }
+                    if *side != CompensationSide::Off
+                        && active_tool.as_ref().is_some_and(|t| radius_set.contains(t))
+                    {
+                        return Err(error(
+                            "a tool setter stored this tool's full radius in its tool table entry; camlib's compensation register holds the wear only",
+                        ));
+                    }
                     if *side != CompensationSide::Off {
                         compensation_plane = Some(*plane);
                     } else if compensation_plane != Some(*plane) {
@@ -1212,6 +1327,71 @@ impl ProgramValidator {
                     if position[2] != *initial_z_mm {
                         return Err(error("a canned cycle starts at its return level"));
                     }
+                    covered = *covers;
+                }
+                Event::Probe { cycle, covers } => {
+                    if covered > 0 || tap.is_some() {
+                        return Err(error("probing cycles cannot nest in other cycles"));
+                    }
+                    let Some(tool) = active_tool.as_deref() else {
+                        return Err(error("a probing cycle needs an active tool"));
+                    };
+                    cycle.validate().map_err(|e| error(&e))?;
+                    let stylus = cycle.feature.stylus();
+                    if stylus != self.probes.contains(tool) {
+                        return Err(error(if stylus {
+                            "a probing cycle needs the active tool to be a probe"
+                        } else {
+                            "tool setting measures the active cutting tool, not a probe"
+                        }));
+                    }
+                    if stylus && rpm != 0. {
+                        return Err(error("stop the spindle before probing"));
+                    }
+                    if beam_tool(&active_tool) {
+                        return Err(error("a beam tool cannot be probed or set"));
+                    }
+                    match cycle.result {
+                        crate::probe::ProbeResult::WorkOffset { number } => {
+                            if capabilities.is_some_and(|c| number > c.max_work_offset) {
+                                return Err(error("probed work offset unsupported"));
+                            }
+                            if !probed_offsets.contains(&number) {
+                                probed_offsets.push(number);
+                            }
+                        }
+                        crate::probe::ProbeResult::ToolLength { register } => {
+                            if active_offset.is_some_and(|o| probed_offsets.contains(&o)) {
+                                return Err(error(
+                                    "this program already corrected its work offset by probing, which moves the tool setter declared in that offset: set tool lengths before probing the work offset",
+                                ));
+                            }
+                            if capabilities.is_some_and(|c| register > c.max_length_register) {
+                                return Err(error("tool length register unsupported"));
+                            }
+                        }
+                        crate::probe::ProbeResult::ToolRadius { register } => {
+                            if capabilities.is_some_and(|c| register > c.max_tool_number) {
+                                return Err(error("tool table entry unsupported"));
+                            }
+                            radius_set.insert(tool.to_string());
+                        }
+                    }
+                    let radius = self.radii[tool];
+                    let start = cycle.start(radius).map_err(|e| error(&e))?;
+                    if distance(start, position) > self.tolerance_mm {
+                        return Err(error(&format!(
+                            "a probing cycle starts at its start point {start:?}, not at {position:?}"
+                        )));
+                    }
+                    let legs = cycle.legs(radius).map_err(|e| error(&e))?;
+                    if legs.len() != *covers as usize {
+                        return Err(error(&format!(
+                            "this probing cycle has {} moves, not {covers}",
+                            legs.len()
+                        )));
+                    }
+                    probe_legs = legs.into();
                     covered = *covers;
                 }
                 Event::Motion { motion: m } => {
@@ -1417,6 +1597,9 @@ impl ProgramValidator {
         self.height_control = height_control;
         self.css = css;
         self.feed_rev = feed_rev;
+        self.probe_legs = probe_legs;
+        self.probed_offsets = probed_offsets;
+        self.radius_set = radius_set;
         self.summary = summary;
         Ok(())
     }

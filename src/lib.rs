@@ -88,6 +88,7 @@ pub mod post_intent;
 pub mod post_lowering;
 pub mod post_rounding;
 mod post_scheduling;
+pub mod probe;
 mod profiles;
 pub mod regeneration;
 pub mod requests;

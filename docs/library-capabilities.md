@@ -42,6 +42,7 @@ See [Operations](operations.md) for parameters. Summary:
 | Deburr | Horizontal edges of a finished part (every upward-facing face's boundary), chamfer mill; the rest of the part proven untouched (whole tool assembly); unreachable and concave stretches reported |
 | Trace / engrave | Open or closed line/arc paths at depth, no radius offset |
 | Feeds and speeds | `cutting_data`: rpm and feed from surface speed and feed per tooth, chip thinning, ball effective diameter |
+| Probing, tool setting | Surface, outside and inside corner, bore, boss, pocket and web cycles that correct a work offset, and tool length and diameter on a declared tool setter, with a `ProbeTool` (stylus ball, stem, body); protected positioning, measuring moves checked clear until `search_mm` before the expected contact; stock never changed; what is stored recorded as a premise |
 | Plasma and laser cutting | Sheet parts with holes: kerf compensation (computed or G41/G42 wear), arc/line leads from the scrap, overcut or negative overburn, pierce clearance (center pierce in small holes), inner features and nested parts first, small-hole feed and THC off, micro-joints, fixed or programmed pierce/cut heights; every lead, kerf path and pierce proven clear of the parts; sheet simulated cut through |
 | Turning (lathe) | Facing, outside roughing (axial passes, every diameter left at its allowance), finishing, external, internal and face grooving, parting off, external and internal single-point threading, drilling on the axis (pecks), inside roughing and finishing (boring bars) of a turned profile and bore with insert/holder/bar geometry; every move checked against the part, its bore, the stock and the chuck; axisymmetric stock with outer and inner bounds; constant surface speed (G96 with its G50/D limit) and feed per revolution (G95/G99); G18 output, radius or diameter X, T0101 words; a lathe setup is an ordinary `Setup` streamed like every run (per-move stock, playback with partial moves, cancellation, posted replay on the stock) with a material check (leftover material against the part) after each operation |
 
@@ -173,6 +174,7 @@ controller parameters, real offsets) is outside what camlib can check.
 | Lathe spindle and feed modes | G96 S (with G50 S or D limit) / G97, G95 or G99 F per revolution / G94 or G98, decoded back; per-move feed bounds checked |
 | Cutter compensation | G41/G42 with the tool's D register (wear), G40: on their own line (LinuxCNC, Centroid) or in the lead move's block (FANUC, Haas) |
 | Oriented spindle stop | M19 (declared per machine) for fine boring |
+| Probing | LinuxCNC `G38.3` (protected, with a trip check) and `G38.2` with `#5061`-`#5063` into `G10 L2`/`L10`/`L1`; or Renishaw Inspection Plus `G65 P9810`/`P9811`/`P9812`/`P9814`/`P9815` (FANUC); decoded back into moves and checked |
 | Beam on/off, power | Plasma `M3 S1`/`M5`, laser `M4 S<power>` (GRBL laser mode) or `M3 S`, from the declared S at full power |
 | Torch height control | Declared on/off codes (e.g. `M63 P2`/`M62 P2`) |
 | Tool changes | Table poses, preserved tip, or Z home |

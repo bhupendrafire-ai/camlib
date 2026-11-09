@@ -33,7 +33,21 @@ def _sha(raw):
     return hashlib.sha256(raw).digest()
 
 
-_KINDS = ('rapid', 'cut', 'plunge', 'lead', 'link', 'retract', 'tap', 'shift', 'thread')
+_KINDS = (
+    'rapid',
+    'cut',
+    'plunge',
+    'lead',
+    'link',
+    'retract',
+    'tap',
+    'shift',
+    'thread',
+    'probe_position',
+    'probe_measure',
+    'probe_touch',
+    'probe_return',
+)
 _CURVES = ('line', 'arc', 'helix')
 _PLANES = ('xy', 'xz', 'yz')
 

@@ -1093,6 +1093,93 @@ its cutting edges: a move whose back (non-cutting) side leads into stock is
 refused, and stock beyond the edges' reach is left for the holder check, so
 a depth of cut beyond the cutting edge is refused.
 
+## Probing and tool setting
+
+camlib plans, simulates and posts probing cycles; it never reads their
+results back from a machine (it never talks to one). Each operation is one
+cycle with a touch probe, `camlib.ProbeTool(id, ball_diameter=,
+stem_diameter=, stylus_length=, body_diameter=, body_length=)` (no defaults:
+the ball is the calibrated effective diameter; the stem is checked as the
+shank and the body as a holder section), or, for tool setting, with the
+cutting tool being measured:
+
+| Operation | Measures | Stores |
+| --- | --- | --- |
+| `ProbeSurface(start_mm, axis, surface_mm)` | One surface square to X, Y or Z, from `start_mm` along that axis and back (Z from above) | That axis of `update_work_offset` |
+| `ProbeOutsideCorner(corner_mm, z_mm, material, inset_mm, clearance_mm)` | The Y face, then the X face, each `inset_mm` along it from the corner and from `clearance_mm` away, over the clearance plane | X and Y |
+| `ProbeInsideCorner(corner_mm, z_mm, material, clearance_mm)` | The Y wall, then the X wall, from one start `clearance_mm` from both | X and Y |
+| `ProbeBore(center_mm, z_mm, diameter_mm)` | +X, -X, +Y, -Y from the centre | X and Y (the centre) |
+| `ProbeBoss(center_mm, z_mm, diameter_mm, clearance_mm)` | +X, -X, +Y, -Y from outside, over the clearance plane | X and Y (the centre) |
+| `ProbePocket(center_mm, z_mm, axis, width_mm)` | + and - across X or Y from the centre | That axis (the centre) |
+| `ProbeWeb(center_mm, z_mm, axis, width_mm, clearance_mm)` | + and - across X or Y from outside | That axis (the centre) |
+| `ToolSetLength(contact_mm, clearance_mm)` | The tool's tip down onto a tool setter's contact face | The tool's length register |
+| `ToolSetDiameter(setter_center_mm, setter_top_z_mm, setter_diameter_mm, depth_mm, clearance_mm)` | The cutter's side against the setter's round face from +X and from -X | The tool table radius |
+
+`material` gives the side of each face where the material lies (+1 or -1
+per axis). `z_mm` is the probe tip: the probe's controlled point is the
+bottom of the stylus ball, so an XY touch happens one ball radius above it.
+Every operation takes `clearance_z_mm` (rapids reach the cycle over it; a
+stylus cycle's protected retract height), `search_mm`, `measure_feed_mm_min`,
+`return_feed_mm_min`, `tool_number`, `length_register` and `work_offset`.
+Stylus cycles also take `position_feed_mm_min` and `update_work_offset` (the
+offset corrected: new offset = active offset + measured error, in the axes
+the feature measures; Renishaw Inspection Plus `S`, LinuxCNC `G10 L2`). Tool
+setting takes `spindle_rpm` (0: stopped) and `spindle_direction`: camlib
+assumes neither.
+
+```python
+probe = camlib.ProbeTool("probe", ball_diameter=4, stem_diameter=3, stylus_length=50,
+                         body_diameter=40, body_length=60)
+corner = camlib.ProbeOutsideCorner(
+    "datum", probe, corner_mm=(0, 0), z_mm=5, material=(1, 1), inset_mm=5, clearance_mm=5,
+    clearance_z_mm=20, search_mm=2, position_feed_mm_min=1000, measure_feed_mm_min=100,
+    return_feed_mm_min=1000, tool_number=20, length_register=20, update_work_offset=1)
+```
+
+The moves of a cycle:
+
+- **Protected positioning** (`probe_position`): every stylus move below the
+  clearance plane that is not measuring stops the machine if the stylus
+  triggers (LinuxCNC `G38.3` and a trip check; Inspection Plus `O9810`).
+- **Measuring** (`probe_measure`, then `probe_touch`): the surface is expected
+  within `search_mm` of its nominal position. The measuring move is planned up
+  to `search_mm` before the expected contact, where nothing may be touched (the
+  whole assembly is checked against stock and scene bodies like a rapid), then
+  over the last `search_mm` to the expected contact, where only the stylus ball
+  (or the measured cutter) may touch: the stem and body stay checked. The
+  controller searches `search_mm` beyond the expected contact.
+- **Back** (`probe_return`) to where the measuring move started, at
+  `return_feed_mm_min`; the ball is not checked (it starts touching).
+
+Probing moves never remove simulated stock, and their whole assembly is
+checked for stock contact without the removal certificates a cutting move
+earns. Avoid areas are honoured like rapids. A probe never cuts: any other
+operation with a probe tool is refused, as is a stylus cycle with a cutting
+tool, a running spindle under a probe, a measuring move no longer than its
+search, and a probing height at or above the clearance plane.
+
+What a cycle stores (the operation report's `stores`) is a premise for the
+rest of the program, recorded in it; camlib cannot check it. Also premises:
+the probe's calibration (ball size, the trigger point as the length), the
+controller's stopping distance after a trigger within the stylus overtravel,
+the features existing within `search_mm` of nominal, and no G5x rotation. The
+tool setter is declared in the setup's work coordinates (declare its body as
+a scene fixture to check the moves around it), so a program refuses a tool
+length set after it probed its own work offset. `ToolSetDiameter` stores the
+full radius, not wear: camlib's wear compensation on that tool afterwards is
+refused.
+
+Posts write cycles through the dialect's declared probing back end
+([Postprocessors](posts.md#probing)): LinuxCNC `G38.x`, or Renishaw Inspection
+Plus macros on FANUC. The decoder reads every move back from the written
+blocks, and each is compared with the plan.
+
+Layout references: LinuxCNC G-code reference (G38.n, G10 L1/L2/L10,
+numbered parameters, `docs/src/gcode` in LinuxCNC 2.9); Renishaw *Inspection
+Plus software programming manual* H-2000-6031 and H-2000-6222 (chapters 5 and
+7: O9810, O9811, O9812, O9814, O9815; chapter 9 feedrates). Probing on tilted
+work planes waits for #2 and #5.
+
 ## Tools
 
 `camlib.tools`: `EndMill`, `BallEndMill`, `BullEndMill(corner_radius=...)`,
@@ -1101,8 +1188,9 @@ a depth of cut beyond the cutting edge is refused.
 `Tap(drill_diameter=, thread_length=, shank_diameter=)`,
 `BoringBar(diameter=, bar_diameter=, reach=, insert_length=1)`,
 `Torch(kerf_width=, nozzle_diameter=6, body_diameter=30)` and
-`LaserHead(kerf_width=, nozzle_diameter=3, body_diameter=25)` (complete
-assemblies). The cutter helpers take
+`LaserHead(kerf_width=, nozzle_diameter=3, body_diameter=25)` and
+`ProbeTool(ball_diameter=, stem_diameter=, stylus_length=, body_diameter=,
+body_length=)` (complete assemblies). The cutter helpers take
 `diameter`, `flute_length`, `overall_length` and optional `shank_diameter`,
 `flutes`, `center_cutting`, `material`, `name`; `neck=Neck(diameter, length)`
 models a reduced neck above the flutes. A

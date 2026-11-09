@@ -382,7 +382,9 @@ impl<C: CancelSignal> Search<'_, C> {
         }
         Some(match c.shape {
             CutterShape::Flat | CutterShape::Beam => 0.,
-            CutterShape::Ball => radius - (radius * radius - r * r).max(0.).sqrt(),
+            CutterShape::Ball | CutterShape::Probe => {
+                radius - (radius * radius - r * r).max(0.).sqrt()
+            }
             CutterShape::Bull {
                 corner_radius_mm: k,
             } => {
@@ -399,9 +401,7 @@ impl<C: CancelSignal> Search<'_, C> {
     /// A fixed earlier pose must cover EVERY point in a tile and reach its old
     /// top. This is an enclosure certificate, not a sampled current-sweep test.
     fn earlier_upper(&mut self, rect: [f64; 4], top: f64, before: f64) -> Result<f64, String> {
-        if before == 0.
-            || self.motion.kind.is_rapid()
-            || !self.tool.definition().cutter.center_cutting
+        if before == 0. || !self.motion.kind.cuts() || !self.tool.definition().cutter.center_cutting
         {
             return Ok(top);
         }
@@ -450,7 +450,7 @@ impl<C: CancelSignal> Search<'_, C> {
         Ok(upper.max(self.stock.spec().min_mm[2]))
     }
     fn uncut_ball(&self, point: Vec3, radius: f64, t: f64) -> Result<bool, String> {
-        if self.motion.kind.is_rapid() || t == 0. {
+        if !self.motion.kind.cuts() || t == 0. {
             return Ok(true);
         }
         let bounds = self.bounds([0., t])?;
@@ -597,7 +597,7 @@ impl<C: CancelSignal> Search<'_, C> {
                 self.stats.pruned_nodes += 1;
                 continue;
             }
-            if !self.motion.kind.is_rapid() {
+            if self.motion.kind.cuts() {
                 let upper = self.earlier_upper(rect, h[1], task.span[0])?;
                 if bounds.min[2] + part.min > upper + 2. * self.guard {
                     self.stats.pruned_nodes += 1;
@@ -690,6 +690,23 @@ pub fn check(
     check_digested(stock, tool, motion, options, &digests, cancel)
 }
 
+/// Whether stock contact checks the cutter on a move of this kind: on
+/// rapids and on probing moves where no contact is expected. A cutting
+/// move's cutter is meant to touch stock, and so is a probe's stylus (or a
+/// measured cutter on a tool setter) where it expects its contact.
+pub(crate) fn checks_cutter(kind: MoveKind) -> bool {
+    kind.is_rapid() || (kind.is_probe() && !kind.expects_contact())
+}
+/// The report scope of a move kind.
+pub(crate) fn scope(kind: MoveKind) -> &'static str {
+    match kind {
+        MoveKind::Rapid => "rapid_assembly",
+        MoveKind::Shift => "oriented_shift",
+        MoveKind::ProbePosition | MoveKind::ProbeMeasure => "probe_assembly",
+        MoveKind::ProbeTouch | MoveKind::ProbeReturn => "probe_contact_zone",
+        _ => "fed_noncutting",
+    }
+}
 /// Canonical identities bound into a report; a stream computes the options and
 /// tool identities once per run and the motion identity once per motion.
 pub(crate) struct Digests {
@@ -721,7 +738,7 @@ pub(crate) fn check_digested(
     let parts = verification::parts(tool)?;
     let selected = parts
         .iter()
-        .filter(|p| motion.kind.is_rapid() || p.kind != ToolPart::Cutter)
+        .filter(|p| p.kind != ToolPart::Cutter || checks_cutter(motion.kind))
         .collect::<Vec<_>>();
     let mut s = Search {
         stock,
@@ -811,7 +828,7 @@ pub(crate) fn check_digested(
     };
     Ok(Report {algorithm:"continuous_stock_contact_v1".into(),stock:stock.spec().clone(),pre_generation:stock.generation(),options_sha256:digests.options.clone(),
         tool_sha256:digests.tool.clone(),motion_sha256:digests.motion.clone(),motion_id:motion.id,operation:motion.operation.clone(),tool:motion.tool.clone(),
-        scope:match motion.kind {MoveKind::Rapid=>"rapid_assembly",MoveKind::Shift=>"oriented_shift",_=>"fed_noncutting"}.into(),status,fully_examined:s.stats.unexamined_parts==0&&!s.stats.work_exhausted,
+        scope:scope(motion.kind).into(),status,fully_examined:s.stats.unexamined_parts==0&&!s.stats.work_exhausted,
         findings,stats:s.stats,numerical_policy:"Validated whole-cell stock premise; continuous interval/profile enclosures and prior full-footprint cutting certificates. Strict lower-solid witnesses require earlier-cut separation. Binary64 engineering guards, not interval certification or machine qualification.".into()})
 }
 

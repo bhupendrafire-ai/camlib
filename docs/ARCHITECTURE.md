@@ -167,7 +167,10 @@ whose old value doesn't match its own stock.
   the plan (decoded); finishing chords between samples (certified, not just
   sampled endpoints).
 - **Not proven:** posts have not been run on real machines (issue #20); camlib
-  cannot know the real work offsets, tool lengths or clamps. Display data (stock
+  cannot know the real work offsets, tool lengths or clamps. A probing cycle
+  (`src/probe.rs`) records what it stores on the controller (a work offset, a
+  tool length or radius) as a premise; the program after it is checked with
+  the declared values, not the measured ones. Display data (stock
   meshes, previews) is approximate. "Possible" material bounds include the stock
   grid's and the target mesh's resolution.
 
@@ -218,6 +221,8 @@ whose old value doesn't match its own stock.
 | Certain / possible | Lower and upper bounds of stock or of a check result |
 | Certified chord | A straight move between two samples proven within tolerance of the surface along its whole length |
 | Air cut | A feed move that removes no stock |
+| Protected move | A probe move that stops the machine if the stylus triggers (LinuxCNC G38.3 with a trip check, Renishaw O9810) |
+| Touch zone | The last `search_mm` of a probing measuring move, where the stylus is expected to touch; only there is the ball exempt from contact checks |
 | Rest machining | Cutting only material left by earlier operations, read from the stock |
 | R plane | The retract height of a drilling cycle |
 | Lowering | Rewriting moves a controller can't take exactly (for example arcs) as checked segments |

@@ -13,7 +13,15 @@ _OEM = {'tool_change', 'spindle_cw', 'spindle_ccw', 'spindle_off', 'coolant_off'
 _WORD = re.compile(r'([A-Z])([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))')
 
 
-def _dialect(m_codes, peck_return_mm=None, chip_break_return_mm=None, fine_bore_edge_deg=None, rigid_tapping=False):
+def _dialect(
+    m_codes,
+    peck_return_mm=None,
+    chip_break_return_mm=None,
+    fine_bore_edge_deg=None,
+    rigid_tapping=False,
+    inspection_plus_fast_feed_mm_min=None,
+    inspection_plus_switching=False,
+):
     if set(m_codes) != _OEM or len(set(m_codes.values())) != len(_OEM):
         raise ValueError('bind distinct OEM tool/spindle/flood/off M functions')
     if any(not re.fullmatch(r'M[1-9][0-9]?', c) or int(c[1:]) in (1, 2, 30, 98, 99) for c in m_codes.values()):
@@ -64,6 +72,11 @@ def _dialect(m_codes, peck_return_mm=None, chip_break_return_mm=None, fine_bore_
         chip_break_lift_mm=chip_break_return_mm,
         oriented_edge_deg=fine_bore_edge_deg,
         compensation_with_move=True,
+        # Renishaw Inspection Plus macros (G65 P98xx, custom macro B), only
+        # where installed: their fast feed #119 and probe switching.
+        probing=None if inspection_plus_fast_feed_mm_min is None else 'inspection_plus',
+        probe_fast_feed_mm_min=inspection_plus_fast_feed_mm_min,
+        probe_switching=inspection_plus_switching,
     )
 
 
@@ -84,6 +97,11 @@ class ReferenceMachine(Machine):
     fine_bore_edge_deg: float | None = None
     # Parameter No. 5200#0 (G84) = 1: G84/G74 are rigid tapping cycles.
     rigid_tapping: bool = False
+    # Renishaw Inspection Plus installed (H-2000-6031): its fast feed #119
+    # (settings macro O9724), and whether cycles switch the probe on/off
+    # with O9832/O9833. None: no probing.
+    inspection_plus_fast_feed_mm_min: float | None = None
+    inspection_plus_switching: bool = False
     reference: str = 'FANUC 0i-MB;B-63844EN/02 February2003;length-offset-A'
 
     def __post_init__(self):
@@ -123,6 +141,8 @@ class ReferenceMachine(Machine):
                 self.chip_break_return_mm,
                 self.fine_bore_edge_deg,
                 self.rigid_tapping,
+                self.inspection_plus_fast_feed_mm_min,
+                self.inspection_plus_switching,
             )
             or self.mist
         ):
@@ -157,6 +177,8 @@ def define_machine(
     chip_break_return_mm=None,
     fine_bore_edge_deg=None,
     rigid_tapping=False,
+    inspection_plus_fast_feed_mm_min=None,
+    inspection_plus_switching=False,
     **settings,
 ):
     """Define the installed machine in ordinary Python; no controller writes.
@@ -168,8 +190,18 @@ def define_machine(
     return ReferenceMachine(
         name,
         tools,
-        dialect=_dialect(m_codes, peck_return_mm, chip_break_return_mm, fine_bore_edge_deg, rigid_tapping),
+        dialect=_dialect(
+            m_codes,
+            peck_return_mm,
+            chip_break_return_mm,
+            fine_bore_edge_deg,
+            rigid_tapping,
+            inspection_plus_fast_feed_mm_min,
+            inspection_plus_switching,
+        ),
         rigid_tapping=rigid_tapping,
+        inspection_plus_fast_feed_mm_min=inspection_plus_fast_feed_mm_min,
+        inspection_plus_switching=inspection_plus_switching,
         planes=('xy',),
         peck_return_mm=peck_return_mm,
         chip_break_return_mm=chip_break_return_mm,

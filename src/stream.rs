@@ -2103,6 +2103,10 @@ fn put_motion(out: &mut Vec<u8>, m: &Motion) -> Result<(), String> {
             MoveKind::Tap => 6,
             MoveKind::Shift => 7,
             MoveKind::Thread => 8,
+            MoveKind::ProbePosition => 9,
+            MoveKind::ProbeMeasure => 10,
+            MoveKind::ProbeTouch => 11,
+            MoveKind::ProbeReturn => 12,
         },
     );
     put_u8(out, u8::from(m.feed_mm_min.is_some()));
@@ -2232,6 +2236,10 @@ impl<'a> Decoder<'a> {
             6 => MoveKind::Tap,
             7 => MoveKind::Shift,
             8 => MoveKind::Thread,
+            9 => MoveKind::ProbePosition,
+            10 => MoveKind::ProbeMeasure,
+            11 => MoveKind::ProbeTouch,
+            12 => MoveKind::ProbeReturn,
             _ => return Err("invalid binary motion kind".into()),
         };
         let feed_flag = self.u8()?;
