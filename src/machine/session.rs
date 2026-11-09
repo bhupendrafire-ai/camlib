@@ -622,7 +622,10 @@ impl Session {
         };
         let mut cells = vec![];
         match self.replay.run_stock() {
-            RunStock::Height(stock) => {
+            // A tri-dexel run's height view is a valid height-field bound of
+            // its material: its cells enclose the stock as a height field's do.
+            RunStock::Height(_) | RunStock::Dexel(_) => {
+                let stock = self.replay.run_stock().height()?;
                 crate::resources::check_memory(
                     stock.cells().len() as u128 * 96,
                     "machine stock enclosures",

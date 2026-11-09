@@ -161,6 +161,7 @@ class Setup:
     # the Turn* operations; initial_position_mm is (radius, 0, z), the turret
     # index position every tool's controlled point starts from.
     turning: object | None = None
+    initial_stock: object | None = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +230,28 @@ class CompiledSetup:
             frame=self.frame,
         )
 
+    def post(self, *, machine, cache=None, **options):
+        """Post this immutable snapshot through the ordinary checked run."""
+        from .posted import PostedRun, OperationEvents, check_tool_change_pose
+
+        config = self.config
+        check_tool_change_pose(machine, config)
+        if 'initial_stock' in options and _plain(options['initial_stock']) != config.get('initial_stock'):
+            raise ValueError('posted initial stock differs from the compiled setup')
+        simulation = Simulation(**self.simulation_options(cache), executable=options.get('executable'))
+        source = OperationEvents(simulation, reuse_active_tool=True, on_operation=options.pop('on_operation', None))
+        try:
+            options.setdefault('verification', config.get('verification'))
+            options.setdefault('sweep', config['sweep'])
+            if 'initial_stock' in config:
+                options['initial_stock'] = config['initial_stock']
+            if 'turning' in config:
+                options['turning'] = config['turning']
+            return PostedRun(self.program_header(), source, machine=machine, stock=config['stock'], **options)
+        except BaseException:
+            source.close()
+            raise
+
 
 @dataclass(frozen=True)
 class CompiledJob:
@@ -284,6 +307,7 @@ class Job:
                 or setup.contain is not None
                 or setup.verification is not None
                 or setup.tool_change is not None
+                or setup.initial_stock is not None
             ):
                 raise ValueError(
                     "a lathe setup checks every move against its part, bore, chuck and stock; "
@@ -344,6 +368,8 @@ class Job:
                     sources={s: sources[s].semantic() for s in selected},
                     parents={p: dependencies[p] for p in parents},
                 )
+                if setup.initial_stock is not None:
+                    key_inputs['initial_stock'] = _plain(setup.initial_stock)
                 external = None
                 if node.inputs is not None:
                     external = _plain(node.inputs)
@@ -378,6 +404,8 @@ class Job:
                 )
                 if setup.tool_change is not None:
                     config['tool_change'] = setup.tool_change.to_dict()
+                if setup.initial_stock is not None:
+                    config['initial_stock'] = _plain(setup.initial_stock)
                 # Always explicit: the engine default is on.
                 config['rapid_retracts'] = setup.rapid_retracts
             # Snapshot all authored values before spawning a native process. Native
@@ -441,25 +469,7 @@ class Job:
         )
 
     def post(self, setup_id, *, machine, cache=None, **options):
-        from .posted import PostedRun, OperationEvents, check_tool_change_pose
-
-        setup = self.compile().setup(setup_id)
-        check_tool_change_pose(machine, setup.config)
-        simulation = Simulation(**setup.simulation_options(cache), executable=options.get('executable'))
-        source = OperationEvents(simulation, reuse_active_tool=True, on_operation=options.pop('on_operation', None))
-        try:
-            if 'verification' not in options:
-                options['verification'] = setup.config.get('verification')
-            if 'sweep' not in options:
-                options['sweep'] = setup.config['sweep']
-            if 'turning' in setup.config:
-                # A lathe setup: the posted moves are replayed on its stock
-                # with the turning planner's move kernel and checks.
-                options['turning'] = setup.config['turning']
-            return PostedRun(setup.program_header(), source, machine=machine, stock=setup.config['stock'], **options)
-        except BaseException:
-            source.close()
-            raise
+        return self.compile().setup(setup_id).post(machine=machine, cache=cache, **options)
 
 
 @dataclass(frozen=True)

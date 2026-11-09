@@ -3,6 +3,7 @@ use std::{io::Cursor, sync::atomic::AtomicBool};
 
 fn manifest() -> StreamManifest {
     StreamManifest {
+        initial_stock: None,
         tool_change: None,
         rapid_retracts: false,
         turning: None,
@@ -867,7 +868,12 @@ fn configured_motion_failure_cancellation_and_frame_budget_do_not_commit_checks_
     let material = p
         .finish_material_verification(&AtomicBool::new(false))
         .unwrap();
-    t.accept(&material, 1, None).unwrap();
+    let record = t.accept(&material, 1, None).unwrap();
+    let camlib::stream_verification::Check::Material { sweep_proof, .. } = record.check else {
+        panic!("material report expected");
+    };
+    let proof = sweep_proof.unwrap();
+    assert_eq!(proof.proven_moves + proof.unproven_moves, 1);
     assert_eq!(t.progress.material_reports, 1);
 }
 
@@ -1760,7 +1766,7 @@ fn explicit_motion_material_stages_bind_committed_cursor_and_require_all_reports
     let final_check = config.material[0].clone();
     config.material[0].after_operation = Some("rough".into());
     config.material.push(final_check);
-    let mut p = StreamProducer::new(m).unwrap();
+    let mut p = StreamProducer::new(m.clone()).unwrap();
     let moves = motions();
     let cancel = AtomicBool::new(false);
     for motion in &moves[..2] {
@@ -1772,11 +1778,10 @@ fn explicit_motion_material_stages_bind_committed_cursor_and_require_all_reports
             .unwrap()
             .is_none()
     );
-    assert!(
-        p.start_material_verification(Some("rough"))
-            .unwrap()
-            .is_some()
-    );
+    let started = p
+        .start_material_verification(Some("rough"))
+        .unwrap()
+        .unwrap();
     assert!(
         p.push_checked_motion(moves[2].clone(), DEFAULT_FRAME_LIMIT, &cancel)
             .is_err()
@@ -1786,8 +1791,25 @@ fn explicit_motion_material_stages_bind_committed_cursor_and_require_all_reports
             .is_err()
     );
     assert_eq!(p.completed(), 2);
-    p.finish_material_verification(&cancel).unwrap();
-    assert!(p.start_material_verification(Some("rough")).is_err());
+    let finished = p.finish_material_verification(&cancel).unwrap();
+    let mut tracker = camlib::stream_verification::Tracker::new(
+        std::sync::Arc::new(camlib::stream_verification::Binding::new(&m).unwrap()),
+        0,
+    );
+    tracker.accept(&started, 2, None).unwrap();
+    tracker.accept(&finished, 2, None).unwrap();
+    assert!(
+        tracker
+            .accept(&started, 2, None)
+            .unwrap_err()
+            .contains("repeated material stage")
+    );
+    assert!(tracker.accept(&finished, 2, None).is_err());
+    assert!(
+        p.start_material_verification(Some("rough"))
+            .unwrap()
+            .is_none()
+    );
     for motion in &moves[2..] {
         p.push_checked_motion(motion.clone(), DEFAULT_FRAME_LIMIT, &cancel)
             .unwrap();
@@ -1918,4 +1940,308 @@ fn finishing_material_stage_binds_scope_and_incomplete_access_without_hiding_raw
                 .contains("coverage mismatch")
         );
     }
+}
+
+#[test]
+fn retained_sweep_proofs_bind_source_budget_replay_history_and_checked_move_totals() {
+    use camlib::{material::*, stream_verification::Binding, surface::SurfaceMesh};
+    for mode in ["raw", "initial", "resumed", "spent"] {
+        let mut m = checked_manifest();
+        m.stock.height_mut().unwrap().max_mm = [4., 4., 3.];
+        m.stock.height_mut().unwrap().cell_size_mm = 0.25;
+        m.initial_position_mm = [1.95, 1., 1.];
+        m.tools[0].cutter.diameter_mm = 0.1;
+        m.tools[0].cutter.shank_diameter_mm = 0.1;
+        let config = m.verification.as_mut().unwrap();
+        config.scene = None;
+        config.material[0].options = Options {
+            comparison_tolerance_mm: 0.02,
+            gouge_tolerance_mm: (mode == "spent").then_some(0.0005),
+            max_findings: 1024,
+            ..Options::default()
+        };
+        config.material[0].target = SurfaceTarget {
+            version: 1,
+            units: "mm".into(),
+            id: "wall".into(),
+            revision: "1".into(),
+            surface: SurfaceMesh {
+                version: 1,
+                units: "mm".into(),
+                triangles: vec![
+                    [[2., 0., 2.], [4., 0., 2.], [4., 4., 2.]],
+                    [[2., 0., 2.], [4., 4., 2.], [2., 4., 2.]],
+                ]
+                .into(),
+                surface_error_mm: 0.001,
+                source: serde_json::Value::Null,
+            },
+            base_z_mm: 0.,
+            source_enclosure: SurfaceEnclosure::Bounded,
+            contact_witnesses: None,
+            inner_patches: vec![],
+            finishing: None,
+        }
+        .into();
+        if mode == "initial" {
+            m.initial_stock = Some(InitialStock {
+                source_id: "measured".into(),
+                revision: "1".into(),
+                source_sha256: "a".repeat(64),
+                source_to_setup: WorkFrame::identity(),
+                uncertainty_mm: 0.,
+                representation: "whole_cell_top_down".into(),
+                bounds: vec![
+                    HeightBounds {
+                        lower_mm: 3.,
+                        upper_mm: 3.
+                    };
+                    256
+                ],
+            });
+        }
+        let cancel = AtomicBool::new(false);
+        let mut producer = StreamProducer::new(m.clone()).unwrap();
+        let motion = |id, start, end| Motion {
+            id,
+            operation: "tangent".into(),
+            tool: "t1".into(),
+            kind: MoveKind::Cut,
+            curve: Curve::Line { start, end },
+            feed_mm_min: Some(100.),
+        };
+        producer
+            .push_checked_motion(
+                motion(1, m.initial_position_mm, [1.95, 3., 1.]),
+                DEFAULT_FRAME_LIMIT,
+                &cancel,
+            )
+            .unwrap();
+        let completed = if mode == "resumed" {
+            let checkpoint = producer.checkpoint(CHECKPOINT_FRAME_LIMIT).unwrap();
+            producer =
+                StreamProducer::from_checkpoint(m.clone(), &checkpoint, CHECKPOINT_FRAME_LIMIT)
+                    .unwrap();
+            producer
+                .push_checked_motion(
+                    motion(2, [1.95, 3., 1.], [1.95, 3.5, 1.]),
+                    DEFAULT_FRAME_LIMIT,
+                    &cancel,
+                )
+                .unwrap();
+            2
+        } else {
+            1
+        };
+        producer.start_material_verification(None).unwrap().unwrap();
+        let bytes = producer.finish_material_verification(&cancel).unwrap();
+        let binding = Binding::new(&m).unwrap();
+        binding.decode(&bytes, completed, None).unwrap();
+        let offset = 20 + identity_size(&m);
+        let original: serde_json::Value = serde_json::from_slice(&bytes[offset..]).unwrap();
+        let encode = |value: &serde_json::Value| {
+            let mut body = bytes[20..offset].to_vec();
+            body.extend(serde_json::to_vec(value).unwrap());
+            reframe(&bytes, &body)
+        };
+        let proof = &original["check"]["sweep_proof"];
+        // A resume from the producer's own checkpoint keeps the proof
+        // states and their history (#108); a declared blank never has it.
+        assert_eq!(proof["history_complete"], mode != "initial");
+        assert!(
+            original["check"]["report"]["gouge"]["possible_only_cells"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        if mode == "raw" || mode == "resumed" {
+            assert!(proof["decided_cells"].as_u64().unwrap() > 0);
+        } else {
+            assert_eq!(proof["decided_cells"], 0);
+            assert!(proof["unavailable"].is_string());
+        }
+        for (field, value) in [
+            ("surface_error_mm", serde_json::json!(0.)),
+            ("tolerance_mm", serde_json::json!(0.1)),
+            ("history_complete", serde_json::json!(mode == "initial")),
+            ("proven_moves", serde_json::json!(completed + 1)),
+            ("unproven_moves", serde_json::json!(u64::MAX)),
+        ] {
+            let mut changed = original.clone();
+            changed["check"]["sweep_proof"][field] = value;
+            if mode == "spent" && field == "history_complete" {
+                // A conservative incomplete-history claim with no decisions
+                // is legitimate, including a checkpoint restored at zero.
+                binding.decode(&encode(&changed), completed, None).unwrap();
+                continue;
+            }
+            assert!(
+                binding.decode(&encode(&changed), completed, None).is_err(),
+                "{mode}: {field}"
+            );
+        }
+        if mode == "raw" || mode == "resumed" {
+            let mut changed = original.clone();
+            changed["check"]["sweep_proof"]["unavailable"] = serde_json::json!("proof unavailable");
+            assert!(binding.decode(&encode(&changed), completed, None).is_err());
+            let mut changed = original.clone();
+            let report = &mut changed["check"]["report"];
+            report["complete"] = serde_json::json!(false);
+            report["stats"]["classified_cells"] = serde_json::json!(255);
+            report["stats"]["unexamined_cells"] = serde_json::json!(1);
+            report["residual"]["assessment"] = serde_json::json!("incomplete");
+            report["gouge"]["assessment"] = serde_json::json!("incomplete");
+            assert!(binding.decode(&encode(&changed), completed, None).is_err());
+        } else {
+            let mut changed = original.clone();
+            changed["check"]["sweep_proof"]["history_complete"] = serde_json::json!(true);
+            changed["check"]["sweep_proof"]["unavailable"] = serde_json::Value::Null;
+            changed["check"]["sweep_proof"]["decided_cells"] = serde_json::json!(1);
+            assert!(binding.decode(&encode(&changed), completed, None).is_err());
+        }
+        if mode == "spent" {
+            assert!(
+                proof["unavailable"]
+                    .as_str()
+                    .unwrap()
+                    .contains("effective gouge tolerance 0.0005")
+            );
+            let mut changed = original.clone();
+            changed["check"]["sweep_proof"]["proven_moves"] = serde_json::json!(1);
+            changed["check"]["sweep_proof"]["unproven_moves"] = serde_json::json!(0);
+            assert!(binding.decode(&encode(&changed), completed, None).is_err());
+        }
+    }
+}
+
+#[test]
+fn checkpoint_restores_never_promote_bounded_cells_into_raw_stock_proof_history() {
+    use camlib::{
+        material::*,
+        stream_verification::{Binding, Check},
+        surface::SurfaceMesh,
+    };
+    let mut m = checked_manifest();
+    m.stock.height_mut().unwrap().max_mm = [2., 2., 3.];
+    m.stock.height_mut().unwrap().cell_size_mm = 0.5;
+    m.initial_position_mm = [0.5, 0.5, 2.5];
+    let config = m.verification.as_mut().unwrap();
+    config.scene = None;
+    config.material[0].target = SurfaceTarget {
+        version: 1,
+        units: "mm".into(),
+        id: "bounded-source".into(),
+        revision: "1".into(),
+        surface: SurfaceMesh {
+            version: 1,
+            units: "mm".into(),
+            triangles: vec![
+                [[-1., -1., 2.], [3., -1., 2.], [3., 3., 2.]],
+                [[-1., -1., 2.], [3., 3., 2.], [-1., 3., 2.]],
+            ]
+            .into(),
+            surface_error_mm: 0.01,
+            source: serde_json::Value::Null,
+        },
+        base_z_mm: 0.,
+        source_enclosure: SurfaceEnclosure::Bounded,
+        contact_witnesses: None,
+        inner_patches: vec![],
+        finishing: None,
+    }
+    .into();
+    config.material[0].options = Options {
+        comparison_tolerance_mm: 0.05,
+        ..Options::default()
+    };
+    let cancel = AtomicBool::new(false);
+    let mut fresh = StreamProducer::new(m.clone()).unwrap();
+    let original = fresh.checkpoint(CHECKPOINT_FRAME_LIMIT).unwrap();
+    // Keep the zero cursor and all manifest attribution intact, but replace
+    // every valid bounded cell with pre-erased material and recompute CRC.
+    let mut body = original[20..].to_vec();
+    // The cells end where the producer's kept proof section (#108) begins.
+    let cells_end = body
+        .windows(8)
+        .rposition(|w| w == b"CAMPRF01")
+        .unwrap_or(body.len());
+    let cells_start = cells_end - 16 * 16;
+    for cell in body[cells_start..cells_end].as_chunks_mut::<16>().0 {
+        cell[..8].copy_from_slice(&0.5_f64.to_le_bytes());
+        cell[8..].copy_from_slice(&0.5_f64.to_le_bytes());
+    }
+    let altered = reframe(&original, &body);
+    let check = |producer: &mut StreamProducer, raw_history: bool, missing: bool, moves: u64| {
+        assert_eq!(producer.completed(), moves);
+        producer.start_material_verification(None).unwrap().unwrap();
+        let bytes = producer.finish_material_verification(&cancel).unwrap();
+        let record = Binding::new(&m)
+            .unwrap()
+            .decode(&bytes, moves, None)
+            .unwrap();
+        let Check::Material {
+            report,
+            sweep_proof,
+            ..
+        } = record.check
+        else {
+            panic!("material report expected");
+        };
+        assert!(report.complete);
+        assert_eq!(report.gouge.definite_cells, 0);
+        assert_eq!(report.gouge.possible_only_cells > 0, missing);
+        let proof = sweep_proof.unwrap();
+        assert_eq!(proof.history_complete, raw_history);
+        assert_eq!(proof.proven_moves + proof.unproven_moves, moves);
+        assert_eq!(proof.decided_cells, 0);
+        assert_eq!(proof.unavailable.is_some(), !raw_history);
+    };
+    // A genuinely fresh raw grid still starts with complete proof history.
+    check(&mut fresh, true, false, 0);
+    let mut bytes =
+        StreamProducer::from_checkpoint(m.clone(), &altered, CHECKPOINT_FRAME_LIMIT).unwrap();
+    check(&mut bytes, false, true, 0);
+    let mut streamed = StreamProducer::from_checkpoint_reader(
+        m.clone(),
+        &mut Cursor::new(&altered),
+        CHECKPOINT_FRAME_LIMIT,
+    )
+    .unwrap();
+    check(&mut streamed, false, true, 0);
+
+    let mut inplace = StreamProducer::new(m.clone()).unwrap();
+    inplace
+        .push_checked_motion(
+            Motion {
+                id: 1,
+                operation: "clear".into(),
+                tool: "t1".into(),
+                kind: MoveKind::Cut,
+                curve: Curve::Line {
+                    start: m.initial_position_mm,
+                    end: [1.5, 0.5, 2.5],
+                },
+                feed_mm_min: Some(100.),
+            },
+            DEFAULT_FRAME_LIMIT,
+            &cancel,
+        )
+        .unwrap();
+    check(&mut inplace, true, false, 1);
+    // Completed stages, old counters, and previously complete history reset.
+    inplace
+        .restore_checkpoint(&altered, CHECKPOINT_FRAME_LIMIT)
+        .unwrap();
+    check(&mut inplace, false, true, 0);
+    // Restore an ordinary raw-looking checkpoint too: replay remains usable,
+    // but neither its zero cursor nor its cells grant a provenance upgrade.
+    inplace
+        .restore_checkpoint(&original, CHECKPOINT_FRAME_LIMIT)
+        .unwrap();
+    inplace.start_material_verification(None).unwrap().unwrap();
+    // Restoring while a material stage is active clears that pending stage.
+    inplace
+        .restore_checkpoint(&altered, CHECKPOINT_FRAME_LIMIT)
+        .unwrap();
+    check(&mut inplace, false, true, 0);
 }

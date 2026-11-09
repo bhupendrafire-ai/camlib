@@ -15,6 +15,191 @@ fn spec(cell: f64) -> StockSpec {
         max_cells: 1_048_576,
     }
 }
+
+#[test]
+fn declared_initial_blank_is_validated_and_volume_starts_at_that_blank() {
+    let spec = spec(1.);
+    let initial = InitialStock {
+        source_id: "measured-blank".into(),
+        revision: "1".into(),
+        source_sha256: "a".repeat(64),
+        source_to_setup: WorkFrame::identity(),
+        uncertainty_mm: 0.,
+        representation: "whole_cell_top_down".into(),
+        bounds: (0..400)
+            .map(|i| {
+                let z = if i % 20 < 10 { 0. } else { 10. };
+                HeightBounds {
+                    lower_mm: z,
+                    upper_mm: z,
+                }
+            })
+            .collect(),
+    };
+    let mut stock = Stock::from_initial(spec.clone(), &initial).unwrap();
+    assert_eq!(stock.volume().remaining_upper_mm3, 2000.);
+    assert_eq!(stock.volume().removed_upper_mm3, 0.);
+    let tool = tool(CutterShape::Flat);
+    let empty = line([3., 5., 6.], [7., 5., 6.]);
+    let delta = preview(&stock, &tool, &empty, 1.);
+    assert!(delta.changes().is_empty());
+    stock.apply_delta(&delta).unwrap();
+    let cut = line([12., 5., 6.], [17., 5., 6.]);
+    stock
+        .apply_delta(&preview(&stock, &tool, &cut, 1.))
+        .unwrap();
+    assert!(stock.volume().removed_lower_mm3 > 0.);
+    assert!(stock.volume().removed_upper_mm3 < 1000.);
+    // A restored snapshot still has no native machining-history certificate.
+    assert!(
+        !Stock::from_snapshot(stock.snapshot())
+            .unwrap()
+            .departs_clear("t1", cut.curve.end())
+    );
+    for invalid in [
+        InitialStock {
+            source_sha256: "invalid".into(),
+            ..initial.clone()
+        },
+        InitialStock {
+            uncertainty_mm: -1.,
+            ..initial.clone()
+        },
+        InitialStock {
+            bounds: vec![],
+            ..initial.clone()
+        },
+        InitialStock {
+            source_to_setup: WorkFrame {
+                x: [2., 0., 0.],
+                ..WorkFrame::identity()
+            },
+            ..initial.clone()
+        },
+        InitialStock {
+            representation: "mesh-with-undercuts".into(),
+            ..initial.clone()
+        },
+    ] {
+        assert!(Stock::from_initial(spec.clone(), &invalid).is_err());
+    }
+}
+
+#[test]
+fn engagement_policy_owns_its_prefix_and_never_raises_authored_feeds() {
+    use camlib::feed_policy::{FeedBand, FeedPolicy, ToolLoadLimit, UnresolvedPolicy, apply};
+    let first = line([5., 5., 6.], [10., 5., 6.]);
+    let mut back = line([10., 5., 6.], [5., 5., 6.]);
+    back.id = 2;
+    back.feed_mm_min = Some(100.);
+    let program = Program {
+        version: 1,
+        id: "feed-policy".into(),
+        revision: "1".into(),
+        units: "mm".into(),
+        tolerance_mm: 1e-6,
+        frame: WorkFrame::identity(),
+        initial_position_mm: first.curve.start(),
+        tools: vec![tool(CutterShape::Flat).definition().clone()],
+        events: vec![
+            Event::WorkOffset { number: 1 },
+            Event::ToolChange {
+                tool: "t1".into(),
+                number: 1,
+                length_register: 1,
+                position_after_mm: first.curve.start(),
+            },
+            Event::Spindle {
+                rpm: 12000.,
+                direction: SpindleDirection::Cw,
+            },
+            Event::Motion { motion: first },
+            Event::Motion { motion: back },
+        ],
+    };
+    let policy = FeedPolicy {
+        bands: vec![FeedBand {
+            at_least_angle_deg: 90.,
+            max_feed_mm_min: 300.,
+        }],
+        unresolved: UnresolvedPolicy::Refuse,
+        options: Default::default(),
+        air_feed_mm_min: None,
+        tool_limits: vec![],
+    };
+    let run = |policy: &FeedPolicy| {
+        apply(
+            &program,
+            spec(1.),
+            None,
+            SweepOptions::default(),
+            policy,
+            &|| false,
+        )
+    };
+    let report = run(&policy).unwrap();
+    assert_eq!(report.observations[0].stock_generation, 0);
+    assert_eq!(report.observations[1].stock_generation, 1);
+    assert_eq!(report.observations[0].requested_feed_mm_min, Some(300.));
+    assert_eq!(report.observations[1].requested_feed_mm_min, Some(100.));
+    assert!(
+        report
+            .observations
+            .iter()
+            .all(|r| r.requested_feed_mm_min <= r.original_feed_mm_min)
+    );
+    let preserved = run(&FeedPolicy {
+        options: camlib::engagement::EngagementOptions {
+            max_work: 0,
+            max_nodes: 0,
+            ..Default::default()
+        },
+        unresolved: UnresolvedPolicy::Preserve,
+        ..policy.clone()
+    })
+    .unwrap();
+    assert_eq!(preserved.observations[0].status, "unresolved");
+    assert_eq!(preserved.observations[0].requested_feed_mm_min, Some(1000.));
+    for (axial, radial, axis) in [(0.1, 4., "axial"), (5., 0.1, "radial")] {
+        let limits = FeedPolicy {
+            tool_limits: vec![ToolLoadLimit {
+                tool: "t1".into(),
+                max_axial_mm: axial,
+                max_radial_mm: radial,
+                max_cut_feed_mm_min: 300.,
+            }],
+            ..policy.clone()
+        };
+        let error = run(&limits).unwrap_err();
+        assert!(error.contains("motion 1 (tool 't1')"));
+        assert!(error.contains(&format!("{axis} load bound")));
+        assert!(error.contains("mm exceeds approved maximum 0.1 mm"));
+        assert!(error.contains("reducing feed alone does not reduce"));
+        assert!(error.contains("approved_load_limit_missing_or_exceeded"));
+        assert!(!error.contains("Some("));
+        let preserved = run(&FeedPolicy {
+            unresolved: UnresolvedPolicy::Preserve,
+            ..limits
+        })
+        .unwrap();
+        assert_eq!(
+            preserved.observations[0].reason.as_deref(),
+            Some("approved_load_limit_missing_or_exceeded")
+        );
+        assert_eq!(preserved.observations[0].requested_feed_mm_min, Some(1000.));
+    }
+    assert!(
+        run(&FeedPolicy {
+            options: camlib::engagement::EngagementOptions {
+                max_work: 0,
+                max_nodes: 0,
+                ..Default::default()
+            },
+            ..policy
+        })
+        .is_err()
+    );
+}
 fn tool(shape: CutterShape) -> PreparedAssembly {
     ToolAssembly {
         id: "t1".into(),
@@ -102,7 +287,7 @@ fn profile_height(shape: &CutterShape, d: f64) -> f64 {
     }
     match *shape {
         CutterShape::Flat | CutterShape::Beam => 0.,
-        CutterShape::Ball => 2. - (4. - d * d).max(0.).sqrt(),
+        CutterShape::Ball | CutterShape::Probe => 2. - (4. - d * d).max(0.).sqrt(),
         CutterShape::Bull {
             corner_radius_mm: c,
         } => c - (c * c - (d - 2. + c).max(0.).powi(2)).max(0.).sqrt(),
@@ -111,6 +296,9 @@ fn profile_height(shape: &CutterShape, d: f64) -> f64 {
             included_angle_rad: a,
             tip_diameter_mm: td,
         } => (d - td / 2.).max(0.) / (a / 2.).tan(),
+        CutterShape::Lollipop | CutterShape::Dovetail { .. } => {
+            unreachable!("the height field refuses narrowing cutters")
+        }
     }
 }
 fn flat_line_height(p: [f64; 2], a: Vec3, b: Vec3, f: f64) -> f64 {

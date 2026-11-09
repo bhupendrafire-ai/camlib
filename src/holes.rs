@@ -463,11 +463,11 @@ impl DrillingPlan {
                 ),
                 (
                     spec.max_mm[2] - target <= def.cutting_length_mm - guard,
-                    format!(
+                    crate::reach::ReachRefusal::cutting_length(&op.id, &op.tool, spec.max_mm[2], target, def.cutting_length_mm).error(format_args!(
                         "hole depth {} below the stock top exceeds the cutting length {}",
                         spec.max_mm[2] - target,
                         def.cutting_length_mm
-                    ),
+                    )),
                 ),
                 (peck > guard, format!("peck_mm {peck} must be positive")),
                 (
@@ -917,11 +917,18 @@ impl BorePlan {
                 ),
                 (
                     spec.max_mm[2] - target <= def.cutting_length_mm - guard,
-                    format!(
+                    crate::reach::ReachRefusal::cutting_length(
+                        &op.id,
+                        &op.tool,
+                        spec.max_mm[2],
+                        target,
+                        def.cutting_length_mm,
+                    )
+                    .error(format_args!(
                         "bore depth {} below the stock top exceeds the cutting length {}",
                         spec.max_mm[2] - target,
                         def.cutting_length_mm
-                    ),
+                    )),
                 ),
                 (
                     op.stepdown_mm > guard && op.stepdown_mm <= def.cutting_length_mm,

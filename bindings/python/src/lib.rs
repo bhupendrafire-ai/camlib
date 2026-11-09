@@ -140,7 +140,7 @@ fn decode_committed_chunk<'py>(
     let (feed_flag, feed) = (d.u8()?, d.f64()?);
     let curve_kind = d.u8()?;
     let (a, b) = (d.point()?, d.point()?);
-    if kind > 8 || curve_kind > 2 || feed_flag > 1 || (feed_flag == 0 && feed != 0.) {
+    if kind > 12 || curve_kind > 2 || feed_flag > 1 || (feed_flag == 0 && feed != 0.) {
         return Err(PyValueError::new_err(
             "invalid motion/curve/feed discriminator",
         ));
@@ -198,7 +198,19 @@ fn decode_committed_chunk<'py>(
     motion.set_item(
         "kind",
         [
-            "rapid", "cut", "plunge", "lead", "link", "retract", "tap", "shift", "thread",
+            "rapid",
+            "cut",
+            "plunge",
+            "lead",
+            "link",
+            "retract",
+            "tap",
+            "shift",
+            "thread",
+            "probe_position",
+            "probe_measure",
+            "probe_touch",
+            "probe_return",
         ][kind as usize],
     )?;
     motion.set_item("feed_mm_min", (feed_flag == 1).then_some(feed))?;
@@ -627,6 +639,106 @@ fn initialise_heights(
         .as_mut_slice(py)
         .ok_or_else(|| PyValueError::new_err("height buffer must be writable contiguous f64"))?;
     buffers::initialise_heights(&mut Writable(cells), bottom, top).map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+fn initialise_declared_stock(
+    py: Python<'_>,
+    heights: &Bound<'_, PyAny>,
+    manifest: &str,
+) -> PyResult<()> {
+    let manifest: camlib::stream::StreamManifest =
+        serde_json::from_str(manifest).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    manifest.validate().map_err(PyValueError::new_err)?;
+    let spec = manifest.stock.height().map_err(PyValueError::new_err)?;
+    let initial = manifest
+        .initial_stock
+        .as_ref()
+        .ok_or_else(|| PyValueError::new_err("manifest has no declared initial stock"))?;
+    initial.validate(spec).map_err(PyValueError::new_err)?;
+    let lease = PyBuffer::<f64>::get(heights)?;
+    if lease.dimensions() != 1 {
+        return Err(PyValueError::new_err(
+            "height buffer must be one-dimensional",
+        ));
+    }
+    let cells = lease
+        .as_mut_slice(py)
+        .ok_or_else(|| PyValueError::new_err("height buffer must be writable contiguous f64"))?;
+    if cells.len() != initial.bounds.len() * 2 {
+        return Err(PyValueError::new_err(
+            "initial stock buffer/grid length mismatch",
+        ));
+    }
+    for (pair, bounds) in cells.as_chunks::<2>().0.iter().zip(&initial.bounds) {
+        pair[0].set(bounds.lower_mm);
+        pair[1].set(bounds.upper_mm);
+    }
+    Ok(())
+}
+/// A run's starting stock (a box or a mesh stock, as JSON) into a fresh
+/// height buffer.
+#[pyfunction]
+fn initialise_stock(py: Python<'_>, heights: &Bound<'_, PyAny>, stock_json: &str) -> PyResult<()> {
+    let lease = PyBuffer::<f64>::get(heights)?;
+    if lease.dimensions() != 1 {
+        return Err(PyValueError::new_err(
+            "height buffer must be one-dimensional",
+        ));
+    }
+    let cells = lease
+        .as_mut_slice(py)
+        .ok_or_else(|| PyValueError::new_err("height buffer must be writable contiguous f64"))?;
+    camlib::stock_mesh::initialise_stock(&mut Writable(cells), stock_json, &|| false)
+        .map_err(PyValueError::new_err)
+}
+/// Check a stock mesh (little-endian f64 vertices, u32 triangle indices):
+/// its bounds and enclosed volume.
+#[pyfunction]
+fn stock_mesh_check(vertices: &[u8], indices: &[u8]) -> PyResult<([f64; 3], [f64; 3], f64)> {
+    let mesh =
+        camlib::stock_mesh::mesh_from_bytes(vertices, indices).map_err(PyValueError::new_err)?;
+    let [lo, hi] = mesh.bounds();
+    Ok((lo, hi, mesh.volume_mm3()))
+}
+/// The closed mesh of a height buffer's upper bounds on the grid given as
+/// JSON: vertex bytes, index bytes, bounds, enclosed volume and what the
+/// mesh approximates.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn stock_mesh<'py>(
+    py: Python<'py>,
+    heights: &Bound<'py, PyAny>,
+    grid_json: &str,
+) -> PyResult<(
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    [f64; 3],
+    [f64; 3],
+    f64,
+    &'static str,
+)> {
+    let lease = PyBuffer::<f64>::get(heights)?;
+    if lease.dimensions() != 1 {
+        return Err(PyValueError::new_err(
+            "height buffer must be one-dimensional",
+        ));
+    }
+    let cells = lease
+        .as_slice(py)
+        .ok_or_else(|| PyValueError::new_err("height buffer must be contiguous f64"))?;
+    let mesh = camlib::stock_mesh::buffer_mesh(&Readable(cells), grid_json, &|| false)
+        .map_err(PyValueError::new_err)?;
+    let (vertices, indices) = camlib::stock_mesh::mesh_to_bytes(&mesh);
+    let [lo, hi] = mesh.bounds();
+    Ok((
+        PyBytes::new(py, &vertices),
+        PyBytes::new(py, &indices),
+        lo,
+        hi,
+        mesh.volume_mm3(),
+        camlib::stock_mesh::HEIGHT_FIELD_APPROXIMATION,
+    ))
 }
 #[pyfunction]
 fn validate_delta(
@@ -1155,6 +1267,290 @@ fn turn_stock_json(stock: &camlib::turning::stock::TurnStock) -> PyResult<String
     .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// The committed state of a tri-dexel run: every move frame is checked
+/// (cursor, attribution, continuity, each changed ray's old value, material
+/// only removed) against this receiver's own stock before it commits.
+#[pyclass]
+#[derive(Clone)]
+struct DexelReceiver {
+    inner: camlib::stream::StreamReceiver,
+}
+/// A read-only tri-dexel stock (a partial move's preview).
+#[pyclass]
+struct DexelView {
+    stock: camlib::dexel::DexelStock,
+}
+fn dexel_manifest(manifest: &str) -> PyResult<camlib::stream::StreamManifest> {
+    let manifest: camlib::stream::StreamManifest =
+        serde_json::from_str(manifest).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    if manifest.stock.dexel().is_none() {
+        return Err(PyValueError::new_err(
+            "a tri-dexel receiver needs a tri-dexel run manifest",
+        ));
+    }
+    Ok(manifest)
+}
+fn dexel_volume_json(stock: &camlib::dexel::DexelStock) -> PyResult<String> {
+    serde_json::to_string(&stock.volume()).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+/// The height view's cells as little-endian f64 (lower, upper) pairs.
+fn dexel_view_bytes<'py>(
+    py: Python<'py>,
+    stock: &camlib::dexel::DexelStock,
+) -> Bound<'py, PyBytes> {
+    let cells = stock.view().cells();
+    let mut out = Vec::with_capacity(cells.len() * 16);
+    for c in cells {
+        out.extend_from_slice(&c.lower_mm.to_le_bytes());
+        out.extend_from_slice(&c.upper_mm.to_le_bytes());
+    }
+    PyBytes::new(py, &out)
+}
+type Intervals = Vec<(f64, f64)>;
+fn dexel_ray(
+    stock: &camlib::dexel::DexelStock,
+    axis: usize,
+    index: usize,
+) -> PyResult<(Intervals, Intervals)> {
+    let ray = (axis < 3)
+        .then(|| stock.rays(axis).get(index))
+        .flatten()
+        .ok_or_else(|| {
+            PyValueError::new_err("ray axis must be 0, 1 or 2 and index within its grid")
+        })?;
+    let list = |s: &camlib::dexel::Spans| s.as_slice().iter().map(|i| (i[0], i[1])).collect();
+    Ok((list(&ray.possible), list(&ray.certain)))
+}
+/// One grid's rays: per ray, its possible and certain interval counts
+/// (u32 pairs), then every interval's (start, end) as f64, in ray order.
+fn dexel_rays<'py>(
+    py: Python<'py>,
+    stock: &camlib::dexel::DexelStock,
+    axis: usize,
+) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+    if axis > 2 {
+        return Err(PyValueError::new_err("ray axis must be 0, 1 or 2"));
+    }
+    let rays = stock.rays(axis);
+    let mut counts = Vec::with_capacity(rays.len() * 8);
+    let mut values = vec![];
+    for r in rays {
+        for s in [&r.possible, &r.certain] {
+            counts.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            for i in s.as_slice() {
+                values.extend_from_slice(&i[0].to_le_bytes());
+                values.extend_from_slice(&i[1].to_le_bytes());
+            }
+        }
+    }
+    Ok((PyBytes::new(py, &counts), PyBytes::new(py, &values)))
+}
+fn dexel_compare_solid(
+    py: Python<'_>,
+    stock: &camlib::dexel::DexelStock,
+    triangles: &[u8],
+    surface_error_mm: f64,
+    tolerance_mm: f64,
+) -> PyResult<String> {
+    if triangles.is_empty() || !triangles.len().is_multiple_of(72) {
+        return Err(PyValueError::new_err(
+            "solid triangles are little-endian f64 vertex triples, 72 bytes per facet",
+        ));
+    }
+    let facets: Vec<[[f64; 3]; 3]> = triangles
+        .as_chunks::<72>()
+        .0
+        .iter()
+        .map(|t| {
+            std::array::from_fn(|v| {
+                std::array::from_fn(|k| {
+                    let i = (3 * v + k) * 8;
+                    f64::from_le_bytes(t[i..i + 8].try_into().unwrap())
+                })
+            })
+        })
+        .collect();
+    let report = py
+        .detach(|| {
+            stock.compare_solid(
+                &facets,
+                surface_error_mm,
+                tolerance_mm,
+                &AtomicBool::new(false),
+            )
+        })
+        .map_err(PyValueError::new_err)?;
+    serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+fn dexel_grid_json(stock: &camlib::dexel::DexelStock) -> PyResult<String> {
+    let g = stock.grid();
+    serde_json::to_string(&serde_json::json!({
+        "spec": stock.spec(),
+        "cells": g.cells,
+        "step_mm": g.step_mm,
+        "rays": [g.rays(0), g.rays(1), g.rays(2)],
+        "intervals": stock.intervals(),
+        "view": stock.view().spec(),
+    }))
+    .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+#[pymethods]
+impl DexelView {
+    fn compare_solid(
+        &self,
+        py: Python<'_>,
+        triangles: &[u8],
+        surface_error_mm: f64,
+        tolerance_mm: f64,
+    ) -> PyResult<String> {
+        dexel_compare_solid(py, &self.stock, triangles, surface_error_mm, tolerance_mm)
+    }
+    fn volume_json(&self) -> PyResult<String> {
+        dexel_volume_json(&self.stock)
+    }
+    fn view_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        dexel_view_bytes(py, &self.stock)
+    }
+    fn ray(&self, axis: usize, index: usize) -> PyResult<(Intervals, Intervals)> {
+        dexel_ray(&self.stock, axis, index)
+    }
+    fn rays<'py>(
+        &self,
+        py: Python<'py>,
+        axis: usize,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+        dexel_rays(py, &self.stock, axis)
+    }
+    fn grid_json(&self) -> PyResult<String> {
+        dexel_grid_json(&self.stock)
+    }
+}
+impl DexelReceiver {
+    fn stock(&self) -> PyResult<&camlib::dexel::DexelStock> {
+        self.inner
+            .run_stock()
+            .dexel()
+            .map_err(PyValueError::new_err)
+    }
+}
+#[pymethods]
+impl DexelReceiver {
+    #[new]
+    fn new(manifest: &str) -> PyResult<Self> {
+        let manifest = dexel_manifest(manifest)?;
+        Ok(Self {
+            inner: camlib::stream::StreamReceiver::new(manifest).map_err(PyValueError::new_err)?,
+        })
+    }
+    /// Restore from a checkpoint frame of this run.
+    #[staticmethod]
+    fn restore(manifest: &str, checkpoint: &[u8]) -> PyResult<Self> {
+        let manifest = dexel_manifest(manifest)?;
+        Ok(Self {
+            inner: camlib::stream::StreamReceiver::from_checkpoint(
+                manifest,
+                checkpoint,
+                camlib::stream::CHECKPOINT_FRAME_LIMIT,
+            )
+            .map_err(PyValueError::new_err)?,
+        })
+    }
+    /// Commit one move frame; returns (motion JSON, changed rays).
+    fn accept(&mut self, frame: &[u8]) -> PyResult<(String, usize)> {
+        let chunk = camlib::stream::decode_dexel_chunk_frame(
+            self.inner.manifest(),
+            frame,
+            camlib::stream::DEFAULT_FRAME_LIMIT,
+        )
+        .map_err(PyValueError::new_err)?;
+        let changed = chunk.changes.len();
+        let motion = self
+            .inner
+            .accept(frame, camlib::stream::DEFAULT_FRAME_LIMIT)
+            .map_err(PyValueError::new_err)?;
+        Ok((
+            serde_json::to_string(&motion).map_err(|e| PyValueError::new_err(e.to_string()))?,
+            changed,
+        ))
+    }
+    fn accept_end(&mut self, frame: &[u8]) -> PyResult<()> {
+        self.inner
+            .accept_end(frame, camlib::stream::DEFAULT_FRAME_LIMIT)
+            .map_err(PyValueError::new_err)
+    }
+    fn checkpoint<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = self
+            .inner
+            .checkpoint(camlib::stream::CHECKPOINT_FRAME_LIMIT)
+            .map_err(PyValueError::new_err)?;
+        Ok(PyBytes::new(py, &bytes))
+    }
+    fn copy(&self) -> Self {
+        self.clone()
+    }
+    #[getter]
+    fn completed(&self) -> u64 {
+        self.inner.completed()
+    }
+    #[getter]
+    fn finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+    #[getter]
+    fn position(&self) -> (f64, f64, f64) {
+        let p = self.inner.position();
+        (p[0], p[1], p[2])
+    }
+    fn volume_json(&self) -> PyResult<String> {
+        dexel_volume_json(self.stock()?)
+    }
+    fn view_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(dexel_view_bytes(py, self.stock()?))
+    }
+    fn ray(&self, axis: usize, index: usize) -> PyResult<(Intervals, Intervals)> {
+        dexel_ray(self.stock()?, axis, index)
+    }
+    fn rays<'py>(
+        &self,
+        py: Python<'py>,
+        axis: usize,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+        dexel_rays(py, self.stock()?, axis)
+    }
+    fn grid_json(&self) -> PyResult<String> {
+        dexel_grid_json(self.stock()?)
+    }
+    fn compare_solid(
+        &self,
+        py: Python<'_>,
+        triangles: &[u8],
+        surface_error_mm: f64,
+        tolerance_mm: f64,
+    ) -> PyResult<String> {
+        dexel_compare_solid(py, self.stock()?, triangles, surface_error_mm, tolerance_mm)
+    }
+    /// The stock after the first `fraction` of the next move (given as its
+    /// committed frame); this receiver is unchanged.
+    fn preview(&self, py: Python<'_>, frame: &[u8], fraction: f64) -> PyResult<DexelView> {
+        let chunk = camlib::stream::decode_dexel_chunk_frame(
+            self.inner.manifest(),
+            frame,
+            camlib::stream::DEFAULT_FRAME_LIMIT,
+        )
+        .map_err(PyValueError::new_err)?;
+        if chunk.sequence != self.inner.completed() {
+            return Err(PyValueError::new_err("preview frame is not the next move"));
+        }
+        let stock = py
+            .detach(|| {
+                self.inner
+                    .preview_dexel(&chunk.motion, fraction, &AtomicBool::new(false))
+            })
+            .map_err(PyValueError::new_err)?;
+        Ok(DexelView { stock })
+    }
+}
+
 #[pyclass]
 struct PostCancellation {
     flag: std::sync::Arc<AtomicBool>,
@@ -1209,6 +1605,81 @@ fn schedule_motion<'py>(
     })?;
     Ok(PyBytes::new(py, &bytes))
 }
+
+#[pyfunction]
+#[pyo3(signature = (program_json, stock_json, policy_json, cancel=None))]
+fn schedule_engagement<'py>(
+    py: Python<'py>,
+    program_json: &str,
+    stock_json: &str,
+    policy_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if program_json
+        .len()
+        .saturating_add(stock_json.len())
+        .saturating_add(policy_json.len())
+        > 256 * 1024 * 1024
+    {
+        return Err(PyValueError::new_err("engagement input byte cap"));
+    }
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    let bytes = py.detach(|| {
+        let program = serde_json::from_str(program_json)
+            .map_err(|e| PyValueError::new_err(format!("program: {e}")))?;
+        let (stock, initial, sweep): (
+            camlib::stock::StockSpec,
+            Option<camlib::stock::InitialStock>,
+            camlib::stock::SweepOptions,
+        ) = serde_json::from_str(stock_json)
+            .map_err(|e| PyValueError::new_err(format!("stock: {e}")))?;
+        let policy = serde_json::from_str(policy_json)
+            .map_err(|e| PyValueError::new_err(format!("feed policy: {e}")))?;
+        let report = camlib::feed_policy::apply(&program, stock, initial, sweep, &policy, &*flag)
+            .map_err(PyValueError::new_err)?;
+        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(PyValueError::new_err("engagement feed analysis cancelled"));
+        }
+        serde_json::to_vec(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(PyBytes::new(py, &bytes))
+}
+#[pyfunction]
+#[pyo3(signature = (kind, request_json, cancel=None))]
+fn prepare_geometry<'py>(
+    py: Python<'py>,
+    kind: &str,
+    request_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if request_json.len() > 256 * 1024 * 1024 {
+        return Err(PyValueError::new_err("preparation input byte cap"));
+    }
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    let bytes = py.detach(|| {
+        let value = match kind {
+            "reach" => {
+                let request = serde_json::from_str(request_json)
+                    .map_err(|e| PyValueError::new_err(format!("reach request: {e}")))?;
+                serde_json::to_vec(
+                    &camlib::preparation::reach(&request, &*flag).map_err(PyValueError::new_err)?,
+                )
+            }
+            "blank" => {
+                let request = serde_json::from_str(request_json)
+                    .map_err(|e| PyValueError::new_err(format!("blank request: {e}")))?;
+                serde_json::to_vec(
+                    &camlib::preparation::enclose_blank(&request, &*flag)
+                        .map_err(PyValueError::new_err)?,
+                )
+            }
+            _ => return Err(PyValueError::new_err("unknown preparation query")),
+        };
+        value.map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
 /// Generic syntax-independent geometry checker used by ordinary Python posts.
 #[pyclass]
 struct IntentSession {
@@ -1535,6 +2006,34 @@ type MotionWords = (
     bool,
 );
 
+/// Post a setup from its JSON job with the Rust default post
+/// (`camlib::post_job`); returns the JSON report.
+#[pyfunction]
+#[pyo3(signature=(input_json, cancel=None))]
+fn post_job(
+    py: Python<'_>,
+    input_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<String> {
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    py.detach(|| camlib::post_job::run(input_json, &*flag))
+        .map_err(PyValueError::new_err)
+}
+
+/// Post an explicit program's events with the Rust default post
+/// (`camlib::gcode::post_program`); returns JSON.
+#[pyfunction]
+#[pyo3(signature=(input_json, cancel=None))]
+fn post_program(
+    py: Python<'_>,
+    input_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<String> {
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    py.detach(|| camlib::gcode::post_program(input_json, &*flag))
+        .map_err(PyValueError::new_err)
+}
+
 /// The highest spindle speed along a move at constant surface speed (the
 /// engine's own bound, so posts and decoders agree with the validator).
 #[pyfunction]
@@ -1545,6 +2044,40 @@ fn css_rpm_bound(curve_json: &str, m_min: f64, max_rpm: f64) -> PyResult<f64> {
     let curve: camlib::motion::Curve =
         serde_json::from_str(curve_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(camlib::motion::css_rpm_bound(&curve, m_min, max_rpm))
+}
+
+/// The moves of a probing cycle (`camlib::probe::ProbeCycle::legs`) from
+/// its start, for posts that write the cycle as controller blocks: (kind,
+/// end, feed or None). `radius_mm` is the stylus ball radius, or the
+/// measured cutter's for tool setting. Decoders must not use this: they read
+/// the moves back from the written blocks.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn probe_legs(
+    cycle_json: &str,
+    radius_mm: f64,
+) -> PyResult<((f64, f64, f64), Vec<(String, (f64, f64, f64), Option<f64>)>)> {
+    if cycle_json.len() > 16384 {
+        return Err(PyValueError::new_err(
+            "probe cycle input exceeds 16384 bytes",
+        ));
+    }
+    let cycle: camlib::probe::ProbeCycle =
+        serde_json::from_str(cycle_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let start = cycle.start(radius_mm).map_err(PyValueError::new_err)?;
+    let legs = cycle.legs(radius_mm).map_err(PyValueError::new_err)?;
+    Ok((
+        (start[0], start[1], start[2]),
+        legs.into_iter()
+            .map(|l| {
+                let kind = serde_json::to_value(l.kind)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                (kind, (l.end[0], l.end[1], l.end[2]), l.feed_mm_min)
+            })
+            .collect(),
+    ))
 }
 
 #[pyfunction]
@@ -2102,6 +2635,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<RegionSession>()?;
     module.add_class::<MachineCrashSession>()?;
     module.add_class::<TurnReceiver>()?;
+    module.add_class::<DexelReceiver>()?;
+    module.add_class::<DexelView>()?;
     module.add_function(wrap_pyfunction!(grbl_number, module)?)?;
     module.add_function(wrap_pyfunction!(grbl_axis_mm, module)?)?;
     module.add_function(wrap_pyfunction!(grbl_feed_mm_min, module)?)?;
@@ -2115,12 +2650,18 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(turning_rectangle_holder, module)?)?;
     module.add_function(wrap_pyfunction!(turning_validate_tool, module)?)?;
     module.add_function(wrap_pyfunction!(schedule_motion, module)?)?;
+    module.add_function(wrap_pyfunction!(schedule_engagement, module)?)?;
     module.add_function(wrap_pyfunction!(validate_heights, module)?)?;
     module.add_function(wrap_pyfunction!(decode_committed_chunk, module)?)?;
     module.add_function(wrap_pyfunction!(accept_motion_frames, module)?)?;
     module.add_function(wrap_pyfunction!(volume, module)?)?;
     module.add_function(wrap_pyfunction!(display_patch, module)?)?;
     module.add_function(wrap_pyfunction!(initialise_heights, module)?)?;
+    module.add_function(wrap_pyfunction!(initialise_declared_stock, module)?)?;
+    module.add_function(wrap_pyfunction!(prepare_geometry, module)?)?;
+    module.add_function(wrap_pyfunction!(initialise_stock, module)?)?;
+    module.add_function(wrap_pyfunction!(stock_mesh_check, module)?)?;
+    module.add_function(wrap_pyfunction!(stock_mesh, module)?)?;
     module.add_function(wrap_pyfunction!(validate_delta, module)?)?;
     module.add_function(wrap_pyfunction!(display_overlay_patch, module)?)?;
     module.add_class::<MaterialTarget>()?;
@@ -2130,6 +2671,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(format_post_words, module)?)?;
     module.add_function(wrap_pyfunction!(round_circular_words, module)?)?;
     module.add_function(wrap_pyfunction!(css_rpm_bound, module)?)?;
+    module.add_function(wrap_pyfunction!(post_job, module)?)?;
+    module.add_function(wrap_pyfunction!(post_program, module)?)?;
+    module.add_function(wrap_pyfunction!(probe_legs, module)?)?;
     module.add_class::<PostCancellation>()?;
     module.add_class::<StreamVerification>()?;
     module.add_class::<StreamControlContext>()?;

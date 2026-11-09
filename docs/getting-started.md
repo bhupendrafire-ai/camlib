@@ -21,6 +21,7 @@ version is [`examples/standalone_job.py`](../examples/standalone_job.py).
 ```python
 import math
 
+from camlib.export import ExportRefused
 from camlib.jobs import Job, Setup
 from camlib.operations import Facing, Pocket
 from camlib.planar import Boundary, Component, PlanarRegion
@@ -83,7 +84,13 @@ with job.post("top", machine=machine, lowering=arcs) as run:
         lines.extend(line["text"] for line in page)
         start = page[-1]["number"] + 1
 
-print(f"{len(lines)} lines of G-code")
+    print(f"{len(lines)} lines of G-code")
+    try:
+        exported = run.export("top.nc")
+    except ExportRefused as error:
+        print(f"{error}\nNo NC file was written or replaced.")
+    else:
+        print(f"Saved {exported['path']}")
 ```
 
 `job.post(...)` plans each operation in the Rust engine, sweeps the tool
@@ -92,17 +99,22 @@ postprocessor, and then *decodes the emitted text again* to confirm it
 describes the planned motion. A planning, posting or decoding failure stops
 the run with an error, so you never get a silently wrong file. Check *findings*
 (below) are reported per move while the run continues; exporting the program
-refuses it while any violation or uncertain result remains:
+refuses it while any violation or uncertain result remains. Read and export
+inside the `with` block: closing the run removes its temporary journals. To keep
+a completed run for later use, [save and reopen it](persistence.md).
 
-```python
-exported = run.export("top.nc")  # raises camlib.export.ExportRefused on findings
-```
+The example declares controller settings and tool poses, but no physical machine
+crash model. It therefore prints the decoded G-code count and an explained
+`unchecked_machine` export refusal. Supply your machine's measured bodies,
+calibration and complete routes as `Machine.crash_model` before releasing NC;
+see [Machine checking](machine.md). A refusal never writes or replaces `top.nc`.
 
 Accept a kind only on purpose, after looking at it: `run.export("top.nc",
 accept={"uncertain"})`. The result also names the checks you did not configure
 (nothing was checked there).
 
-To write NC text or a file directly, use `job.post_nc`. It runs the same
+With that physical model configured, write NC text or a file directly using
+`job.post_nc`. It runs the same
 actual decoded-output stock replay and machine export gate as `job.post`, then
 discards its temporary journal:
 
@@ -206,10 +218,63 @@ checks = StreamChecks(
 
 Fixtures and clamps use `role="fixture"`.
 
+A stock-contact finding names the tool part (`part`, `holder_section`) and,
+for that part over the whole move, `obstruction_top_mm` (the highest stock
+within its radius standing above its bottom), `lowest_tip_z_mm` and
+`max_clear_radius_mm` (the largest radius that part could have and clear all
+stock above its bottom). So a holder of at most `2 * max_clear_radius_mm`
+diameter, or a part whose bottom stands at least `obstruction_top_mm -
+lowest_tip_z_mm` above the tip, clears that move's obstruction.
+
 Plans that are valid but probably wrong raise a `camlib.simulation.CamWarning`
 (for example an operation that produced no cutting motion because the region is
 smaller than the tool, or removed no stock because it lies outside the stock).
 `warnings.simplefilter("error", CamWarning)` turns them into errors.
+
+## Stock from a mesh, and back
+
+A job can start from any stock solid instead of a box: a casting, a
+pre-machined or sawn blank, or the stock an earlier setup finished with. Give
+it as a closed triangle mesh in the job's frame:
+
+```python
+from camlib.simulation import StockMesh, StockSpec
+
+blank = StockMesh(vertices, triangles)           # or StockMesh.from_triangles(...)
+stock = StockSpec.from_mesh(blank, cell_size_mm=0.25)   # grid over the mesh's bounds
+```
+
+The mesh must be closed and consistently oriented (every triangle
+counter-clockwise seen from outside); an open or inside-out mesh is refused
+with the reason. `camlib.cadquery.export_stock_mesh(solid)` gives one for a
+CadQuery solid with planar faces (curved faces are refused: their facets can
+cut inside the real stock).
+
+Milling stock is a height field (see [ARCHITECTURE.md](ARCHITECTURE.md)), so
+the mesh is converted conservatively: each cell may hold material up to the
+highest point of the mesh above it, and is certain only where its whole column
+is solid from the box's bottom up. Undercuts and voids count as possible
+material, never as air, so checks never miss stock. Rest machining (for example
+`RestPocket`) reads that stock and skips strokes in the air above a lower step.
+Facing and profiles still plan from the box top and may cut air there; that is
+safe but slower.
+
+The stock a run finishes with comes back as a mesh, for the next setup:
+
+```python
+finished = player.state.stock_mesh()   # or run.states["top"].stock_mesh()
+print(finished.approximation)          # how it differs from the real stock
+# Turn it over into the second setup's frame (a rigid turn; mirrors are refused).
+turned = finished.transformed(((1, 0, 0), (0, -1, 0), (0, 0, -1)), (0, 30, 10))
+second_stock = StockSpec.from_mesh(turned, cell_size_mm=0.25)
+```
+
+That mesh is **approximate**: each cell is a solid column up to the highest
+material that may remain over it. It contains all the material that may
+remain, plus anything below it in each column and up to one cell of removed
+material beside walls. It is conservative stock for a later setup, not a
+measured part. Read back on the same grid (rough, heat treat, finish), it gives
+the same stock again.
 
 ## Arcs and output precision
 

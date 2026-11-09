@@ -15,6 +15,7 @@ import json
 import math
 from pathlib import Path
 
+from camlib.export import ExportRefused
 from camlib.jobs import Job, OperationNode, RegenerationCache, Setup
 from camlib.operations import Facing, Pocket, RestPocket
 from camlib.planar import Boundary, Component, PlanarRegion
@@ -214,4 +215,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ExportRefused as error:
+        raise SystemExit(f"ExportRefused: {error}\nNo NC file was written or replaced.") from None

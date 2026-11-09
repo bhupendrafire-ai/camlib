@@ -171,12 +171,15 @@ fn all_rotational_profiles_and_conical_holder_witnesses_match_analytic_sections(
         let z = p[2] - w.tip_mm[2];
         let radius = match shape {
             CutterShape::Flat | CutterShape::Beam => 1.,
-            CutterShape::Ball => (z.min(1.) * (2. - z.min(1.))).sqrt(),
+            CutterShape::Ball | CutterShape::Probe => (z.min(1.) * (2. - z.min(1.))).sqrt(),
             CutterShape::Bull {
                 corner_radius_mm: c,
             } => 0.8 + (z.min(c) * (2. * c - z.min(c))).sqrt(),
             CutterShape::Drill { .. } => z.min(1.),
             CutterShape::Chamfer { .. } => (0.1 + z).min(1.),
+            CutterShape::Lollipop | CutterShape::Dovetail { .. } => {
+                unreachable!("not among the shapes above")
+            }
         };
         assert!((p[0] - w.tip_mm[0]).hypot(p[1] - w.tip_mm[1]) < radius);
     }
