@@ -80,6 +80,42 @@ def export_surface_mesh(shape, *, source=None, max_error_mm=0.005, max_facets=No
     )
 
 
+def export_stock_mesh(shape, *, cancel=None):
+    """A CadQuery solid with planar faces and straight edges (a blank, a
+    sawn or pre-machined block) as a ``StockMesh`` for
+    ``StockSpec.from_mesh``. Its facets are the solid itself, in the shape's
+    coordinates; place the shape in the job's frame first.
+
+    Curved faces are refused: chords of a curved face can lie inside the real
+    stock, so a tessellation would understate material. Give such stock as a
+    mesh that contains it (for example a planar envelope)."""
+    import cadquery as cq
+    from .simulation import StockMesh
+
+    if cancel is not None and cancel():
+        raise ValueError("CAD stock export cancelled")
+    if isinstance(shape, cq.Workplane):
+        shape = shape.val()
+    if not isinstance(shape, cq.Shape) or not shape.isValid() or not shape.Solids():
+        raise ValueError("stock export needs a valid CadQuery solid")
+    curved = sorted(
+        {f.geomType() for f in shape.Faces() if f.geomType() != "PLANE"}
+        | {e.geomType() for e in shape.Edges() if e.geomType() != "LINE"}
+    )
+    if curved:
+        raise ValueError(
+            f"stock export takes planar faces and straight edges only (found {', '.join(curved)}): "
+            "facets of curved faces can cut inside the stock; give a mesh that contains it"
+        )
+    triangles = []
+    for face in shape.Faces():
+        vertices, indices = face.tessellate(0.005)
+        triangles.extend(tuple(tuple(vertices[i].toTuple()) for i in tri) for tri in indices)
+        if cancel is not None and cancel():
+            raise ValueError("CAD stock export cancelled")
+    return StockMesh.from_triangles(triangles)
+
+
 def export_hemisphere_surface(face, *, max_error_mm=0.005, max_facets=None, source=None):
     """Bound a selected outward upper hemisphere; its equator is the base Z.
 

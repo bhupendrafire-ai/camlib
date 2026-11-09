@@ -231,6 +231,51 @@ Plans that are valid but probably wrong raise a `camlib.simulation.CamWarning`
 smaller than the tool, or removed no stock because it lies outside the stock).
 `warnings.simplefilter("error", CamWarning)` turns them into errors.
 
+## Stock from a mesh, and back
+
+A job can start from any stock solid instead of a box: a casting, a
+pre-machined or sawn blank, or the stock an earlier setup finished with. Give
+it as a closed triangle mesh in the job's frame:
+
+```python
+from camlib.simulation import StockMesh, StockSpec
+
+blank = StockMesh(vertices, triangles)           # or StockMesh.from_triangles(...)
+stock = StockSpec.from_mesh(blank, cell_size_mm=0.25)   # grid over the mesh's bounds
+```
+
+The mesh must be closed and consistently oriented (every triangle
+counter-clockwise seen from outside); an open or inside-out mesh is refused
+with the reason. `camlib.cadquery.export_stock_mesh(solid)` gives one for a
+CadQuery solid with planar faces (curved faces are refused: their facets can
+cut inside the real stock).
+
+Milling stock is a height field (see [ARCHITECTURE.md](ARCHITECTURE.md)), so
+the mesh is converted conservatively: each cell may hold material up to the
+highest point of the mesh above it, and is certain only where its whole column
+is solid from the box's bottom up. Undercuts and voids count as possible
+material, never as air, so checks never miss stock. Rest machining (for example
+`RestPocket`) reads that stock and skips strokes in the air above a lower step.
+Facing and profiles still plan from the box top and may cut air there; that is
+safe but slower.
+
+The stock a run finishes with comes back as a mesh, for the next setup:
+
+```python
+finished = player.state.stock_mesh()   # or run.states["top"].stock_mesh()
+print(finished.approximation)          # how it differs from the real stock
+# Turn it over into the second setup's frame (a rigid turn; mirrors are refused).
+turned = finished.transformed(((1, 0, 0), (0, -1, 0), (0, 0, -1)), (0, 30, 10))
+second_stock = StockSpec.from_mesh(turned, cell_size_mm=0.25)
+```
+
+That mesh is **approximate**: each cell is a solid column up to the highest
+material that may remain over it. It contains all the material that may
+remain, plus anything below it in each column and up to one cell of removed
+material beside walls. It is conservative stock for a later setup, not a
+measured part. Read back on the same grid (rough, heat treat, finish), it gives
+the same stock again.
+
 ## Arcs and output precision
 
 The default machine writes 3 decimals in mm (4 in inch), like FANUC/Haas-class

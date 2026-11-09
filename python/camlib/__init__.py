@@ -113,6 +113,7 @@ _EXPORTS = {
             "Simulation",
             "StockSpec",
             "InitialStock",
+            "StockMesh",
             "SweepOptions",
             "SimulationError",
             "ReachRefusal",

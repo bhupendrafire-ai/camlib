@@ -102,6 +102,7 @@ pub mod session;
 pub mod slot;
 pub mod stock;
 pub mod stock_contact;
+pub mod stock_mesh;
 pub mod stream;
 pub mod stream_verification;
 pub mod surface;

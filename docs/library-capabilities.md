@@ -4,15 +4,16 @@ What camlib does, what it checks, and where its responsibility ends.
 
 ## Inputs and outputs
 
-You supply a job: stock, a work frame, tool assemblies and an ordered list of
-operations. Geometry is either authored directly (planar line/arc regions with
+You supply a job: stock (a box, or any solid as a closed triangle mesh), a
+work frame, tool assemblies and an ordered list of operations. Geometry is either authored directly (planar line/arc regions with
 islands, hole centres, triangle-mesh surfaces with a stated error) or extracted
 from CadQuery solids with the optional adapter. A solid alone does not choose
 operations, tools or workholding; you do.
 
 camlib produces typed motion (lines, arcs, helices) with operation and tool
-identity, simulated stock removal streamed alongside it, check results, and
-G-code through a Python postprocessor. It never connects to a machine.
+identity, simulated stock removal streamed alongside it, check results, the
+finished stock as a closed mesh (approximate, containing all remaining
+material), and G-code through a Python postprocessor. It never connects to a machine.
 
 ## Operations
 
@@ -92,6 +93,14 @@ Stock is a grid of columns with lower/upper height bounds. It models top-down
 removal well and reports removed and remaining volume as bounds. It cannot
 represent overhangs or enclosed voids. Cell size is independent of machining
 tolerance. Display meshes are approximations, never evidence.
+
+Stock given as a mesh (`StockSpec.from_mesh`) is converted conservatively:
+each cell's upper bound is the highest point of the mesh over it, and material
+is certain only where the column is solid from the box's bottom up, so an
+undercut or void counts as possible material. A box given as a mesh is the
+same stock as the box. `StockState.stock_mesh()` returns the stock as a closed
+mesh of each cell's upper bound; it contains all the material that may remain
+and says that it is approximate.
 
 Configured checks examine every line/arc/helix continuously (not just its
 endpoints) against:
@@ -203,6 +212,8 @@ decoded G-code.
 
 - Planar regions from faces (`export_floor_region`), surface meshes from
   solids with a stated error (`export_surface_mesh`), `Roughing.from_solid`.
+- `export_stock_mesh(solid)`: a planar-faced solid (blank, casting envelope) as
+  a `StockMesh` for `StockSpec.from_mesh`.
 - `flow_paths(face, ...)`: a face's parameter lines as XY passes for flow
   finishing.
 - `turning_section(solid)`: the turned profile and bore of a solid of

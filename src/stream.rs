@@ -9,6 +9,7 @@ use crate::{
         CancelSignal, CellChange, HeightBounds, Stock, StockDelta, StockSnapshot, StockSpec,
         SweepOptions, SweepStats,
     },
+    stock_mesh::{MeshStockSpec, StockMesh},
     tool::{PreparedAssembly, ToolAssembly, valid_id},
     turning::{
         ops::{TurnDelta, TurnSetup},
@@ -57,23 +58,63 @@ pub struct RunIdentity {
     pub id: String,
     pub revision: String,
 }
-/// The stock of a run: a height field (milling, thermal cutting) or
-/// axisymmetric bar stock (turning).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+/// The stock of a run: a box on a height field (milling, thermal cutting),
+/// any solid given as a closed mesh on a height field, or axisymmetric bar
+/// stock (turning).
+#[derive(Clone, Debug, PartialEq)]
 pub enum RunStockSpec {
     Height(StockSpec),
     Turn(TurnStockSpec),
+    /// Wire form: the height-field grid's fields plus `mesh`.
+    Mesh(MeshStockSpec),
 }
 impl From<StockSpec> for RunStockSpec {
     fn from(spec: StockSpec) -> Self {
         Self::Height(spec)
     }
 }
+impl From<MeshStockSpec> for RunStockSpec {
+    fn from(spec: MeshStockSpec) -> Self {
+        Self::Mesh(spec)
+    }
+}
+impl Serialize for RunStockSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Height(spec) => spec.serialize(serializer),
+            Self::Turn(spec) => spec.serialize(serializer),
+            Self::Mesh(spec) => spec.serialize(serializer),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for RunStockSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Plain {
+            Height(StockSpec),
+            Turn(TurnStockSpec),
+        }
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // A mesh stock's own refusals (an open mesh, ...) reach the caller.
+        if value.get("mesh").is_some() {
+            return MeshStockSpec::deserialize(value)
+                .map(Self::Mesh)
+                .map_err(D::Error::custom);
+        }
+        match Plain::deserialize(value).map_err(D::Error::custom)? {
+            Plain::Height(spec) => Ok(Self::Height(spec)),
+            Plain::Turn(spec) => Ok(Self::Turn(spec)),
+        }
+    }
+}
 impl RunStockSpec {
+    /// The height-field grid (of a box or a mesh stock).
     pub fn height(&self) -> Result<&StockSpec, String> {
         match self {
             Self::Height(spec) => Ok(spec),
+            Self::Mesh(spec) => Ok(spec.grid()),
             Self::Turn(_) => {
                 Err("this needs a height-field stock; the run has turning stock".into())
             }
@@ -82,6 +123,7 @@ impl RunStockSpec {
     pub fn height_mut(&mut self) -> Result<&mut StockSpec, String> {
         match self {
             Self::Height(spec) => Ok(spec),
+            Self::Mesh(spec) => Ok(spec.grid_mut()),
             Self::Turn(_) => {
                 Err("this needs a height-field stock; the run has turning stock".into())
             }
@@ -90,8 +132,24 @@ impl RunStockSpec {
     pub fn turn(&self) -> Option<&TurnStockSpec> {
         match self {
             Self::Turn(spec) => Some(spec),
-            Self::Height(_) => None,
+            Self::Height(_) | Self::Mesh(_) => None,
         }
+    }
+    /// The solid a mesh stock starts from.
+    pub fn mesh(&self) -> Option<&StockMesh> {
+        match self {
+            Self::Mesh(spec) => Some(spec.mesh()),
+            Self::Height(_) | Self::Turn(_) => None,
+        }
+    }
+    /// The run's starting stock. Always start a run's stock here: the grid
+    /// alone (`height()`) is the whole box, not a mesh stock.
+    pub fn initial_stock(&self, cancel: &impl CancelSignal) -> Result<RunStock, String> {
+        Ok(match self {
+            Self::Height(spec) => RunStock::Height(Box::new(Stock::new(spec.clone())?)),
+            Self::Mesh(spec) => RunStock::Height(Box::new(spec.initial_stock(cancel)?)),
+            Self::Turn(spec) => RunStock::Turn(TurnStock::new(spec.clone())?),
+        })
     }
 }
 /// A run's committed stock.
@@ -239,9 +297,15 @@ impl StreamManifest {
             );
         }
         match &self.stock {
-            RunStockSpec::Height(spec) => {
+            RunStockSpec::Height(_) | RunStockSpec::Mesh(_) => {
+                let spec = self.stock.height()?;
                 spec.grid()?;
                 if let Some(initial) = &self.initial_stock {
+                    // One declaration of the starting material: a stock mesh
+                    // (#121) or whole-cell bounds (#133), never both.
+                    if matches!(self.stock, RunStockSpec::Mesh(_)) {
+                        return Err("declare the starting stock one way: a stock mesh (StockSpec mesh) or whole-cell initial_stock bounds, not both".into());
+                    }
                     initial.validate(spec)?;
                 }
                 if self.turning.is_some() {
@@ -516,8 +580,8 @@ impl CheckpointFields {
         // Height cells: 16 bytes. Turning cells: 32 bytes, then a u32 ring
         // count and 32 bytes per ring.
         let shape = match &manifest.stock {
-            RunStockSpec::Height(spec) => {
-                let (nx, ny, _) = spec.grid()?;
+            RunStockSpec::Height(_) | RunStockSpec::Mesh(_) => {
+                let (nx, ny, _) = manifest.stock.height()?.grid()?;
                 self.count == nx * ny && cell_bytes == self.count * 16
             }
             RunStockSpec::Turn(spec) => {
@@ -1112,14 +1176,11 @@ impl StreamProducer {
 impl StreamReceiver {
     pub fn new(manifest: StreamManifest) -> Result<Self, String> {
         manifest.validate()?;
-        let stock = match &manifest.stock {
-            RunStockSpec::Height(spec) => {
-                RunStock::Height(Box::new(match &manifest.initial_stock {
-                    Some(initial) => Stock::from_initial(spec.clone(), initial)?,
-                    None => Stock::new(spec.clone())?,
-                }))
+        let stock = match (&manifest.stock, &manifest.initial_stock) {
+            (RunStockSpec::Height(spec), Some(initial)) => {
+                RunStock::Height(Box::new(Stock::from_initial(spec.clone(), initial)?))
             }
-            RunStockSpec::Turn(spec) => RunStock::Turn(TurnStock::new(spec.clone())?),
+            _ => manifest.stock.initial_stock(&|| false)?,
         };
         let identity = identity_bytes(&manifest)?;
         Ok(Self {

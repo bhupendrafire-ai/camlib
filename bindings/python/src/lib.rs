@@ -676,6 +676,70 @@ fn initialise_declared_stock(
     }
     Ok(())
 }
+/// A run's starting stock (a box or a mesh stock, as JSON) into a fresh
+/// height buffer.
+#[pyfunction]
+fn initialise_stock(py: Python<'_>, heights: &Bound<'_, PyAny>, stock_json: &str) -> PyResult<()> {
+    let lease = PyBuffer::<f64>::get(heights)?;
+    if lease.dimensions() != 1 {
+        return Err(PyValueError::new_err(
+            "height buffer must be one-dimensional",
+        ));
+    }
+    let cells = lease
+        .as_mut_slice(py)
+        .ok_or_else(|| PyValueError::new_err("height buffer must be writable contiguous f64"))?;
+    camlib::stock_mesh::initialise_stock(&mut Writable(cells), stock_json, &|| false)
+        .map_err(PyValueError::new_err)
+}
+/// Check a stock mesh (little-endian f64 vertices, u32 triangle indices):
+/// its bounds and enclosed volume.
+#[pyfunction]
+fn stock_mesh_check(vertices: &[u8], indices: &[u8]) -> PyResult<([f64; 3], [f64; 3], f64)> {
+    let mesh =
+        camlib::stock_mesh::mesh_from_bytes(vertices, indices).map_err(PyValueError::new_err)?;
+    let [lo, hi] = mesh.bounds();
+    Ok((lo, hi, mesh.volume_mm3()))
+}
+/// The closed mesh of a height buffer's upper bounds on the grid given as
+/// JSON: vertex bytes, index bytes, bounds, enclosed volume and what the
+/// mesh approximates.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn stock_mesh<'py>(
+    py: Python<'py>,
+    heights: &Bound<'py, PyAny>,
+    grid_json: &str,
+) -> PyResult<(
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    [f64; 3],
+    [f64; 3],
+    f64,
+    &'static str,
+)> {
+    let lease = PyBuffer::<f64>::get(heights)?;
+    if lease.dimensions() != 1 {
+        return Err(PyValueError::new_err(
+            "height buffer must be one-dimensional",
+        ));
+    }
+    let cells = lease
+        .as_slice(py)
+        .ok_or_else(|| PyValueError::new_err("height buffer must be contiguous f64"))?;
+    let mesh = camlib::stock_mesh::buffer_mesh(&Readable(cells), grid_json, &|| false)
+        .map_err(PyValueError::new_err)?;
+    let (vertices, indices) = camlib::stock_mesh::mesh_to_bytes(&mesh);
+    let [lo, hi] = mesh.bounds();
+    Ok((
+        PyBytes::new(py, &vertices),
+        PyBytes::new(py, &indices),
+        lo,
+        hi,
+        mesh.volume_mm3(),
+        camlib::stock_mesh::HEIGHT_FIELD_APPROXIMATION,
+    ))
+}
 #[pyfunction]
 fn validate_delta(
     py: Python<'_>,
@@ -2309,6 +2373,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(initialise_heights, module)?)?;
     module.add_function(wrap_pyfunction!(initialise_declared_stock, module)?)?;
     module.add_function(wrap_pyfunction!(prepare_geometry, module)?)?;
+    module.add_function(wrap_pyfunction!(initialise_stock, module)?)?;
+    module.add_function(wrap_pyfunction!(stock_mesh_check, module)?)?;
+    module.add_function(wrap_pyfunction!(stock_mesh, module)?)?;
     module.add_function(wrap_pyfunction!(validate_delta, module)?)?;
     module.add_function(wrap_pyfunction!(display_overlay_patch, module)?)?;
     module.add_class::<MaterialTarget>()?;
