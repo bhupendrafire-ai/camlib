@@ -17,6 +17,21 @@ import importlib as _importlib
 import json
 
 _EXPORTS = {
+    **dict.fromkeys(
+        (
+            'PlanningCandidate',
+            'OperationChoices',
+            'ComparisonPolicy',
+            'ComparisonReport',
+            'CorrectionTemplate',
+            'CorrectionReport',
+            'correction_candidate',
+            'correct_residuals',
+            'recipe_candidates',
+            'compare_candidates',
+        ),
+        'planning',
+    ),
     **dict.fromkeys(("Job", "Setup", "OperationNode", "RegenerationCache", "CadSource", "PostedProgram"), "jobs"),
     **dict.fromkeys(
         (
@@ -138,6 +153,9 @@ _EXPORTS = {
     **dict.fromkeys(("PlanarRegion", "Boundary", "Component"), "planar"),
     "WorkFrame": "motion",
     **dict.fromkeys(("cutting_data", "CuttingData"), "cutting"),
+    **dict.fromkeys(
+        ('EngagementFeedBand', 'EngagementFeedPolicy', 'EngagementScheduledProgram', 'schedule_engagement'), 'cutting'
+    ),
 }
 
 __all__ = ["Engine", *sorted(_EXPORTS)]
