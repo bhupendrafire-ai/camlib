@@ -121,7 +121,12 @@ whose old value doesn't match its own stock.
   also proves every motion against the target (`src/material/sweep_proof.rs`,
   issues #72 and #106). The tool is eroded by the comparison tolerance less the
   target's declared error. Against a `SurfaceTarget` mesh, the exact section
-  contact of `flat::Index::sections_chord_clear` proves it clear. Against a
+  contact of `flat::Index::sections_chord_clear` proves it clear. A ball or
+  bull-nose end is proven with its real shape (#107): eroded, it is a smaller
+  bull lifted by the erosion, and `flat::Index::bull_chord_bound_clear` bounds
+  its contact (concave along each edge and chord, so no Lipschitz bound is
+  needed at the corner's vertical rim); a corner smaller than the erosion
+  falls back to the enclosing flat end, which is sound but conservative. Against a
   prismatic `Target`, the floor is checked exactly and the walls by the region's
   1-Lipschitz signed clearance on bisected chords; the boundary error and floor
   error are the declared error. A possible

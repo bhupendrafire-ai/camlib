@@ -231,9 +231,11 @@ class PlanningTest(unittest.TestCase):
         self.assertEqual(result.reason, 'residual upper volume increased')
         self.assertEqual(len(result.evaluations), 2)
 
-    def test_native_parallel_rest_correction_posts_real_flat_surface_passes(self):
+    def test_native_parallel_rest_correction_posts_real_surface_passes(self):
+        # Ball and bull ends are proven with their real shape (#107), so
+        # their corrections are release-checked like the flat end's.
         policy = ComparisonPolicy((('surface', 3.6),), 120)
-        for shape in ('flat',):
+        for shape in ('flat', 'ball', 'bull'):
             with self.subTest(shape=shape):
                 base, rest = surface_correction(shape)
                 original = base.job.compile()
@@ -257,23 +259,6 @@ class PlanningTest(unittest.TestCase):
                 self.assertEqual(revised.verification, base.job.setups[0].verification)
                 self.assertEqual(revised.tools, base.job.setups[0].tools)
                 self.assertIsNotNone(revised.operations[-1].limits.contain)
-
-    def test_curved_rest_material_uncertainty_cannot_select_a_recipe(self):
-        # #107 owns real-shape material proof. The public proposal retains the
-        # existing conservative flat enclosure and never accepts uncertainty.
-        for shape in ('ball', 'bull'):
-            with self.subTest(shape=shape):
-                base, rest = surface_correction(shape)
-                result = correct_residuals(
-                    base,
-                    (CorrectionTemplate('surface', rest),),
-                    policy=ComparisonPolicy((('surface', 3.6),), 120),
-                    max_passes=1,
-                    executable=os.environ.get('CAMLIB_TEST_ENGINE'),
-                )
-                self.assertIsNone(result.candidate)
-                self.assertTrue(result.evaluations)
-                self.assertTrue(all(e.status != 'eligible' for e in result.evaluations))
 
     def test_native_surface_rest_refuses_inaccessible_keepout_and_unsafe_corrections(self):
         from camlib.limits import AvoidArea, Limits

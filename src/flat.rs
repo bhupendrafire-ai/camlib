@@ -542,9 +542,35 @@ impl Tri {
     fn bull_contact(&self, p: [f64; 2], r: f64, rc: f64) -> Option<f64> {
         self.bull_contact_above(p, r, rc, f64::NEG_INFINITY)
     }
+    /// As `bull_contact`, an upper bound for proofs: each edge's objective is
+    /// concave (linear height minus a convex non-decreasing profile of a
+    /// convex distance), so it is bounded by `concave_max_upper`, with no
+    /// Lipschitz assumption (the corner's slope is unbounded at the rim).
+    /// Vertices and the facet's critical point are closed form.
+    fn bull_contact_bound(&self, p: [f64; 2], r: f64, rc: f64) -> Option<f64> {
+        self.bull_contact_with(p, r, rc, f64::NEG_INFINITY, true)
+    }
     /// As `bull_contact`, skipping edges that cannot exceed `floor` (the
     /// profile only lowers heights, so an edge never beats its higher end).
     fn bull_contact_above(&self, p: [f64; 2], r: f64, rc: f64, floor: f64) -> Option<f64> {
+        self.bull_contact_with(p, r, rc, floor, false)
+    }
+    fn bull_contact_with(
+        &self,
+        p: [f64; 2],
+        r: f64,
+        rc: f64,
+        floor: f64,
+        bound: bool,
+    ) -> Option<f64> {
+        if bound && self.p[0][2] == self.p[1][2] && self.p[1][2] == self.p[2][2] {
+            // A level facet: the objective is its height less the profile of
+            // the distance, which does not decrease outward, so the maximum
+            // is at the least horizontal distance (exact, no search). Fine
+            // flat floors are most of what a tangent pass reaches.
+            let d = self.distance_xy(p);
+            return (d <= r).then(|| self.p[0][2] - bull_profile(d, r, rc));
+        }
         let mut best: Option<f64> = None;
         fn take(best: &mut Option<f64>, z: f64) {
             *best = Some(best.map_or(z, |b| b.max(z)));
@@ -590,7 +616,14 @@ impl Tri {
                 let d = (q[0] - p[0]).hypot(q[1] - p[1]).min(r);
                 q[2] - bull_profile(d, r, rc)
             };
-            take(&mut best, golden_max(at, t0, t1, 40));
+            take(
+                &mut best,
+                if bound {
+                    concave_max_upper(at, t0, t1)
+                } else {
+                    golden_max(at, t0, t1, 40)
+                },
+            );
         }
         // Facet: the plane z = A x + B y + C; the critical point lies along
         // the gradient where the corner's slope equals the plane's.
@@ -955,6 +988,88 @@ impl Index {
                     clear = false;
                     return false;
                 }
+            }
+            true
+        });
+        clear
+    }
+    /// Proven: a bull-nose end (radius r, corner rc; rc = r a ball, rc = 0
+    /// flat) moving straight from tip `a` to tip `b`, lifted by `lift`,
+    /// stays above every triangle. As `sections_chord_clear`, with the
+    /// curved profile itself (`Tri::bull_contact_bound`): per triangle the
+    /// contact along the chord is concave in the position (the maximum over
+    /// the triangle of a jointly concave function) and the tip height is
+    /// linear, so the gap is bounded by `concave_max_upper`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn bull_chord_bound_clear(
+        &self,
+        a: Vec3,
+        b: Vec3,
+        r: f64,
+        rc: f64,
+        lift: f64,
+        seen: &mut [u32],
+        stamp: &mut u32,
+    ) -> bool {
+        if a[2].min(b[2]) < self.floor + lift {
+            return false;
+        }
+        let low = a[2].min(b[2]);
+        let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let at = |t: f64| [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+        let tip = |t: f64| a[2] + t * (b[2] - a[2]);
+        let mut clear = true;
+        self.visit([a[0], a[1]], [b[0], b[1]], r, seen, stamp, |t| {
+            // Contacts never exceed the triangle's top.
+            if t.max[2] + lift <= low {
+                return true;
+            }
+            let gap = |k: usize| {
+                (t.min[k] - a[k].max(b[k]))
+                    .max(a[k].min(b[k]) - t.max[k])
+                    .max(0.)
+            };
+            if gap(0).hypot(gap(1)) > r {
+                return true;
+            }
+            let dist = |u: f64| t.distance_xy(at(u));
+            let near = golden_argmin(dist, 0., 1., 60);
+            let closest = dist(near);
+            if closest > r {
+                return true;
+            }
+            // No contact along the chord is higher than the triangle's top
+            // less the profile at the least horizontal distance (the profile
+            // does not decrease outward). The distance is convex along the
+            // chord, so its minimum lies in the final golden bracket around
+            // `near`; the distance is 1-Lipschitz, so it is at least
+            // `closest` less the chord's length times that bracket (bounded
+            // generously here). Most triangles of a fine mesh that a
+            // tangent pass reaches are dismissed by this alone, without the
+            // contact search.
+            let least = (closest - 1e-9 * (1. + length)).max(0.);
+            if t.max[2] - bull_profile(least, r, rc) + lift <= low {
+                return true;
+            }
+            let edge = |inside: f64, outside: f64| {
+                if dist(outside) <= r {
+                    return outside;
+                }
+                let (mut i, mut o) = (inside, outside);
+                for _ in 0..60 {
+                    let m = (i + o) / 2.;
+                    if dist(m) <= r { i = m } else { o = m }
+                }
+                i
+            };
+            let (u0, u1) = (edge(near, 0.), edge(near, 1.));
+            let gap = |u: f64| {
+                t.bull_contact_bound(at(u), r, rc)
+                    .map_or(f64::NEG_INFINITY, |c| c + lift - tip(u))
+            };
+            if concave_max_upper(gap, u0, u1) > 0. {
+                clear = false;
+                return false;
             }
             true
         });
@@ -1864,6 +1979,112 @@ mod tests {
         let (a, b) = ([1., 2., peak - 0.5], [9., 2., peak - 0.5]);
         assert!(ridge.bull_contact([1., 2.], 2., 0.7).unwrap() < a[2]);
         assert!(!index.bull_chord_clear(a, b, 2., 0.7, 0., &mut seen, &mut stamp));
+    }
+
+    #[test]
+    fn bull_contact_bound_is_never_below_dense_sampling() {
+        // As the dense check of `bull_contact`, for the proof's bound: never
+        // below any sampled contact, and close to it.
+        let cases = [
+            ([[0., 0., 0.], [10., 0., 5.], [0., 10., 2.]], [3., 3.]),
+            ([[0., 0., 0.], [10., 0., 5.], [0., 10., 2.]], [11., 1.]),
+            ([[2., 2., 3.], [8., 3., 1.], [4., 9., 6.]], [5., 5.]),
+            ([[2., 2., 3.], [8., 3., 1.], [4., 9., 6.]], [0.5, 4.]),
+            ([[0., 0., 4.], [6., 0., 4.], [0., 6., 4.]], [7.2, 1.]),
+            // A steep facet and a vertical one (the corner's slope is
+            // unbounded at the rim: no Lipschitz bound holds there).
+            ([[0., 0., 0.], [1., 0., 9.], [0., 6., 0.]], [1.8, 3.]),
+            ([[3., 0., 0.], [3., 6., 0.], [3., 3., 8.]], [1.2, 3.]),
+        ];
+        for (corners, p) in cases {
+            let t = tri(corners);
+            for (r, rc) in [(2., 0.), (2., 0.5), (2., 1.5), (2., 2.)] {
+                let bound = t.bull_contact_bound(p, r, rc);
+                let mut sampled = f64::NEG_INFINITY;
+                let n = 600;
+                for i in 0..=n {
+                    for j in 0..=n - i {
+                        let (u, v) = (i as f64 / n as f64, j as f64 / n as f64);
+                        let w = [1. - u - v, u, v];
+                        let q: Vec3 = std::array::from_fn(|k| {
+                            w[0] * corners[0][k] + w[1] * corners[1][k] + w[2] * corners[2][k]
+                        });
+                        let d = (q[0] - p[0]).hypot(q[1] - p[1]);
+                        if d <= r {
+                            sampled = sampled.max(q[2] - bull_profile(d, r, rc));
+                        }
+                    }
+                }
+                match bound {
+                    None => assert!(sampled == f64::NEG_INFINITY, "{p:?} {r} {rc} {sampled}"),
+                    Some(z) => assert!(
+                        z >= sampled - 1e-9 && z - sampled < 0.05,
+                        "{corners:?} {p:?} {r} {rc}: bound {z}, sampled {sampled}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bull_chord_bound_clearance_agrees_with_dense_sampling() {
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let index_of = |corners: [Vec3; 3]| {
+            let mesh = crate::surface::SurfaceMesh {
+                version: 1,
+                units: "mm".into(),
+                triangles: vec![corners].into(),
+                surface_error_mm: 0.,
+                source: serde_json::Value::Null,
+            };
+            Index::new(&mesh, -10., 2., &never).unwrap()
+        };
+        let corners = [[0., 0., 0.], [10., 0., 5.], [0., 10., 2.]];
+        let index = index_of(corners);
+        let mut seen = vec![0; index.len()];
+        let mut stamp = 0;
+        let t = tri(corners);
+        for (r, rc) in [(2., 0.), (2., 0.7), (2., 2.)] {
+            let (pa, pb) = ([1., 2.], [4., 2.5]);
+            let contact = |p: [f64; 2]| t.bull_contact(p, r, rc).unwrap();
+            for (margin, clear) in [(0.01, true), (-0.01, false)] {
+                let mut a = [pa[0], pa[1], contact(pa) + margin];
+                let mut b = [pb[0], pb[1], contact(pb) + margin];
+                if !clear {
+                    a[2] += 0.02;
+                    b[2] += 0.02;
+                }
+                let dense = (0..=2000).all(|k| {
+                    let s = k as f64 / 2000.;
+                    let p = [a[0] + s * (b[0] - a[0]), a[1] + s * (b[1] - a[1])];
+                    contact(p) <= a[2] + s * (b[2] - a[2])
+                });
+                let proven = index.bull_chord_bound_clear(a, b, r, rc, 0., &mut seen, &mut stamp);
+                assert!(!proven || dense, "{r} {rc} {margin}");
+                if clear {
+                    assert!(proven, "{r} {rc}: a chord above the slope must be proven");
+                }
+            }
+        }
+        // A ball rolled level across a ridge (the tent's cross-section at
+        // Y 2 peaks at X 5): refused when its middle dips into it, proven
+        // with a small clearance, both judged by dense sampling.
+        let ridge = [[0., 0., 0.], [5., 5., 4.], [10., 0., 0.]];
+        let index = index_of(ridge);
+        let mut seen = vec![0; index.len()];
+        let t = tri(ridge);
+        let peak = t.bull_contact([5., 2.], 2., 2.).unwrap();
+        for (lift, expect) in [(-0.02, false), (0.002, true)] {
+            let (a, b) = ([1., 2., peak + lift], [9., 2., peak + lift]);
+            let dense = (0..=4000).all(|k| {
+                let s = k as f64 / 4000.;
+                t.bull_contact([1. + 8. * s, 2.], 2., 2.)
+                    .is_none_or(|c| c <= peak + lift)
+            });
+            let proven = index.bull_chord_bound_clear(a, b, 2., 2., 0., &mut seen, &mut stamp);
+            assert_eq!(proven, expect, "lift {lift}");
+            assert!(!proven || dense);
+        }
     }
 
     /// Dense oracle: the highest tip over many triangle points, from the
