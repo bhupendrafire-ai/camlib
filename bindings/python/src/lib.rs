@@ -1247,6 +1247,44 @@ fn schedule_motion<'py>(
 }
 
 #[pyfunction]
+#[pyo3(signature = (program_json, stock_json, policy_json, cancel=None))]
+fn schedule_engagement<'py>(
+    py: Python<'py>,
+    program_json: &str,
+    stock_json: &str,
+    policy_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if program_json
+        .len()
+        .saturating_add(stock_json.len())
+        .saturating_add(policy_json.len())
+        > 256 * 1024 * 1024
+    {
+        return Err(PyValueError::new_err("engagement input byte cap"));
+    }
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    let bytes = py.detach(|| {
+        let program = serde_json::from_str(program_json)
+            .map_err(|e| PyValueError::new_err(format!("program: {e}")))?;
+        let (stock, initial, sweep): (
+            camlib::stock::StockSpec,
+            Option<camlib::stock::InitialStock>,
+            camlib::stock::SweepOptions,
+        ) = serde_json::from_str(stock_json)
+            .map_err(|e| PyValueError::new_err(format!("stock: {e}")))?;
+        let policy = serde_json::from_str(policy_json)
+            .map_err(|e| PyValueError::new_err(format!("feed policy: {e}")))?;
+        let report = camlib::feed_policy::apply(&program, stock, initial, sweep, &policy, &*flag)
+            .map_err(PyValueError::new_err)?;
+        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(PyValueError::new_err("engagement feed analysis cancelled"));
+        }
+        serde_json::to_vec(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(PyBytes::new(py, &bytes))
+}
+#[pyfunction]
 #[pyo3(signature = (kind, request_json, cancel=None))]
 fn prepare_geometry<'py>(
     py: Python<'py>,

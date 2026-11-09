@@ -85,6 +85,13 @@ Details and limits: [capabilities](docs/library-capabilities.md). Measured
 toolpath quality and engine performance for every toolpath:
 [benchmarks](docs/benchmarks.md).
 
+Optional [checked recipe planning](docs/planning.md) compares supplied milling
+strategies and cutter recipes, retains the reference, and can append bounded
+native rest corrections from residual findings. It uses the existing checks
+and explicit machine/cutting data; it produces advice and never releases NC.
+The same guide covers opt-in engagement slowdown caps, declared initial-blank
+bounds, and a host-side example for colour intent and confirmed blank placement.
+
 Native [bounded preparation](docs/preparation.md) can screen supplied samples
 and calibrated assemblies and enclose a declared top-down blank. These queries
 produce explicit premises and advice; ordinary job verification still decides release.
