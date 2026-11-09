@@ -1476,6 +1476,100 @@ impl Stock {
         Ok(delta)
     }
 
+    /// A height-view transaction for a tri-dexel run (`crate::dexel`): the
+    /// cell changes are the projection of the dexel sweep's Z rays, and the
+    /// native records are the ones this height field's own sweep would add
+    /// for the same move, under the same condition (`records`: a fully swept
+    /// cutting move that passed under no material, so the space above every
+    /// pose of its cutting part is empty). `undercut_cells` > 0 marks a move
+    /// whose cutting part ran under material, as `preview_sweep` does.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn derived_delta(
+        &self,
+        tool: &PreparedAssembly,
+        motion: &Motion,
+        fraction: f64,
+        changes: Vec<CellChange>,
+        records: bool,
+        analytic: bool,
+        undercut_cells: u64,
+        tolerance_mm: f64,
+    ) -> StockDelta {
+        let stats = SweepStats {
+            changed_cells: changes.len(),
+            delta_bytes: changes.len() * std::mem::size_of::<CellChange>(),
+            undercut_cells,
+            ..Default::default()
+        };
+        let mut delta = StockDelta {
+            spec: self.spec.clone(),
+            base_generation: self.generation,
+            motion_id: motion.id,
+            operation: motion.operation.clone(),
+            fraction,
+            changes,
+            stats,
+            native_identity: Some(self.identity),
+            cleared_column: None,
+            axial_column: None,
+            departure: None,
+            shift: motion.kind == MoveKind::Shift,
+            receipt: self.receipt_requested.load(Ordering::Relaxed).then(|| {
+                // The dexel kernel swept exactly this motion prefix with this
+                // tool from this view's stock state.
+                Arc::new(SweepReceipt {
+                    base_identity: self.identity,
+                    motion: motion.clone(),
+                    tool: tool.definition().clone(),
+                    fraction,
+                    tolerance_mm,
+                })
+            }),
+        };
+        if records && fraction == 1. && !motion.kind.is_rapid() {
+            delta.axial_column = AxialColumn::from_motion(tool, motion, self.spec.max_mm[2]);
+            delta.departure = Some((motion.tool.clone(), motion.curve.end()));
+            if analytic {
+                let radius = tool.cutter().definition().diameter_mm / 2.;
+                delta.cleared_column = ClearedSweep::from_motion(motion, radius, tolerance_mm)
+                    .ok()
+                    .map(|sweep| CommittedColumn {
+                        sweep,
+                        tolerance_mm,
+                    });
+            }
+        }
+        delta
+    }
+
+    /// A height-only transaction (no native records) for received tri-dexel
+    /// changes: the projection of their Z rays.
+    pub(crate) fn wire_delta(
+        &self,
+        motion: &Motion,
+        fraction: f64,
+        changes: Vec<CellChange>,
+    ) -> StockDelta {
+        StockDelta {
+            spec: self.spec.clone(),
+            base_generation: self.generation,
+            motion_id: motion.id,
+            operation: motion.operation.clone(),
+            fraction,
+            stats: SweepStats {
+                changed_cells: changes.len(),
+                ..Default::default()
+            },
+            changes,
+            native_identity: None,
+            cleared_column: None,
+            axial_column: None,
+            departure: None,
+            shift: false,
+            receipt: None,
+        }
+    }
+
     pub fn apply_delta(&mut self, delta: &StockDelta) -> Result<(), String> {
         self.commit(delta, false)
     }
@@ -1710,7 +1804,7 @@ fn height_valid(h: HeightBounds, spec: &StockSpec) -> bool {
         && h.upper_mm <= spec.max_mm[2]
         && h.lower_mm <= h.upper_mm
 }
-fn cancelled(cancel: &impl CancelSignal) -> Result<(), String> {
+pub(crate) fn cancelled(cancel: &impl CancelSignal) -> Result<(), String> {
     if cancel.is_cancelled() {
         Err("stock sweep cancelled; no changes committed".into())
     } else {
@@ -1731,10 +1825,10 @@ impl Rect {
         self.width() * (self.y1 - self.y0 + 1)
     }
 }
-struct Segment {
-    a: Vec3,
-    b: Vec3,
-    error: f64,
+pub(crate) struct Segment {
+    pub(crate) a: Vec3,
+    pub(crate) b: Vec3,
+    pub(crate) error: f64,
 }
 fn segment_layout(curve: &Curve, options: SweepOptions) -> Result<(usize, f64), String> {
     let layout = match *curve {
@@ -1783,7 +1877,7 @@ fn segment_layout(curve: &Curve, options: SweepOptions) -> Result<(usize, f64), 
     }
     Ok(layout)
 }
-fn segments(
+pub(crate) fn segments(
     curve: &Curve,
     prepared: &crate::motion::PreparedCurve,
     fraction: f64,

@@ -1155,6 +1155,290 @@ fn turn_stock_json(stock: &camlib::turning::stock::TurnStock) -> PyResult<String
     .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// The committed state of a tri-dexel run: every move frame is checked
+/// (cursor, attribution, continuity, each changed ray's old value, material
+/// only removed) against this receiver's own stock before it commits.
+#[pyclass]
+#[derive(Clone)]
+struct DexelReceiver {
+    inner: camlib::stream::StreamReceiver,
+}
+/// A read-only tri-dexel stock (a partial move's preview).
+#[pyclass]
+struct DexelView {
+    stock: camlib::dexel::DexelStock,
+}
+fn dexel_manifest(manifest: &str) -> PyResult<camlib::stream::StreamManifest> {
+    let manifest: camlib::stream::StreamManifest =
+        serde_json::from_str(manifest).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    if manifest.stock.dexel().is_none() {
+        return Err(PyValueError::new_err(
+            "a tri-dexel receiver needs a tri-dexel run manifest",
+        ));
+    }
+    Ok(manifest)
+}
+fn dexel_volume_json(stock: &camlib::dexel::DexelStock) -> PyResult<String> {
+    serde_json::to_string(&stock.volume()).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+/// The height view's cells as little-endian f64 (lower, upper) pairs.
+fn dexel_view_bytes<'py>(
+    py: Python<'py>,
+    stock: &camlib::dexel::DexelStock,
+) -> Bound<'py, PyBytes> {
+    let cells = stock.view().cells();
+    let mut out = Vec::with_capacity(cells.len() * 16);
+    for c in cells {
+        out.extend_from_slice(&c.lower_mm.to_le_bytes());
+        out.extend_from_slice(&c.upper_mm.to_le_bytes());
+    }
+    PyBytes::new(py, &out)
+}
+type Intervals = Vec<(f64, f64)>;
+fn dexel_ray(
+    stock: &camlib::dexel::DexelStock,
+    axis: usize,
+    index: usize,
+) -> PyResult<(Intervals, Intervals)> {
+    let ray = (axis < 3)
+        .then(|| stock.rays(axis).get(index))
+        .flatten()
+        .ok_or_else(|| {
+            PyValueError::new_err("ray axis must be 0, 1 or 2 and index within its grid")
+        })?;
+    let list = |s: &camlib::dexel::Spans| s.as_slice().iter().map(|i| (i[0], i[1])).collect();
+    Ok((list(&ray.possible), list(&ray.certain)))
+}
+/// One grid's rays: per ray, its possible and certain interval counts
+/// (u32 pairs), then every interval's (start, end) as f64, in ray order.
+fn dexel_rays<'py>(
+    py: Python<'py>,
+    stock: &camlib::dexel::DexelStock,
+    axis: usize,
+) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+    if axis > 2 {
+        return Err(PyValueError::new_err("ray axis must be 0, 1 or 2"));
+    }
+    let rays = stock.rays(axis);
+    let mut counts = Vec::with_capacity(rays.len() * 8);
+    let mut values = vec![];
+    for r in rays {
+        for s in [&r.possible, &r.certain] {
+            counts.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            for i in s.as_slice() {
+                values.extend_from_slice(&i[0].to_le_bytes());
+                values.extend_from_slice(&i[1].to_le_bytes());
+            }
+        }
+    }
+    Ok((PyBytes::new(py, &counts), PyBytes::new(py, &values)))
+}
+fn dexel_compare_solid(
+    py: Python<'_>,
+    stock: &camlib::dexel::DexelStock,
+    triangles: &[u8],
+    surface_error_mm: f64,
+    tolerance_mm: f64,
+) -> PyResult<String> {
+    if triangles.is_empty() || !triangles.len().is_multiple_of(72) {
+        return Err(PyValueError::new_err(
+            "solid triangles are little-endian f64 vertex triples, 72 bytes per facet",
+        ));
+    }
+    let facets: Vec<[[f64; 3]; 3]> = triangles
+        .as_chunks::<72>()
+        .0
+        .iter()
+        .map(|t| {
+            std::array::from_fn(|v| {
+                std::array::from_fn(|k| {
+                    let i = (3 * v + k) * 8;
+                    f64::from_le_bytes(t[i..i + 8].try_into().unwrap())
+                })
+            })
+        })
+        .collect();
+    let report = py
+        .detach(|| {
+            stock.compare_solid(
+                &facets,
+                surface_error_mm,
+                tolerance_mm,
+                &AtomicBool::new(false),
+            )
+        })
+        .map_err(PyValueError::new_err)?;
+    serde_json::to_string(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+fn dexel_grid_json(stock: &camlib::dexel::DexelStock) -> PyResult<String> {
+    let g = stock.grid();
+    serde_json::to_string(&serde_json::json!({
+        "spec": stock.spec(),
+        "cells": g.cells,
+        "step_mm": g.step_mm,
+        "rays": [g.rays(0), g.rays(1), g.rays(2)],
+        "intervals": stock.intervals(),
+        "view": stock.view().spec(),
+    }))
+    .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+#[pymethods]
+impl DexelView {
+    fn compare_solid(
+        &self,
+        py: Python<'_>,
+        triangles: &[u8],
+        surface_error_mm: f64,
+        tolerance_mm: f64,
+    ) -> PyResult<String> {
+        dexel_compare_solid(py, &self.stock, triangles, surface_error_mm, tolerance_mm)
+    }
+    fn volume_json(&self) -> PyResult<String> {
+        dexel_volume_json(&self.stock)
+    }
+    fn view_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        dexel_view_bytes(py, &self.stock)
+    }
+    fn ray(&self, axis: usize, index: usize) -> PyResult<(Intervals, Intervals)> {
+        dexel_ray(&self.stock, axis, index)
+    }
+    fn rays<'py>(
+        &self,
+        py: Python<'py>,
+        axis: usize,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+        dexel_rays(py, &self.stock, axis)
+    }
+    fn grid_json(&self) -> PyResult<String> {
+        dexel_grid_json(&self.stock)
+    }
+}
+impl DexelReceiver {
+    fn stock(&self) -> PyResult<&camlib::dexel::DexelStock> {
+        self.inner
+            .run_stock()
+            .dexel()
+            .map_err(PyValueError::new_err)
+    }
+}
+#[pymethods]
+impl DexelReceiver {
+    #[new]
+    fn new(manifest: &str) -> PyResult<Self> {
+        let manifest = dexel_manifest(manifest)?;
+        Ok(Self {
+            inner: camlib::stream::StreamReceiver::new(manifest).map_err(PyValueError::new_err)?,
+        })
+    }
+    /// Restore from a checkpoint frame of this run.
+    #[staticmethod]
+    fn restore(manifest: &str, checkpoint: &[u8]) -> PyResult<Self> {
+        let manifest = dexel_manifest(manifest)?;
+        Ok(Self {
+            inner: camlib::stream::StreamReceiver::from_checkpoint(
+                manifest,
+                checkpoint,
+                camlib::stream::CHECKPOINT_FRAME_LIMIT,
+            )
+            .map_err(PyValueError::new_err)?,
+        })
+    }
+    /// Commit one move frame; returns (motion JSON, changed rays).
+    fn accept(&mut self, frame: &[u8]) -> PyResult<(String, usize)> {
+        let chunk = camlib::stream::decode_dexel_chunk_frame(
+            self.inner.manifest(),
+            frame,
+            camlib::stream::DEFAULT_FRAME_LIMIT,
+        )
+        .map_err(PyValueError::new_err)?;
+        let changed = chunk.changes.len();
+        let motion = self
+            .inner
+            .accept(frame, camlib::stream::DEFAULT_FRAME_LIMIT)
+            .map_err(PyValueError::new_err)?;
+        Ok((
+            serde_json::to_string(&motion).map_err(|e| PyValueError::new_err(e.to_string()))?,
+            changed,
+        ))
+    }
+    fn accept_end(&mut self, frame: &[u8]) -> PyResult<()> {
+        self.inner
+            .accept_end(frame, camlib::stream::DEFAULT_FRAME_LIMIT)
+            .map_err(PyValueError::new_err)
+    }
+    fn checkpoint<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = self
+            .inner
+            .checkpoint(camlib::stream::CHECKPOINT_FRAME_LIMIT)
+            .map_err(PyValueError::new_err)?;
+        Ok(PyBytes::new(py, &bytes))
+    }
+    fn copy(&self) -> Self {
+        self.clone()
+    }
+    #[getter]
+    fn completed(&self) -> u64 {
+        self.inner.completed()
+    }
+    #[getter]
+    fn finished(&self) -> bool {
+        self.inner.is_finished()
+    }
+    #[getter]
+    fn position(&self) -> (f64, f64, f64) {
+        let p = self.inner.position();
+        (p[0], p[1], p[2])
+    }
+    fn volume_json(&self) -> PyResult<String> {
+        dexel_volume_json(self.stock()?)
+    }
+    fn view_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(dexel_view_bytes(py, self.stock()?))
+    }
+    fn ray(&self, axis: usize, index: usize) -> PyResult<(Intervals, Intervals)> {
+        dexel_ray(self.stock()?, axis, index)
+    }
+    fn rays<'py>(
+        &self,
+        py: Python<'py>,
+        axis: usize,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>)> {
+        dexel_rays(py, self.stock()?, axis)
+    }
+    fn grid_json(&self) -> PyResult<String> {
+        dexel_grid_json(self.stock()?)
+    }
+    fn compare_solid(
+        &self,
+        py: Python<'_>,
+        triangles: &[u8],
+        surface_error_mm: f64,
+        tolerance_mm: f64,
+    ) -> PyResult<String> {
+        dexel_compare_solid(py, self.stock()?, triangles, surface_error_mm, tolerance_mm)
+    }
+    /// The stock after the first `fraction` of the next move (given as its
+    /// committed frame); this receiver is unchanged.
+    fn preview(&self, py: Python<'_>, frame: &[u8], fraction: f64) -> PyResult<DexelView> {
+        let chunk = camlib::stream::decode_dexel_chunk_frame(
+            self.inner.manifest(),
+            frame,
+            camlib::stream::DEFAULT_FRAME_LIMIT,
+        )
+        .map_err(PyValueError::new_err)?;
+        if chunk.sequence != self.inner.completed() {
+            return Err(PyValueError::new_err("preview frame is not the next move"));
+        }
+        let stock = py
+            .detach(|| {
+                self.inner
+                    .preview_dexel(&chunk.motion, fraction, &AtomicBool::new(false))
+            })
+            .map_err(PyValueError::new_err)?;
+        Ok(DexelView { stock })
+    }
+}
+
 #[pyclass]
 struct PostCancellation {
     flag: std::sync::Arc<AtomicBool>,
@@ -2102,6 +2386,8 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<RegionSession>()?;
     module.add_class::<MachineCrashSession>()?;
     module.add_class::<TurnReceiver>()?;
+    module.add_class::<DexelReceiver>()?;
+    module.add_class::<DexelView>()?;
     module.add_function(wrap_pyfunction!(grbl_number, module)?)?;
     module.add_function(wrap_pyfunction!(grbl_axis_mm, module)?)?;
     module.add_function(wrap_pyfunction!(grbl_feed_mm_min, module)?)?;

@@ -62,6 +62,7 @@ pub mod buffers;
 pub mod chamfer;
 pub mod contour;
 pub mod deburr;
+pub mod dexel;
 pub mod dynamics;
 pub mod empty_cut;
 pub mod engagement;

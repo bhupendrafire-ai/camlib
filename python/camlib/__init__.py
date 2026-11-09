@@ -87,6 +87,7 @@ _EXPORTS = {
         (
             "Simulation",
             "StockSpec",
+            "DexelStockSpec",
             "SweepOptions",
             "SimulationError",
             "CamWarning",
@@ -96,6 +97,7 @@ _EXPORTS = {
         "simulation",
     ),
     **dict.fromkeys(("Player", "Cursor", "RecordedRun"), "playback"),
+    "DexelStockState": "dexel_state",
     **dict.fromkeys(("Limits", "AvoidArea"), "limits"),
     **dict.fromkeys(
         ("Machine", "ToolSetting", "LoweringOptions", "GCodeDialect", "GCodePost", "NativeGCodeDecoder", "post_events"),

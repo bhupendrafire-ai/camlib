@@ -796,7 +796,7 @@ class PostedRun(RecordedRun):
             frame = self.read_chunk(index)
             d = _Decoder(frame.payload)
             if (
-                frame.kind not in (1, 10)
+                frame.kind not in (1, 10, 11)
                 or (d.string(128), d.string(512), d.take(32).tobytes()) != self._stock_identity
                 or d.unpack('<3Q') != (index, index, index + 1)
                 or _motion_digest(d.motion()) != digest

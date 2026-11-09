@@ -1132,6 +1132,7 @@ gives the `effective_diameter_mm` it used. camlib does not pick cutting data.
 
 ## Not supported
 
-Undercuts (other than thread
-grooves and the stopped boring bar's shift) and 4/5-axis motion. Surfaces must
-be reachable from above (a part seen as a height map).
+Undercut operations (other than thread grooves and the stopped boring bar's
+shift) and 4/5-axis motion. Surfaces must be reachable from above (a part seen
+as a height map). Tri-dexel stock (`DexelStockSpec`) represents undercuts that
+moves cut; undercut tools and operations follow in issue #8.

@@ -349,7 +349,7 @@ impl Binding {
                 .collect::<Result<_, _>>()?,
             config,
             run: manifest.run.clone(),
-            stock: manifest.stock.height()?.clone(),
+            stock: manifest.stock.view()?,
             manifest_sha256: format!("{:x}", sha2::Sha256::digest(manifest.canonical_bytes()?)),
             identity: crate::stream::identity_bytes(manifest)?,
         })
@@ -750,6 +750,7 @@ pub(crate) struct Runtime {
     proofs: Vec<Option<material::SweepProof>>,
     /// The stream's curve tolerance (validated every motion already).
     sweep_tolerance_mm: f64,
+    sweep_options: crate::stock::SweepOptions,
     pub tracker: Tracker,
 }
 impl Runtime {
@@ -797,12 +798,29 @@ impl Runtime {
                 .collect::<Result<_, _>>()?,
             proofs,
             sweep_tolerance_mm: manifest.sweep.tolerance_mm,
+            sweep_options: manifest.sweep,
             tracker: Tracker::new(binding, completed),
         })
     }
     pub fn motion(
         &mut self,
         stock: &Stock,
+        tool: &PreparedAssembly,
+        motion: &Motion,
+        completed: u64,
+        cancel: &impl CancelSignal,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.motion_with(stock, None, tool, motion, completed, cancel)
+    }
+    /// As `motion`; with `dexel`, a tri-dexel run's stock decides stock
+    /// contact the height view leaves uncertain when its rays prove the
+    /// whole assembly's sweep clear of possible material
+    /// (`DexelStock::proves_clear`). A violation (certain material touched,
+    /// read from the height view) is never changed.
+    pub(crate) fn motion_with(
+        &mut self,
+        stock: &Stock,
+        dexel: Option<&crate::dexel::DexelStock>,
         tool: &PreparedAssembly,
         motion: &Motion,
         completed: u64,
@@ -840,7 +858,20 @@ impl Runtime {
                     tool: tool_sha256.clone(),
                     motion: motion_sha256.clone(),
                 };
-                crate::stock_contact::check_digested(stock, tool, motion, options, &digests, cancel)
+                let mut report = crate::stock_contact::check_digested(
+                    stock, tool, motion, options, &digests, cancel,
+                )?;
+                if let Some(d) = dexel
+                    && report.status == verification::Status::Uncertain
+                    && d.proves_clear(tool, motion, self.sweep_options, cancel)?
+                {
+                    report.status = verification::Status::Clear;
+                    report.findings.clear();
+                    report.numerical_policy.push_str(
+                        "; uncertain height-view contact decided clear by the tri-dexel rays (one grid proves the swept assembly misses possible material)",
+                    );
+                }
+                Ok::<_, String>(report)
             })
             .transpose()?
             .map(Box::new);

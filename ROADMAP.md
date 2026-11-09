@@ -46,7 +46,7 @@ Smaller, independent items first, then the 3D stock and what needs it.
 - [ ] #93 Deburr: edges next to drafted or filleted walls
 - [ ] #94 Deburr: sloped and vertical edges (3-axis part needs #92; tilted tool with #5/#6)
 - [ ] #107 Material check: prove ball and bull-nose ends with their real shape (shares contact work with #92)
-- [ ] #1 3D stock model (tri-dexel) for undercuts and multi-axis machining
+- [x] #1 3D stock model (tri-dexel) for undercuts and multi-axis machining
 - [ ] #8 Undercut milling tools: T-slot, keyseat, lollipop and dovetail cutters (needs #1)
 
 ## Phase 3: Complete turning
