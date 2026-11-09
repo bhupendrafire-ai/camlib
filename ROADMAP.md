@@ -38,6 +38,7 @@ is ordered by real dependency, not by size:
 - [x] #132 macOS extension linking, portable wheel loading and actionable first-use refusals
 
 - [x] #116 Machine crash detection: check the posted program against a declared machine model (safety)
+- [x] #136 Geodesic contour construction: observe cancellation within a level
 
 ## Phase 2: Complete milling
 
