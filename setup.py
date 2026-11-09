@@ -31,11 +31,15 @@ class CargoBuild(build_ext):
         command = ["cargo", "build", "--locked", "--release", "--workspace",
                    "--all-features", "--lib",
                    "--bin", "cam-sim-stream", "--message-format=json"]
-        result = subprocess.run(command, cwd=ROOT, env=env, check=True,
+        result = subprocess.run(command, cwd=ROOT, env=env, check=False,
                                 stdout=subprocess.PIPE, text=True)
         artifacts = {}
         for line in result.stdout.splitlines():
             record = json.loads(line)
+            if record.get("reason") == "compiler-message":
+                rendered = record.get("message", {}).get("rendered")
+                if rendered:
+                    sys.stderr.write(rendered)
             if record.get("reason") != "compiler-artifact":
                 continue
             name = record["target"]["name"]
@@ -44,6 +48,8 @@ class CargoBuild(build_ext):
                                        if Path(p).suffix in (".so", ".dylib", ".dll"))
             elif name == "cam-sim-stream":
                 artifacts[name] = Path(record["executable"])
+        if result.returncode:
+            raise RuntimeError(f"Cargo build failed (exit {result.returncode}); see the compiler diagnostics above")
         if set(artifacts) != {"_native", "cam-sim-stream"}:
             raise RuntimeError("Cargo did not produce the native CAM module and its stream driver")
         destination = Path(self.get_ext_fullpath(ext.name))

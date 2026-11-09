@@ -205,7 +205,8 @@ impl ClearedSweep {
         })
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EngagementOptions {
     pub tolerance_mm: f64,
     pub resolution_mm: f64,
@@ -213,6 +214,21 @@ pub struct EngagementOptions {
     pub max_nodes: u64,
     /// Shared cap for broad-phase index visits and primitive tests.
     pub max_work: u64,
+}
+impl EngagementOptions {
+    pub fn validate(self) -> Result<(), String> {
+        if !self.tolerance_mm.is_finite()
+            || !(1e-7..=0.01).contains(&self.tolerance_mm)
+            || !self.resolution_mm.is_finite()
+            || !(self.tolerance_mm..=1.).contains(&self.resolution_mm)
+            || !(1..=32).contains(&self.max_depth)
+            || self.max_nodes > 1_000_000
+            || self.max_work > 100_000_000
+        {
+            return Err("invalid flat-cutter engagement query/options".into());
+        }
+        Ok(())
+    }
 }
 impl Default for EngagementOptions {
     fn default() -> Self {
@@ -1051,17 +1067,11 @@ impl EngagementScene {
         if cancel.is_cancelled() {
             return Err("engagement query cancelled".into());
         }
+        options.validate()?;
         if !flat(&motion.curve)
             || !radius_ok(radius)
             || !max_angle_deg.is_finite()
             || !(0. ..=360.).contains(&max_angle_deg)
-            || !options.tolerance_mm.is_finite()
-            || !(1e-7..=0.01).contains(&options.tolerance_mm)
-            || !options.resolution_mm.is_finite()
-            || !(options.tolerance_mm..=1.).contains(&options.resolution_mm)
-            || !(1..=32).contains(&options.max_depth)
-            || options.max_nodes > 1_000_000
-            || options.max_work > 100_000_000
         {
             return Err("invalid flat-cutter engagement query/options".into());
         }

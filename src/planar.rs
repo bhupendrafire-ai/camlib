@@ -611,6 +611,29 @@ impl PreparedRegion {
             boundary_error_mm: self.definition.boundary_error_mm,
         }
     }
+    /// The region's bounding box `[min x, min y, max x, max y]` (outer
+    /// loops, arcs included), or None when it is empty.
+    pub(crate) fn bounds(&self) -> Option<[f64; 4]> {
+        let mut result: Option<[f64; 4]> = None;
+        for b in &self.shape.ccw_plines {
+            let e = b.polyline.extents()?;
+            let r = [
+                e.min_x + self.origin[0],
+                e.min_y + self.origin[1],
+                e.max_x + self.origin[0],
+                e.max_y + self.origin[1],
+            ];
+            result = Some(result.map_or(r, |a| {
+                [
+                    a[0].min(r[0]),
+                    a[1].min(r[1]),
+                    a[2].max(r[2]),
+                    a[3].max(r[3]),
+                ]
+            }));
+        }
+        result
+    }
     pub fn query(&self, p: Point) -> Result<RegionQuery, String> {
         if !p.iter().all(|v| v.is_finite() && v.abs() <= 1e6) {
             return Err("query point must be finite, within ±1e6 mm".into());

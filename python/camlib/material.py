@@ -165,12 +165,25 @@ class SurfaceTarget:
 
 @dataclass(frozen=True)
 class Options:
+    """Material check options.
+
+    ``max_tile_nodes`` (up to 10 000 000) and ``max_boundary_tests`` (up to
+    1 000 000 000) bound the check's work. Left as ``None`` each grows with the
+    stock grid to the most work the check can need there, up to its allowed
+    maximum. An incomplete report's ``stats["stopped_by"]`` names the budget
+    that stopped it, and gives a value that completes the check when one is
+    known within the allowed maximum.
+    """
+
     geometry_tolerance_mm: float = 1e-5
     comparison_tolerance_mm: float = 0.001
-    max_tile_nodes: int = 1_000_000
-    max_boundary_tests: int = 50_000_000
+    max_tile_nodes: int | None = None
+    max_boundary_tests: int | None = None
     max_classified_cells: int = 0xFFFFFFFF
     max_findings: int = 1024
+    residual_tolerance_mm: float | None = None
+    gouge_tolerance_mm: float | None = None
+    scope_to_region: bool = False
 
 
 def _json(value):
@@ -224,7 +237,7 @@ class Verifier:
             raise TypeError("material verification needs authoritative StockState or PartialStockView")
         manifest = base._manifest
         context = dict(
-            stock=manifest["stock"],
+            stock={k: v for k, v in manifest["stock"].items() if k != "mesh"},
             generation=state.completed,
             fraction=state.fraction,
             run=dict(run=manifest["run"], manifest_sha256=state._digest.hex()),
@@ -235,7 +248,9 @@ class Verifier:
     def check_bounds(self, heights, stock, *, generation=0, fraction=0):
         """Borrow caller-supplied whole-cell f64 pairs, without a stream run claim."""
         context = dict(
-            stock=stock.to_dict() if hasattr(stock, "to_dict") else stock,
+            stock=stock.grid_dict()
+            if hasattr(stock, "grid_dict")
+            else {k: v for k, v in (stock.to_dict() if hasattr(stock, "to_dict") else stock).items() if k != "mesh"},
             generation=generation,
             fraction=fraction,
             run=None,

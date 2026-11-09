@@ -234,6 +234,21 @@ pub struct ContactFinding {
     pub solid_lower_mm: f64,
     pub possible_upper_mm: f64,
     pub contact_point_mm: Option<Vec3>,
+    /// The highest stock (whole-cell upper bound) within the part's radius
+    /// of the move that stands above the part's bottom at `lowest_tip_z_mm`
+    /// (issue #129). The part's bottom must stand at least
+    /// `obstruction_top_mm - lowest_tip_z_mm` above the tip to pass over it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obstruction_top_mm: Option<f64>,
+    /// The lowest tip Z over the whole move.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lowest_tip_z_mm: Option<f64>,
+    /// The largest radius this part could have and clear every stock cell
+    /// standing above its bottom at the lowest tip, over the whole move: a
+    /// lower bound from whole-cell distances to the tool axis. None when the
+    /// cells could not all be read within the work bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_clear_radius_mm: Option<f64>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
@@ -382,7 +397,9 @@ impl<C: CancelSignal> Search<'_, C> {
         }
         Some(match c.shape {
             CutterShape::Flat | CutterShape::Beam => 0.,
-            CutterShape::Ball => radius - (radius * radius - r * r).max(0.).sqrt(),
+            CutterShape::Ball | CutterShape::Probe => {
+                radius - (radius * radius - r * r).max(0.).sqrt()
+            }
             CutterShape::Bull {
                 corner_radius_mm: k,
             } => {
@@ -399,9 +416,7 @@ impl<C: CancelSignal> Search<'_, C> {
     /// A fixed earlier pose must cover EVERY point in a tile and reach its old
     /// top. This is an enclosure certificate, not a sampled current-sweep test.
     fn earlier_upper(&mut self, rect: [f64; 4], top: f64, before: f64) -> Result<f64, String> {
-        if before == 0.
-            || self.motion.kind.is_rapid()
-            || !self.tool.definition().cutter.center_cutting
+        if before == 0. || !self.motion.kind.cuts() || !self.tool.definition().cutter.center_cutting
         {
             return Ok(top);
         }
@@ -450,7 +465,7 @@ impl<C: CancelSignal> Search<'_, C> {
         Ok(upper.max(self.stock.spec().min_mm[2]))
     }
     fn uncut_ball(&self, point: Vec3, radius: f64, t: f64) -> Result<bool, String> {
-        if self.motion.kind.is_rapid() || t == 0. {
+        if !self.motion.kind.cuts() || t == 0. {
             return Ok(true);
         }
         let bounds = self.bounds([0., t])?;
@@ -534,7 +549,75 @@ impl<C: CancelSignal> Search<'_, C> {
         let violation = witness.is_some();
         let (witness, point) = witness.map_or((None, None), |(w, p)| (Some(w), Some(p)));
         ContactFinding {finding:Finding {status:if violation {Status::Violation}else{Status::Uncertain},kind:FindingKind::StockContact,object_id:"stock".into(),part:Some(part.kind),holder_section:part.holder,fraction_interval:task.span,witness,
-            detail:if violation {"Strict lower-solid stock/profile overlap; witness neighborhood is outside all earlier cutting"} else {"Stock contact/evolution unresolved within configured bounds, resolution or work cap"}.into()},cell_range:task.rect,solid_lower_mm:h[0],possible_upper_mm:h[1],contact_point_mm:point}
+            detail:if violation {"Strict lower-solid stock/profile overlap; witness neighborhood is outside all earlier cutting"} else {"Stock contact/evolution unresolved within configured bounds, resolution or work cap"}.into()},cell_range:task.rect,solid_lower_mm:h[0],possible_upper_mm:h[1],contact_point_mm:point,
+            obstruction_top_mm:None,lowest_tip_z_mm:None,max_clear_radius_mm:None}
+    }
+    /// What a part must clear over the whole move: the highest stock above
+    /// its bottom within its radius, and the largest radius clearing all
+    /// stock above its bottom. Reads cells within the part's reach of the
+    /// move's bounds, charged to the cell-read budget.
+    fn obstruction(&mut self, part: &Part, f: &mut ContactFinding) -> Result<(), String> {
+        let bounds = self.bounds([0., 1.])?;
+        let lowest = bounds.min[2];
+        f.lowest_tip_z_mm = Some(lowest);
+        let reach = part.radius.at(part.min).max(part.radius.at(part.max));
+        let spec = self.stock.spec();
+        let [dx, dy] = self.stock.cell_widths_mm();
+        let [nx, ny] = self.stock.dimensions();
+        let half = dx.hypot(dy) / 2.;
+        let pad = reach + 2. * self.guard + half;
+        let index = |v: f64, k: usize, n: usize, w: f64| {
+            (((v - spec.min_mm[k]) / w).floor().max(0.) as usize).min(n)
+        };
+        let x0 = index(bounds.min[0] - pad, 0, nx, dx);
+        let y0 = index(bounds.min[1] - pad, 1, ny, dy);
+        let x1 = (index(bounds.max[0] + pad, 0, nx, dx) + 1).min(nx);
+        let y1 = (index(bounds.max[1] + pad, 1, ny, dy) + 1).min(ny);
+        if x0 >= x1 || y0 >= y1 {
+            return Ok(());
+        }
+        let count = ((x1 - x0) * (y1 - y0)) as u64;
+        if count > self.options.max_cell_reads - self.stats.cell_reads {
+            return Ok(());
+        }
+        self.stats.cell_reads += count;
+        let mut top = None::<f64>;
+        let mut clear = f64::INFINITY;
+        for y in y0..y1 {
+            if self.cancel.is_cancelled() {
+                return Err("stock contact cancelled; no report published".into());
+            }
+            for x in x0..x1 {
+                let upper = self.stock.cells()[y * nx + x].upper_mm;
+                let height = upper - lowest;
+                if upper <= spec.min_mm[2] || height <= part.min + self.guard {
+                    continue;
+                }
+                let c = [
+                    spec.min_mm[0] + (x as f64 + 0.5) * dx,
+                    spec.min_mm[1] + (y as f64 + 0.5) * dy,
+                ];
+                // A lower bound on the distance from any point of the cell
+                // to the axis anywhere on the move.
+                let distance = self.axis_distance([0., 1.], c)? - half - self.guard;
+                clear = clear.min(distance);
+                if distance
+                    < part
+                        .radius
+                        .at(part.min)
+                        .max(part.radius.at(height.min(part.max)))
+                {
+                    top = Some(top.map_or(upper, |t| t.max(upper)));
+                }
+            }
+        }
+        f.obstruction_top_mm = top;
+        // Cells beyond the scanned rectangle are farther than the part's
+        // reach, so the minimum is global once it is within that reach.
+        if clear < reach {
+            f.max_clear_radius_mm = Some(clear.max(0.));
+        }
+        Ok(())
     }
     fn part(&mut self, part: &Part) -> Result<Option<ContactFinding>, String> {
         let root = &self.index.nodes[0];
@@ -597,7 +680,7 @@ impl<C: CancelSignal> Search<'_, C> {
                 self.stats.pruned_nodes += 1;
                 continue;
             }
-            if !self.motion.kind.is_rapid() {
+            if self.motion.kind.cuts() {
                 let upper = self.earlier_upper(rect, h[1], task.span[0])?;
                 if bounds.min[2] + part.min > upper + 2. * self.guard {
                     self.stats.pruned_nodes += 1;
@@ -690,6 +773,23 @@ pub fn check(
     check_digested(stock, tool, motion, options, &digests, cancel)
 }
 
+/// Whether stock contact checks the cutter on a move of this kind: on
+/// rapids and on probing moves where no contact is expected. A cutting
+/// move's cutter is meant to touch stock, and so is a probe's stylus (or a
+/// measured cutter on a tool setter) where it expects its contact.
+pub(crate) fn checks_cutter(kind: MoveKind) -> bool {
+    kind.is_rapid() || (kind.is_probe() && !kind.expects_contact())
+}
+/// The report scope of a move kind.
+pub(crate) fn scope(kind: MoveKind) -> &'static str {
+    match kind {
+        MoveKind::Rapid => "rapid_assembly",
+        MoveKind::Shift => "oriented_shift",
+        MoveKind::ProbePosition | MoveKind::ProbeMeasure => "probe_assembly",
+        MoveKind::ProbeTouch | MoveKind::ProbeReturn => "probe_contact_zone",
+        _ => "fed_noncutting",
+    }
+}
 /// Canonical identities bound into a report; a stream computes the options and
 /// tool identities once per run and the motion identity once per motion.
 pub(crate) struct Digests {
@@ -721,7 +821,7 @@ pub(crate) fn check_digested(
     let parts = verification::parts(tool)?;
     let selected = parts
         .iter()
-        .filter(|p| motion.kind.is_rapid() || p.kind != ToolPart::Cutter)
+        .filter(|p| p.kind != ToolPart::Cutter || checks_cutter(motion.kind))
         .collect::<Vec<_>>();
     let mut s = Search {
         stock,
@@ -787,7 +887,8 @@ pub(crate) fn check_digested(
                 continue;
             }
         }
-        if let Some(f) = s.part(part)? {
+        if let Some(mut f) = s.part(part)? {
+            s.obstruction(part, &mut f)?;
             findings.push(f);
         }
         s.stats.parts_examined += 1;
@@ -811,7 +912,7 @@ pub(crate) fn check_digested(
     };
     Ok(Report {algorithm:"continuous_stock_contact_v1".into(),stock:stock.spec().clone(),pre_generation:stock.generation(),options_sha256:digests.options.clone(),
         tool_sha256:digests.tool.clone(),motion_sha256:digests.motion.clone(),motion_id:motion.id,operation:motion.operation.clone(),tool:motion.tool.clone(),
-        scope:match motion.kind {MoveKind::Rapid=>"rapid_assembly",MoveKind::Shift=>"oriented_shift",_=>"fed_noncutting"}.into(),status,fully_examined:s.stats.unexamined_parts==0&&!s.stats.work_exhausted,
+        scope:scope(motion.kind).into(),status,fully_examined:s.stats.unexamined_parts==0&&!s.stats.work_exhausted,
         findings,stats:s.stats,numerical_policy:"Validated whole-cell stock premise; continuous interval/profile enclosures and prior full-footprint cutting certificates. Strict lower-solid witnesses require earlier-cut separation. Binary64 engineering guards, not interval certification or machine qualification.".into()})
 }
 
