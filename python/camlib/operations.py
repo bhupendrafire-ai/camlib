@@ -771,27 +771,34 @@ class DeburrLevel:
 
 @dataclass(frozen=True)
 class Deburr:
-    """Break the horizontal edges of a finished part with a chamfer mill.
+    """Break the horizontal edges of a finished part with a chamfer mill, a
+    ball-end mill or a bull-nose mill.
 
-    Each level's face boundaries are broken ``width_mm`` wide on the face
-    (and the chamfer depth down a vertical wall), with the tool's cone. The
-    rest of the part (``surface``, the finished part as a ``SurfaceMesh``) is
-    proven untouched for the whole tool assembly; a stretch that cannot be
-    proven is not cut and is reported (``unreachable_length_mm``; concave
-    stretches, where a wall rises from the face, in ``concave_length_mm``).
-    The stock must already be machined to the part.
+    Each level's face boundaries are broken ``width_mm`` wide on the face. A
+    chamfer mill's cone leaves a chamfer (the chamfer depth down a vertical
+    wall); a ball-end or bull-nose mill leaves a concave arc of its corner
+    radius with equal legs ``width_mm`` on the face and down a vertical wall.
+    With a ball-end or bull-nose mill the size can be given instead as
+    ``break_radius_mm``, the fillet the break must stay inside (pass
+    ``width_mm=None``). The rest of the part (``surface``, the finished part
+    as a ``SurfaceMesh``) is proven untouched for the whole tool assembly; a
+    stretch that cannot be proven is not cut and is reported
+    (``unreachable_length_mm``; concave stretches, where a wall rises from the
+    face, in ``concave_length_mm``). The stock must already be machined to
+    the part.
     """
 
     id: str
     tool: object
     surface: object
     levels: tuple
-    width_mm: float
+    width_mm: float | None
     clearance_z_mm: float
     tip_clearance_mm: float = 0.5
     cutting_sense: str = "climb"
     boundary_tolerance_mm: float = 0.01
     tolerance_mm: float = 1e-5
+    break_radius_mm: float | None = None
     feed_mm_min: float = field(kw_only=True)
     plunge_mm_min: float = field(kw_only=True)
     spindle_rpm: float = field(kw_only=True)
@@ -813,7 +820,7 @@ class Deburr:
             surface=self.surface.to_dict() if hasattr(self.surface, "to_dict") else self.surface,
             levels=[level.to_dict() if hasattr(level, "to_dict") else level for level in self.levels],
         )
-        for key in ("retract_z_mm", "feed_z_mm"):
+        for key in ("width_mm", "break_radius_mm", "retract_z_mm", "feed_z_mm"):
             if result[key] is None:
                 result.pop(key)
         return result

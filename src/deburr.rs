@@ -1,12 +1,37 @@
-//! Deburr: break the horizontal edges of a finished part with a chamfer mill.
+//! Deburr: break the horizontal edges of a finished part with a chamfer mill,
+//! a ball-end mill or a bull-nose mill.
 //!
 //! Each level is the union of the part's upward-facing planar faces at one
-//! height z_e. A vertical-axis cone swept along a horizontal path at tip
+//! height z_e. A vertical-axis tool swept along a horizontal path at tip
 //! height z_t removes exactly the points within horizontal distance
-//! rho(z) = r_tip + (z - z_t) tan(half angle) of the path, so with the axis on
-//! the outward offset of the face boundary by d (tip radius + tip clearance)
-//! the break is the cone's flank whatever the edge's curvature: `width_mm` on
-//! the face, the chamfer depth down a vertical wall.
+//! rho(z - z_t) of the path, rho being the tool's radius at that height above
+//! its tip. With the axis on the outward offset of the face boundary by d, a
+//! face point at distance s inside the boundary is at least d + s from the
+//! path (exactly that on a convex stretch), so the break is the tool's
+//! profile seen in the plane of the edge normal, whatever the edge's
+//! curvature:
+//!
+//! - Chamfer mill: d = tip radius + tip clearance, and the break is the
+//!   cone's flank: `width_mm` on the face, the chamfer depth down a vertical
+//!   wall.
+//! - Ball-end or bull-nose mill (corner radius rc, flat radius a = r - rc,
+//!   a = 0 for a ball): in that plane the corner is a circle of radius rc
+//!   whose centre sits c outward of the wall and c above the face (on the
+//!   edge's outward bisector), d = a + c and z_t = z_e + c - rc. With c >= 0
+//!   the flat bottom stays outside the wall and the body above the corner
+//!   above the face, so the break is the circle's arc: a concave (cove)
+//!   break with equal legs L = sqrt(rc^2 - c^2) - c on the face and down a
+//!   vertical wall. The size is given either as the leg (`width_mm`:
+//!   c = (sqrt(2 rc^2 - L^2) - L) / 2, L <= rc) or as the radius of the fillet
+//!   the break must stay inside (`break_radius_mm` rho: the corner circle
+//!   tangent to the fillet's, |C - F| = rc + rho with F = (-rho, -rho), so
+//!   c = rc / sqrt(2) - rho (1 - 1 / sqrt(2)), rho <= rc (1 + sqrt(2))). The
+//!   report gives the legs and the smallest fillet that contains the break.
+//!   Equal legs (the centre on the bisector) is established practice: CAM
+//!   deburring with a ball's tip breaks edges symmetrically unless an
+//!   asymmetric edge is asked for, and keeps the contact off the tip, where
+//!   the cutting speed is zero (Mastercam Deburr, "Asymmetric edge-breaking
+//!   option", What's New in Mastercam 2026; `tip_clearance_mm` here).
 //!
 //! Everything else stays untouched, by an exact proof against the part mesh
 //! (the whole tool assembly: cone, neck, shank and holder sections, see
@@ -50,10 +75,21 @@ pub struct DeburrOperation<G = SurfaceMesh> {
     /// The finished part (what must not be cut beyond the breaks).
     pub surface: G,
     pub levels: Vec<DeburrLevel>,
-    /// Break width on the face (horizontal leg).
-    pub width_mm: f64,
-    /// How far out along the cone from its tip the break's lower edge is
-    /// cut (radially), so the flank cuts, not the point.
+    /// Break width on the face (horizontal leg). With a ball-end or
+    /// bull-nose mill, both legs (face and vertical wall). Give this or
+    /// `break_radius_mm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width_mm: Option<f64>,
+    /// Ball-end or bull-nose mill only: the radius of the fillet the break
+    /// must stay inside (the largest such break is cut). Give this or
+    /// `width_mm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub break_radius_mm: Option<f64>,
+    /// How far out from the end of the tool's tip (a chamfer mill's tip
+    /// flat, a bull-nose mill's flat, a ball's centre line) the break's
+    /// lower edge is cut (radially), so the flank or corner cuts, not the
+    /// point. A chamfer mill is placed by it; for a ball-end or bull-nose
+    /// mill it is the least distance the break may reach.
     pub tip_clearance_mm: f64,
     pub clearance_z_mm: f64,
     /// "climb" (default) or "conventional".
@@ -88,6 +124,7 @@ impl<G> DeburrOperation<G> {
             tool: self.tool,
             levels: self.levels,
             width_mm: self.width_mm,
+            break_radius_mm: self.break_radius_mm,
             tip_clearance_mm: self.tip_clearance_mm,
             clearance_z_mm: self.clearance_z_mm,
             cutting_sense: self.cutting_sense,
@@ -123,9 +160,23 @@ pub struct DeburrReport {
     pub levels: usize,
     pub loops: usize,
     pub runs: usize,
-    pub requested_width_mm: f64,
+    pub requested_width_mm: Option<f64>,
+    pub requested_break_radius_mm: Option<f64>,
+    /// "chamfer" (chamfer mill) or "arc" (ball-end or bull-nose mill: a
+    /// concave arc of the tool's corner radius).
+    pub break_profile: &'static str,
+    /// Break width on the face (horizontal leg).
+    pub face_width_mm: f64,
     /// Break depth down a vertical wall below each level.
     pub wall_depth_mm: f64,
+    /// The arc break's radius (the tool's corner radius).
+    pub break_arc_radius_mm: Option<f64>,
+    /// The smallest fillet radius whose fillet contains the arc break on an
+    /// edge between the face and a vertical wall (the requested
+    /// `break_radius_mm` when one was given).
+    pub fillet_radius_mm: Option<f64>,
+    /// The tool axis's distance outward from the face boundary.
+    pub axis_offset_mm: f64,
     pub cut_length_mm: f64,
     /// Convex edges not broken (not proven clear of the rest of the part).
     pub unreachable_length_mm: f64,
@@ -296,6 +347,7 @@ impl Prover {
             r0: 1e-6,
             r1: 1e-6,
             rise: 0.,
+            arc: 0.,
         }];
         self.part.max_sections(
             [p[0], p[1]],
@@ -312,6 +364,7 @@ impl Prover {
                 r0: s.r0 + self.grow + extra,
                 r1: s.r1 + self.grow + extra,
                 rise: s.rise,
+                arc: s.arc,
             })
             .collect()
     }
@@ -357,6 +410,140 @@ impl Prover {
     }
 }
 
+/// Where the tool runs for a break, and the break it makes on an edge
+/// between the face and a vertical wall below it.
+struct BreakGeometry {
+    /// Axis distance outward from the face boundary.
+    offset: f64,
+    /// The face's height above the tool tip.
+    top: f64,
+    /// Leg on the face.
+    face: f64,
+    /// Leg down a vertical wall.
+    wall: f64,
+    /// The corner radius of an arc break (None: a chamfer).
+    arc: Option<f64>,
+    /// The smallest fillet containing an arc break.
+    fillet: Option<f64>,
+}
+
+impl BreakGeometry {
+    fn of(op: &DeburrOperation, tool: &crate::tool::PreparedAssembly) -> Result<Self, String> {
+        let cutter = tool.cutter().definition();
+        let size = |v: Option<f64>, name: &str| match v {
+            Some(v) if !(v.is_finite() && v > 0.) => {
+                Err(format!("deburr {name} {v} must be finite and positive"))
+            }
+            v => Ok(v),
+        };
+        let (width, radius) = (
+            size(op.width_mm, "width_mm")?,
+            size(op.break_radius_mm, "break_radius_mm")?,
+        );
+        if !(op.tip_clearance_mm.is_finite() && op.tip_clearance_mm > 0.) {
+            return Err(format!(
+                "deburr tip_clearance_mm {} must be finite and positive",
+                op.tip_clearance_mm
+            ));
+        }
+        match cutter.shape {
+            CutterShape::Chamfer {
+                tip_diameter_mm, ..
+            } => {
+                let (Some(width), None) = (width, radius) else {
+                    return Err(
+                        "deburr with a chamfer mill needs width_mm (the break width on the face); break_radius_mm applies to ball-end and bull-nose mills"
+                            .into(),
+                    );
+                };
+                let d = tip_diameter_mm / 2. + op.tip_clearance_mm;
+                let reference = tool
+                    .cutter()
+                    .tip_height_at_radius(d)
+                    .ok_or("deburr tip clearance exceeds the cone radius")?;
+                let top = tool
+                    .cutter()
+                    .tip_height_at_radius(d + width)
+                    .ok_or("deburr width exceeds the chamfer mill's cone radius")?;
+                Ok(Self {
+                    offset: d,
+                    top,
+                    face: width,
+                    wall: top - reference,
+                    arc: None,
+                    fillet: None,
+                })
+            }
+            CutterShape::Ball | CutterShape::Bull { .. } => {
+                let r = cutter.diameter_mm / 2.;
+                let rc = match cutter.shape {
+                    CutterShape::Bull { corner_radius_mm } => corner_radius_mm,
+                    _ => r,
+                };
+                let half = std::f64::consts::FRAC_1_SQRT_2;
+                // The corner circle's centre: c outward of the wall, c above
+                // the face (see the module notes).
+                let c = match (width, radius) {
+                    (Some(leg), None) => {
+                        if leg > rc {
+                            return Err(format!(
+                                "deburr width_mm {leg} exceeds the tool's corner radius {rc}: with equal legs a ball-end or bull-nose mill breaks at most its corner radius"
+                            ));
+                        }
+                        ((2. * rc * rc - leg * leg).sqrt() - leg) / 2.
+                    }
+                    (None, Some(rho)) => {
+                        if rho > rc * (1. + std::f64::consts::SQRT_2) {
+                            return Err(format!(
+                                "deburr break_radius_mm {rho} exceeds {:.4} (the tool's corner radius {rc} times 1 + sqrt 2): the break would need the corner's centre inside the part",
+                                rc * (1. + std::f64::consts::SQRT_2)
+                            ));
+                        }
+                        rc * half - rho * (1. - half)
+                    }
+                    _ => {
+                        return Err(
+                            "deburr with a ball-end or bull-nose mill needs exactly one of width_mm (equal legs) and break_radius_mm (the fillet the break stays inside)"
+                                .into(),
+                        );
+                    }
+                };
+                if c < op.tip_clearance_mm {
+                    return Err(format!(
+                        "deburr: this break's lower edge is cut {c:.4} mm out from the end of the tool's flat, inside tip_clearance_mm {}: use a smaller break, a larger corner radius or a smaller tip clearance",
+                        op.tip_clearance_mm
+                    ));
+                }
+                let leg = (rc * rc - c * c).sqrt() - c;
+                // The smallest fillet (centre F = (-rho, -rho)) clear of the
+                // corner circle (centre (c, c), radius rc): |C - F| >= rc + rho,
+                // and at least each leg.
+                let b = 2. * c - rc;
+                let disk = -b + (b * b - (2. * c * c - rc * rc)).sqrt();
+                let top = rc - c;
+                if top > cutter.cutting_length_mm {
+                    return Err(format!(
+                        "deburr: the break reaches {top:.4} mm above the tool tip, beyond the cutting length {}",
+                        cutter.cutting_length_mm
+                    ));
+                }
+                Ok(Self {
+                    offset: r - rc + c,
+                    top,
+                    face: leg,
+                    wall: leg,
+                    arc: Some(rc),
+                    fillet: Some(disk.max(leg)),
+                })
+            }
+            _ => Err(
+                "deburr needs a chamfer mill (camlib.tools.ChamferMill), a ball-end mill (BallEndMill) or a bull-nose mill (BullEndMill)"
+                    .into(),
+            ),
+        }
+    }
+}
+
 impl DeburrPlan {
     pub fn prepare(
         op: DeburrOperation,
@@ -372,23 +559,15 @@ impl DeburrPlan {
         spec.grid()?;
         let actual = assembly.prepare()?;
         let cutter = actual.cutter().definition();
-        let CutterShape::Chamfer {
-            tip_diameter_mm, ..
-        } = cutter.shape
-        else {
-            return Err("deburr needs a conical chamfer mill (camlib.tools.ChamferMill)".into());
+        let tip_radius = match cutter.shape {
+            CutterShape::Chamfer {
+                tip_diameter_mm, ..
+            } => tip_diameter_mm / 2.,
+            CutterShape::Bull { corner_radius_mm } => cutter.diameter_mm / 2. - corner_radius_mm,
+            _ => 0.,
         };
-        let tip_radius = tip_diameter_mm / 2.;
-        let d = tip_radius + op.tip_clearance_mm;
-        let reference = actual
-            .cutter()
-            .tip_height_at_radius(d)
-            .ok_or("deburr tip clearance exceeds the cone radius")?;
-        let top = actual
-            .cutter()
-            .tip_height_at_radius(d + op.width_mm)
-            .ok_or("deburr width exceeds the chamfer mill's cone radius")?;
-        let depth = top - reference;
+        let geometry = BreakGeometry::of(&op, &actual)?;
+        let (d, top, depth) = (geometry.offset, geometry.top, geometry.wall);
         let guard = 16. * op.tolerance_mm;
         let e = op.surface.surface_error_mm;
         let surface_top = op
@@ -414,7 +593,7 @@ impl DeburrPlan {
                 ),
                 (
                     [
-                        op.width_mm,
+                        geometry.face,
                         op.tip_clearance_mm,
                         op.clearance_z_mm,
                         op.feed_mm_min,
@@ -441,8 +620,11 @@ impl DeburrPlan {
                     ),
                 ),
                 (
-                    op.width_mm > op.boundary_tolerance_mm + guard,
-                    format!("width_mm {} must exceed boundary_tolerance_mm", op.width_mm),
+                    geometry.face > op.boundary_tolerance_mm + guard,
+                    format!(
+                        "the break width on the face {} must exceed boundary_tolerance_mm",
+                        geometry.face
+                    ),
                 ),
                 (
                     op.tip_clearance_mm > guard,
@@ -538,14 +720,24 @@ impl DeburrPlan {
             loops: 0,
             runs: 0,
             requested_width_mm: op.width_mm,
+            requested_break_radius_mm: op.break_radius_mm,
+            break_profile: if geometry.arc.is_some() {
+                "arc"
+            } else {
+                "chamfer"
+            },
+            face_width_mm: geometry.face,
             wall_depth_mm: depth,
+            break_arc_radius_mm: geometry.arc,
+            fillet_radius_mm: geometry.fillet,
+            axis_offset_mm: d,
             cut_length_mm: 0.,
             unreachable_length_mm: 0.,
             concave_length_mm: 0.,
             skipped_length_mm: 0.,
             skipped: vec![],
             obstacle_triangles: 0,
-            clearance_proof: "exact section contact (cone, neck, shank, holder) against the part above the level, below the break and any non-face/non-wall geometry in the break band; sections grown by the surface error, two stock cell diagonals and each arc chord's sagitta",
+            clearance_proof: "exact section contact (cone or corner arc, neck, shank, holder) against the part above the level, below the break and any non-face/non-wall geometry in the break band; sections grown by the surface error, two stock cell diagonals and each arc chord's sagitta",
         };
         let mut runs = vec![];
         let min_piece = (op.boundary_tolerance_mm).max(guard);
@@ -586,7 +778,13 @@ impl DeburrPlan {
             // padded by the cutter radius and half a cell diagonal. Two cell
             // diagonals keep the tool out of that cell.
             let grow = e + 2. * spec.cell_size_mm * std::f64::consts::SQRT_2;
-            let (low, high) = (z_e - depth - grow * rise - band, z_e + band);
+            // The wall is cut down to where the grown tool's end reaches
+            // the wall's distance d from the axis.
+            let wall_bottom = match geometry.arc {
+                None => z_e - depth - grow * rise,
+                Some(_) => tip + sections[0].profile((d - grow).max(0.)).unwrap_or(0.),
+            };
+            let (low, high) = (wall_bottom - band, z_e + band);
             let on_boundary = |p: Vec3| {
                 boundary_strokes
                     .iter()

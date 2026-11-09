@@ -464,11 +464,12 @@ in the stock first.
 
 ## Deburr: `Deburr`
 
-Required: `surface` (the finished part as a `SurfaceMesh`), `levels`,
-`width_mm`, `clearance_z_mm`, and a chamfer mill (`ChamferMill`). Breaks the
-horizontal edges of a finished part: every boundary of every upward-facing
-planar face. `camlib.cadquery.deburr_levels(solid)` makes the levels (the
-faces at each height, exported exactly):
+Required: `surface` (the finished part as a `SurfaceMesh`), `levels`, the
+break size, `clearance_z_mm`, and a chamfer mill (`ChamferMill`), ball-end
+mill (`BallEndMill`) or bull-nose mill (`BullEndMill`). Breaks the horizontal
+edges of a finished part: every boundary of every upward-facing planar face.
+`camlib.cadquery.deburr_levels(solid)` makes the levels (the faces at each
+height, exported exactly):
 
 ```python
 from camlib import Deburr
@@ -479,15 +480,44 @@ op = Deburr("deburr", c90, export_surface_mesh(part), deburr_levels(part), 0.5, 
             tool_number=2, length_register=2, coolant="flood")
 ```
 
-- The tool axis runs on the outward offset of each face boundary, so the cone
-  breaks the edge `width_mm` wide on the face and the chamfer depth down a
-  vertical wall (`wall_depth_mm` in the report: equal for 90 degrees),
-  whatever the edge's curvature. `tip_clearance_mm` (0.5) keeps the point out
-  of the cut.
-- Nothing else is touched, by an exact proof for the whole tool (cone,
-  neck, shank and holder) against the part above the face, below the break
-  and anything in the break's height band that is not the face or a vertical
-  wall under its boundary. The proof allows for the mesh's `surface_error_mm`
+- The tool axis runs on the outward offset of each face boundary, so the
+  break is the tool's own profile seen across the edge, whatever the edge's
+  curvature. A face point s inside the boundary is at least the offset plus
+  s from the path (exactly that on a convex stretch).
+- **Chamfer mill:** the cone breaks the edge `width_mm` wide on the face and
+  the chamfer depth down a vertical wall (`wall_depth_mm` in the report:
+  equal for 90 degrees). The axis is `tip_clearance_mm` (0.5) beyond the
+  tip's flat, which keeps the point out of the cut.
+- **Ball-end or bull-nose mill:** the break is a concave arc of the tool's
+  corner radius rc (`break_profile` "arc"). Across the edge, the corner's
+  circle has its centre c outward of the wall and c above the face, on the
+  edge's outward bisector. The tool tip is then rc - c below the face and
+  the axis r - rc + c outward of the boundary (r the tool radius). Because
+  c >= 0, only the corner arc reaches the part: the flat bottom stays
+  outside the wall and the body above the corner stays above the face. Give
+  the size in one of two ways:
+  - `width_mm` L, the leg: equal legs L on the face and down a vertical
+    wall, c = (sqrt(2 rc^2 - L^2) - L) / 2. L is at most rc.
+  - `break_radius_mm` rho (with `width_mm=None`): the largest break that
+    stays inside a fillet of radius rho. The corner circle touches the
+    fillet's circle, c = rc / sqrt(2) - rho (1 - 1 / sqrt(2)), and rho is at
+    most rc (1 + sqrt(2)). The legs are then L = sqrt(rc^2 - c^2) - c, less
+    than rho.
+
+  The report gives the legs (`face_width_mm`, `wall_depth_mm`), the axis
+  offset (`axis_offset_mm`) and `fillet_radius_mm`: the smallest fillet
+  radius whose fillet contains the break. Checking the stock against the
+  part filleted with that radius shows no gouge. The break's lower edge
+  must be at least `tip_clearance_mm` out from the end of the tool's flat
+  (c >= `tip_clearance_mm`, the ball's centre line for a ball), so the
+  point does not cut. A larger break is refused.
+- Nothing else is touched, by an exact proof for the whole tool (cone or
+  corner arc, neck, shank and holder) against the part above the face,
+  below the break and anything in the break's height band that is not the
+  face or a vertical wall under its boundary. The arc's contact is a
+  concave maximisation like the cone's. It is bounded without a slope
+  bound, because a full quarter arc is vertical at its rim, and tested
+  against dense sampling. The proof allows for the mesh's `surface_error_mm`
   and two stock cell diagonals.
 - A stretch that cannot be proven is not cut. The tool retracts and
   re-enters where cutting can be proven again (entries and exits are proven
@@ -495,9 +525,10 @@ op = Deburr("deburr", c90, export_surface_mesh(part), deburr_levels(part), 0.5, 
   wall rises from the face, in `concave_length_mm` (nothing to break); convex
   edges the tool cannot reach in `unreachable_length_mm`.
 - The stock must already be machined to the part. A non-center-cutting
-  chamfer mill enters only where the stock is proven clear under its tip.
-- Not yet: ball-end deburring, and edges that are not horizontal (sloped
-  or vertical edges need tilting the tool, see the multi-axis issues).
+  tool enters only where the stock is proven clear under its tip.
+- Not yet: edges next to drafted or filleted walls (#93), and edges that are
+  not horizontal (#94; sloped or vertical edges, some needing a tilted tool,
+  see the multi-axis issues).
 
 ## Parallel finishing: `Parallel`
 

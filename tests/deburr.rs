@@ -1,5 +1,5 @@
-//! Deburr (#11): horizontal edges broken with a chamfer mill, and nothing else
-//! touched. The checks here are independent of the planner: a dense
+//! Deburr (#11, #92): horizontal edges broken with a chamfer, ball-end or
+//! bull-nose mill, and nothing else touched. The checks here are independent of the planner: a dense
 //! penetration oracle built from the tool assembly's own radius profile and
 //! sampled points of the part, and the stock's actual heights.
 use camlib::{
@@ -40,6 +40,21 @@ fn chamfer_mill() -> ToolAssembly {
             radius_max_mm: 16.,
         }],
     }
+}
+
+/// A ball-end (corner radius = radius) or bull-nose mill of diameter 4.
+fn round_end(corner: Option<f64>) -> ToolAssembly {
+    let mut t = chamfer_mill();
+    t.id = "b4".into();
+    t.cutter.id = "b4".into();
+    t.cutter.shape = match corner {
+        None => CutterShape::Ball,
+        Some(corner_radius_mm) => CutterShape::Bull { corner_radius_mm },
+    };
+    t.cutter.diameter_mm = 4.;
+    t.cutter.shank_diameter_mm = 4.;
+    t.cutter.cutting_length_mm = 8.;
+    t
 }
 
 fn end_mill() -> ToolAssembly {
@@ -120,7 +135,8 @@ fn operation(surface: SurfaceMesh, levels: Vec<DeburrLevel>) -> DeburrOperation 
         tool: "c90".into(),
         surface,
         levels,
-        width_mm: 0.5,
+        width_mm: Some(0.5),
+        break_radius_mm: None,
         tip_clearance_mm: 0.3,
         clearance_z_mm: 70.,
         cutting_sense: "climb".into(),
@@ -475,4 +491,191 @@ fn edge_against_a_rising_wall_is_skipped_and_reported() {
         depth,
         tip,
     );
+}
+
+/// Runs a deburr plan to the end on `stock`, returning its motions.
+fn run(plan: &mut DeburrPlan, tool: &ToolAssembly, stock: &mut Stock) -> Vec<Motion> {
+    let cancel = AtomicBool::new(false);
+    let mut motions = vec![];
+    while let Some(m) = plan.next_motion_with_stock(stock, &cancel).unwrap() {
+        commit(stock, tool, &m);
+        motions.push(m);
+    }
+    plan.finish_report(&cancel).unwrap();
+    motions
+}
+
+fn machined_block(spec: &StockSpec) -> Stock {
+    let mut stock = Stock::new(spec.clone()).unwrap();
+    machine(
+        &mut stock,
+        [2., 2., 12.],
+        &[
+            [2., 2., 0.],
+            [38., 2., 0.],
+            [38., 28., 0.],
+            [2., 28., 0.],
+            [2., 2., 0.],
+        ],
+    );
+    stock
+}
+
+#[test]
+fn ball_and_bull_nose_break_block_edges_as_a_cove_and_nothing_else() {
+    let part = cuboid([5., 5., 0.], [35., 25., 10.]);
+    let spec = spec(10.);
+    let cancel = AtomicBool::new(false);
+    // (corner, leg): a 4 mm ball (rc 2), a 4 mm bull-nose with a 1.5 corner.
+    for (corner, leg) in [(None, 0.5), (Some(1.5), 0.6)] {
+        let tool = round_end(corner);
+        let rc = corner.unwrap_or(2.);
+        let mut op = operation(
+            mesh(part.clone()),
+            vec![DeburrLevel {
+                regions: vec![rect([5., 5.], [35., 25.])],
+                z_mm: 10.,
+            }],
+        );
+        op.tool = tool.id.clone();
+        op.width_mm = Some(leg);
+        let mut plan = DeburrPlan::prepare(op, &tool, &spec, [0., 0., 70.], 1, &cancel).unwrap();
+        let report = plan.report();
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.runs, 1);
+        assert_eq!(report.break_profile, "arc");
+        assert_eq!(report.break_arc_radius_mm, Some(rc));
+        // Equal legs: the corner circle's centre c out and c up.
+        let c = ((2. * rc * rc - leg * leg).sqrt() - leg) / 2.;
+        assert!((report.face_width_mm - leg).abs() < 1e-12);
+        assert!((report.wall_depth_mm - leg).abs() < 1e-12);
+        assert!(((rc * rc - c * c).sqrt() - c - leg).abs() < 1e-12);
+        assert!((report.axis_offset_mm - (2. - rc + c)).abs() < 1e-12);
+        let mut stock = machined_block(&spec);
+        let motions = run(&mut plan, &tool, &mut stock);
+        let tip = motions
+            .iter()
+            .find(|m| m.kind == MoveKind::Cut)
+            .map(|m| m.curve.start()[2])
+            .unwrap();
+        assert!((tip - (10. + c - rc)).abs() < 1e-9, "tip {tip}");
+        // Independent: only the break is cut (dense part samples against
+        // the assembly's own radius profile).
+        assert_only_breaks(
+            &tool,
+            &motions,
+            &samples(&part, 0.25),
+            ([5., 5.], [35., 25.]),
+            10.,
+            leg,
+            leg,
+            tip,
+        );
+        // Stock against the analytic cove: at inward distance x the
+        // surface is z_e + c - sqrt(rc^2 - (x + c)^2) (the corner circle);
+        // untouched beyond the leg.
+        let guard = 2. * spec.cell_size_mm;
+        let (mut broken, mut fillet_safe) = (0, true);
+        for i in 0..stock.cells().len() {
+            let q = stock.cell_center(i).unwrap();
+            if !(5. < q[0] && q[0] < 35. && 5. < q[1] && q[1] < 25.) {
+                continue;
+            }
+            let x = (q[0] - 5.).min(35. - q[0]).min(q[1] - 5.).min(25. - q[1]);
+            let h = stock.cells()[i];
+            if x > leg + guard {
+                assert_eq!(h.lower_mm, 10., "untouched at {q:?}");
+            } else if x < leg - guard {
+                let cove = |x: f64| 10. + c - (rc * rc - (x + c) * (x + c)).max(0.).sqrt();
+                // Cut at least to the cove at the cell's far side, and not
+                // below it at the near side.
+                assert!(h.upper_mm <= cove(x + 0.08) + 1e-6, "{q:?}: {h:?}");
+                // Cells on the wall keep the roughing pass's conservative
+                // lower bound (it touched them): only inner cells say how
+                // deep the break went.
+                if x > spec.cell_size_mm {
+                    assert!(h.lower_mm >= cove(x - 0.08) - 1e-6, "{q:?}: {h:?}");
+                }
+                broken += 1;
+                // The cove stays outside the reported fillet (rho): the
+                // fillet surface at x is 10 - rho + sqrt(rho^2 - (rho - x)^2).
+                let rho = report_fillet(&plan);
+                let fillet = 10. - rho + (rho * rho - (rho - x).powi(2)).max(0.).sqrt();
+                fillet_safe &= cove(x) >= fillet - 1e-9;
+            }
+        }
+        assert!(broken > 100, "{broken}");
+        assert!(fillet_safe);
+    }
+}
+
+fn report_fillet(plan: &DeburrPlan) -> f64 {
+    plan.report().fillet_radius_mm.unwrap()
+}
+
+#[test]
+fn break_given_as_a_fillet_radius_stays_inside_that_fillet() {
+    let part = cuboid([5., 5., 0.], [35., 25., 10.]);
+    let spec = spec(10.);
+    let cancel = AtomicBool::new(false);
+    let tool = round_end(None);
+    let mut op = operation(
+        mesh(part.clone()),
+        vec![DeburrLevel {
+            regions: vec![rect([5., 5.], [35., 25.])],
+            z_mm: 10.,
+        }],
+    );
+    op.tool = tool.id.clone();
+    op.width_mm = None;
+    op.break_radius_mm = Some(0.8);
+    let plan = DeburrPlan::prepare(op.clone(), &tool, &spec, [0., 0., 70.], 1, &cancel).unwrap();
+    let report = plan.report();
+    assert!(report.skipped.is_empty());
+    let (rc, rho) = (2f64, 0.8f64);
+    let c = rc / 2f64.sqrt() - rho * (1. - 1. / 2f64.sqrt());
+    // The corner circle touches the fillet's: centres rc + rho apart.
+    assert!((((c + rho) * 2f64.sqrt()) - (rc + rho)).abs() < 1e-12);
+    assert!((report.fillet_radius_mm.unwrap() - rho).abs() < 1e-12);
+    let leg = (rc * rc - c * c).sqrt() - c;
+    assert!((report.face_width_mm - leg).abs() < 1e-12 && leg < rho);
+    // Densely: the cove is never inside the fillet (no gouge against the
+    // filleted part), and touches it.
+    let mut closest = f64::INFINITY;
+    for k in 0..=10000 {
+        let x = leg * k as f64 / 10000.;
+        let cove = c - (rc * rc - (x + c) * (x + c)).sqrt();
+        let fillet = -rho + (rho * rho - (rho - x).powi(2)).sqrt();
+        assert!(cove >= fillet - 1e-12, "x {x}: {cove} < {fillet}");
+        closest = closest.min(cove - fillet);
+    }
+    assert!(closest < 1e-4, "{closest}");
+    // Refusals: both sizes, neither, too large, and a chamfer mill's radius.
+    for (width, radius, message) in [
+        (Some(0.5), Some(0.8), "exactly one"),
+        (None, None, "exactly one"),
+        (Some(2.5), None, "corner radius"),
+        (None, Some(5.), "1 + sqrt 2"),
+        (Some(1.9), None, "tip_clearance_mm"),
+    ] {
+        let mut bad = op.clone();
+        bad.width_mm = width;
+        bad.break_radius_mm = radius;
+        let error = DeburrPlan::prepare(bad, &tool, &spec, [0., 0., 70.], 1, &cancel)
+            .err()
+            .unwrap();
+        assert!(error.contains(message), "{error}");
+    }
+    let mut chamfer = op.clone();
+    chamfer.tool = "c90".into();
+    let error = DeburrPlan::prepare(chamfer, &chamfer_mill(), &spec, [0., 0., 70.], 1, &cancel)
+        .err()
+        .unwrap();
+    assert!(error.contains("ball-end and bull-nose"), "{error}");
+    let mut flat = op;
+    flat.tool = "em6".into();
+    let error = DeburrPlan::prepare(flat, &end_mill(), &spec, [0., 0., 70.], 1, &cancel)
+        .err()
+        .unwrap();
+    assert!(error.contains("chamfer mill"), "{error}");
 }

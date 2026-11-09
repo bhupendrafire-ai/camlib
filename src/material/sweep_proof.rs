@@ -294,6 +294,9 @@ impl SweepProof {
         }
         let proof = match enclosing_sections(tool) {
             Err(_) => None,
+            // The erosion below is for linear profiles: enclosing sections
+            // replace a curved end by its cylinder, so none is an arc.
+            Ok(sections) if sections.iter().any(|s| s.arc > 0.) => None,
             Ok(sections) => {
                 let reach = sections.iter().map(|s| s.r1).fold(0., f64::max);
                 let flat = self.budget / std::f64::consts::SQRT_2;
@@ -316,6 +319,7 @@ impl SweepProof {
                         r0: (s.r0 - a).max(0.),
                         r1: s.r1 - a,
                         rise: s.rise,
+                        arc: s.arc,
                     })
                     .collect::<Vec<_>>();
                 (!sections.is_empty() && sections.iter().all(Section::valid)).then_some(ToolProof {
@@ -408,6 +412,7 @@ impl SweepProof {
                     r0: s.r0 + grow,
                     r1: s.r1 + grow,
                     rise: s.rise,
+                    arc: s.arc,
                 })
                 .collect::<Vec<_>>();
             // The eroded tool is lifted by a; any extra lift is a required
