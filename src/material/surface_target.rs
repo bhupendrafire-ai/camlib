@@ -69,6 +69,9 @@ impl SurfaceTarget {
         cancel: &impl CancelSignal,
     ) -> Result<PreparedSurfaceTarget, String> {
         options.validate()?;
+        if options.scope_to_region {
+            return Err("local region scope requires a prismatic target".into());
+        }
         if self.version != 1
             || self.units != "mm"
             || !valid_id(&self.id)

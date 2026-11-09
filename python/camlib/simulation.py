@@ -71,6 +71,42 @@ class StockSpec:
 
 
 @dataclass(frozen=True)
+class InitialStock:
+    """Declared whole-cell top-down blank bounds in the setup frame.
+
+    ``bounds_mm`` has one (lower, upper) pair per StockSpec grid cell, in
+    row-major XY order. The caller establishes that the bounds cover the real
+    blank, its placement and source error. Cavities under overhangs are not
+    represented. This is a new stock premise, never a snapshot-proof shortcut.
+    """
+
+    source_id: str
+    revision: str
+    source_sha256: str
+    bounds_mm: tuple
+    source_to_setup: object
+    uncertainty_mm: float
+
+    def __post_init__(self):
+        if not isinstance(self.bounds_mm, (list, tuple)) or any(
+            not isinstance(pair, (list, tuple)) or len(pair) != 2 for pair in self.bounds_mm
+        ):
+            raise TypeError('initial stock bounds need a finite collection of lower/upper pairs')
+        object.__setattr__(self, 'bounds_mm', tuple(tuple(pair) for pair in self.bounds_mm))
+
+    def to_dict(self):
+        return dict(
+            source_id=self.source_id,
+            revision=self.revision,
+            source_sha256=self.source_sha256,
+            source_to_setup=asdict(self.source_to_setup),
+            uncertainty_mm=self.uncertainty_mm,
+            representation='whole_cell_top_down',
+            bounds=[dict(lower_mm=lo, upper_mm=hi) for lo, hi in self.bounds_mm],
+        )
+
+
+@dataclass(frozen=True)
 class ToolChangePosition:
     """Where the machine leaves a new tool, in work coordinates: the spindle
     gauge line at ``gauge_z_mm`` (e.g. Z home, where M6 sends it) over
@@ -548,7 +584,7 @@ class StockState:
         if (
             not required
             <= set(m)
-            <= required | {"operations", "verification", "geometry", "tool_change", "rapid_retracts"}
+            <= required | {"operations", "verification", "geometry", "tool_change", "rapid_retracts", "initial_stock"}
             or type(m["version"]) is not int
             or m["version"] not in (1, 2)
         ):
@@ -587,7 +623,17 @@ class StockState:
             except (ValueError, TypeError, UnicodeError) as error:
                 raise ProtocolError(str(error)) from error
         self._heights = _height_storage(count * 2)
-        _native_buffers.initialise_heights(self._heights, self.min_mm[2], self.max_mm[2])
+        self._initial_volume = None
+        if 'initial_stock' in m:
+            try:
+                _native_buffers.initialise_declared_stock(self._heights, self.canonical_manifest.decode())
+                self._initial_volume = _native_buffers.volume(
+                    self._heights, self.min_mm[2], self.max_mm[2], self.dx * self.dy
+                )[:2]
+            except (ValueError, TypeError) as error:
+                raise ProtocolError(str(error)) from error
+        else:
+            _native_buffers.initialise_heights(self._heights, self.min_mm[2], self.max_mm[2])
         self.completed, self.fraction, self.finished = 0, 0.0, False
         self.position = tuple(m["initial_position_mm"])
         self.last_motion_id = None
@@ -607,6 +653,8 @@ class StockState:
         ):
             raise ProtocolError("invalid tool change pose")
         self._tool_change = change
+        # Fresh native-initialized cells match the manifest's initial premise.
+        # Restoring any checkpoint resets this flag, even at move zero.
         self._token, self._initial_full_stock = object(), True
 
     def tool_change_tip(self, tool, position=None):
@@ -891,6 +939,12 @@ class StockState:
 
     def volume(self):
         values = _native_buffers.volume(self._heights, self.min_mm[2], self.max_mm[2], self.dx * self.dy)
+        return self._volume_from_bounds(values)
+
+    def _volume_from_bounds(self, values):
+        if self._initial_volume is not None:
+            lo, hi = values[:2]
+            values = (lo, hi, max(0, self._initial_volume[0] - hi), max(0, self._initial_volume[1] - lo))
         return dict(
             zip(("remaining_lower_mm3", "remaining_upper_mm3", "removed_lower_mm3", "removed_upper_mm3"), values)
         )
@@ -1193,6 +1247,7 @@ class Simulation:
         tool_change=None,
         rapid_retracts=True,
         turning=None,
+        initial_stock=None,
         _on_spawn=None,
     ):
         if type(stream_version) is not int or stream_version not in (1, 2) or stream_version == 2 and operations:
@@ -1210,6 +1265,8 @@ class Simulation:
                 raise TypeError("operations must be a list or tuple (a finite collection)")
             definitions = list(operations)
             manifest["operations"] = [op.to_dict() if hasattr(op, "to_dict") else op for op in definitions]
+        if initial_stock is not None:
+            manifest['initial_stock'] = initial_stock.to_dict() if hasattr(initial_stock, 'to_dict') else initial_stock
         if verification is not None:
             manifest["verification"] = verification.to_dict() if hasattr(verification, "to_dict") else verification
         if tool_change is not None:
