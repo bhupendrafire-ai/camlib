@@ -282,15 +282,39 @@ impl Undercut {
     }
     /// False: the cutting part spans the material top here (ordinary
     /// removal). True: undercut, top height unchanged.
-    fn classify(&self, committed: HeightBounds, tip: f64, near: f64) -> Result<bool, String> {
+    fn classify(
+        &self,
+        committed: HeightBounds,
+        tip: f64,
+        distance: f64,
+        cell_radius: f64,
+        path_error: f64,
+    ) -> Result<bool, String> {
         if committed.upper_mm <= tip + self.cutting - self.guard {
             return Ok(false);
         }
         if committed.upper_mm > tip + self.shoulder - self.guard {
             return Err(REACH.into());
         }
+        let near = (distance - cell_radius - path_error).max(0.);
         if near <= self.neck {
-            return Err("the tool neck may touch material beside an undercut (thread groove); use a narrower neck or a finer stock cell size to prove the clearance".into());
+            let center_clearance = distance - path_error - self.neck;
+            let margin = center_clearance - cell_radius;
+            let remedy = if center_clearance > 0. {
+                // The distance bound is 1-Lipschitz; a square cell has
+                // circumradius cell_size/sqrt(2). This is a LOCAL threshold
+                // at this cell centre, not a promise about a refined grid.
+                format!(
+                    "at this cell center, square cell_size_mm must be < {:.9} mm; rerun with finer stock and recheck all cells (new centers and stock bounds may differ)",
+                    center_clearance * std::f64::consts::SQRT_2
+                )
+            } else {
+                "no positive cell-size threshold at this cell center; recheck stock bounds, use a narrower neck, or clear more stock".into()
+            };
+            return Err(format!(
+                "the tool neck may touch material beside an undercut (thread groove): neck radius {:.9} mm, stock cell half-diagonal {:.9} mm, path error {:.9} mm, clearance lower bound {:.9} mm; {remedy}",
+                self.neck, cell_radius, path_error, margin
+            ));
         }
         Ok(true)
     }
@@ -1297,7 +1321,7 @@ impl Stock {
                     if buried {
                         let near = (distance - cell_radius - analytic_error).max(0.);
                         let u = undercut.as_ref().expect("buried needs a neck");
-                        under = u.classify(before, z, near)?;
+                        under = u.classify(before, z, distance, cell_radius, analytic_error)?;
                         if under && near <= radius {
                             stats.undercut_cells += 1;
                             if before.lower_mm >= z + u.cutting {
@@ -1381,9 +1405,13 @@ impl Stock {
                         let near = (d - cell_radius - s.error).max(0.);
                         let tip = s.a[2].min(s.b[2]) - s.error;
                         let under = match (&undercut, buried) {
-                            (Some(u), true) => {
-                                u.classify(self.cells[j * self.nx + i], tip, near)?
-                            }
+                            (Some(u), true) => u.classify(
+                                self.cells[j * self.nx + i],
+                                tip,
+                                d,
+                                cell_radius,
+                                s.error,
+                            )?,
                             _ => false,
                         };
                         if near > radius {
@@ -1781,6 +1809,53 @@ fn segments(
         });
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod undercut_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn neck_diagnostic_distinguishes_grid_uncertainty_from_center_obstruction() {
+        let neck = Undercut {
+            cutting: 0.5,
+            shoulder: 10.,
+            neck: 1.,
+            guard: 1e-5,
+        };
+        let material = HeightBounds {
+            lower_mm: 5.,
+            upper_mm: 5.,
+        };
+        let radius = 0.26 / std::f64::consts::SQRT_2;
+        let error = neck.classify(material, 0., 1.1, radius, 0.002).unwrap_err();
+        assert!(
+            error.contains("clearance lower bound -0.085847763 mm"),
+            "{error}"
+        );
+        assert!(
+            error.contains("cell_size_mm must be < 0.138592929 mm"),
+            "{error}"
+        );
+        assert!(error.contains("new centers and stock bounds may differ"));
+        assert!(
+            neck.classify(material, 0., 1.1, 0.05 / std::f64::consts::SQRT_2, 0.002)
+                .unwrap()
+        );
+        for distance in [1., 0.9] {
+            let error = neck
+                .classify(material, 0., distance, radius, 0.)
+                .unwrap_err();
+            assert!(error.contains("no positive cell-size threshold"), "{error}");
+            assert!(!error.contains("cell_size_mm must"));
+        }
+        // Ordinary removal and material above the shoulder retain their rules.
+        assert!(!neck.classify(material, 5., 0., radius, 0.).unwrap());
+        assert_eq!(
+            neck.classify(material, -10., 5., radius, 0.).unwrap_err(),
+            REACH
+        );
+    }
 }
 
 #[cfg(test)]
