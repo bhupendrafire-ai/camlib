@@ -675,7 +675,13 @@ class RecordedRun:
                         source=finding["source"],
                     )
                     if "cell_range" in finding:
-                        sample.update(cell_range=finding["cell_range"], contact_point_mm=finding["contact_point_mm"])
+                        sample.update(
+                            cell_range=finding["cell_range"],
+                            contact_point_mm=finding["contact_point_mm"],
+                            obstruction_top_mm=finding.get("obstruction_top_mm"),
+                            lowest_tip_z_mm=finding.get("lowest_tip_z_mm"),
+                            max_clear_radius_mm=finding.get("max_clear_radius_mm"),
+                        )
                 else:
                     sample = dict(
                         kind="material",

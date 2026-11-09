@@ -105,6 +105,8 @@ _EXPORTS = {
             "InitialStock",
             "SweepOptions",
             "SimulationError",
+            "ReachRefusal",
+            "ReachRefused",
             "CamWarning",
             "ToolChangePosition",
             "ToolChangeTable",

@@ -218,6 +218,14 @@ checks = StreamChecks(
 
 Fixtures and clamps use `role="fixture"`.
 
+A stock-contact finding names the tool part (`part`, `holder_section`) and,
+for that part over the whole move, `obstruction_top_mm` (the highest stock
+within its radius standing above its bottom), `lowest_tip_z_mm` and
+`max_clear_radius_mm` (the largest radius that part could have and clear all
+stock above its bottom). So a holder of at most `2 * max_clear_radius_mm`
+diameter, or a part whose bottom stands at least `obstruction_top_mm -
+lowest_tip_z_mm` above the tip, clears that move's obstruction.
+
 Plans that are valid but probably wrong raise a `camlib.simulation.CamWarning`
 (for example an operation that produced no cutting motion because the region is
 smaller than the tool, or removed no stock because it lies outside the stock).

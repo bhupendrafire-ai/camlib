@@ -222,11 +222,18 @@ impl TracePlan {
                 ),
                 (
                     spec.max_mm[2] - op.depth_z_mm <= cutter.cutting_length_mm - guard,
-                    format!(
+                    crate::reach::ReachRefusal::cutting_length(
+                        &op.id,
+                        &op.tool,
+                        spec.max_mm[2],
+                        op.depth_z_mm,
+                        cutter.cutting_length_mm,
+                    )
+                    .error(format_args!(
                         "depth {} below the stock top exceeds the cutting length {}",
                         spec.max_mm[2] - op.depth_z_mm,
                         cutter.cutting_length_mm
-                    ),
+                    )),
                 ),
                 (
                     op.stepdown_mm > guard,
