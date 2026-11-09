@@ -9,6 +9,7 @@ use crate::{
         CancelSignal, CellChange, HeightBounds, Stock, StockDelta, StockSnapshot, StockSpec,
         SweepOptions, SweepStats,
     },
+    stock_mesh::{MeshStockSpec, StockMesh},
     tool::{PreparedAssembly, ToolAssembly, valid_id},
     turning::{
         ops::{TurnDelta, TurnSetup},
@@ -57,23 +58,63 @@ pub struct RunIdentity {
     pub id: String,
     pub revision: String,
 }
-/// The stock of a run: a height field (milling, thermal cutting) or
-/// axisymmetric bar stock (turning).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+/// The stock of a run: a box on a height field (milling, thermal cutting),
+/// any solid given as a closed mesh on a height field, or axisymmetric bar
+/// stock (turning).
+#[derive(Clone, Debug, PartialEq)]
 pub enum RunStockSpec {
     Height(StockSpec),
     Turn(TurnStockSpec),
+    /// Wire form: the height-field grid's fields plus `mesh`.
+    Mesh(MeshStockSpec),
 }
 impl From<StockSpec> for RunStockSpec {
     fn from(spec: StockSpec) -> Self {
         Self::Height(spec)
     }
 }
+impl From<MeshStockSpec> for RunStockSpec {
+    fn from(spec: MeshStockSpec) -> Self {
+        Self::Mesh(spec)
+    }
+}
+impl Serialize for RunStockSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Height(spec) => spec.serialize(serializer),
+            Self::Turn(spec) => spec.serialize(serializer),
+            Self::Mesh(spec) => spec.serialize(serializer),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for RunStockSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Plain {
+            Height(StockSpec),
+            Turn(TurnStockSpec),
+        }
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // A mesh stock's own refusals (an open mesh, ...) reach the caller.
+        if value.get("mesh").is_some() {
+            return MeshStockSpec::deserialize(value)
+                .map(Self::Mesh)
+                .map_err(D::Error::custom);
+        }
+        match Plain::deserialize(value).map_err(D::Error::custom)? {
+            Plain::Height(spec) => Ok(Self::Height(spec)),
+            Plain::Turn(spec) => Ok(Self::Turn(spec)),
+        }
+    }
+}
 impl RunStockSpec {
+    /// The height-field grid (of a box or a mesh stock).
     pub fn height(&self) -> Result<&StockSpec, String> {
         match self {
             Self::Height(spec) => Ok(spec),
+            Self::Mesh(spec) => Ok(spec.grid()),
             Self::Turn(_) => {
                 Err("this needs a height-field stock; the run has turning stock".into())
             }
@@ -82,6 +123,7 @@ impl RunStockSpec {
     pub fn height_mut(&mut self) -> Result<&mut StockSpec, String> {
         match self {
             Self::Height(spec) => Ok(spec),
+            Self::Mesh(spec) => Ok(spec.grid_mut()),
             Self::Turn(_) => {
                 Err("this needs a height-field stock; the run has turning stock".into())
             }
@@ -90,8 +132,24 @@ impl RunStockSpec {
     pub fn turn(&self) -> Option<&TurnStockSpec> {
         match self {
             Self::Turn(spec) => Some(spec),
-            Self::Height(_) => None,
+            Self::Height(_) | Self::Mesh(_) => None,
         }
+    }
+    /// The solid a mesh stock starts from.
+    pub fn mesh(&self) -> Option<&StockMesh> {
+        match self {
+            Self::Mesh(spec) => Some(spec.mesh()),
+            Self::Height(_) | Self::Turn(_) => None,
+        }
+    }
+    /// The run's starting stock. Always start a run's stock here: the grid
+    /// alone (`height()`) is the whole box, not a mesh stock.
+    pub fn initial_stock(&self, cancel: &impl CancelSignal) -> Result<RunStock, String> {
+        Ok(match self {
+            Self::Height(spec) => RunStock::Height(Box::new(Stock::new(spec.clone())?)),
+            Self::Mesh(spec) => RunStock::Height(Box::new(spec.initial_stock(cancel)?)),
+            Self::Turn(spec) => RunStock::Turn(TurnStock::new(spec.clone())?),
+        })
     }
 }
 /// A run's committed stock.
@@ -129,6 +187,7 @@ pub struct StreamManifest {
     pub version: u32,
     pub run: RunIdentity,
     pub stock: RunStockSpec,
+    pub initial_stock: Option<crate::stock::InitialStock>,
     pub tools: Vec<ToolAssembly>,
     pub initial_position_mm: Vec3,
     pub sweep: SweepOptions,
@@ -238,13 +297,27 @@ impl StreamManifest {
             );
         }
         match &self.stock {
-            RunStockSpec::Height(spec) => {
+            RunStockSpec::Height(_) | RunStockSpec::Mesh(_) => {
+                let spec = self.stock.height()?;
                 spec.grid()?;
+                if let Some(initial) = &self.initial_stock {
+                    // One declaration of the starting material: a stock mesh
+                    // (#121) or whole-cell bounds (#133), never both.
+                    if matches!(self.stock, RunStockSpec::Mesh(_)) {
+                        return Err("declare the starting stock one way: a stock mesh (StockSpec mesh) or whole-cell initial_stock bounds, not both".into());
+                    }
+                    initial.validate(spec)?;
+                }
                 if self.turning.is_some() {
                     return Err("a turning setup needs turning stock".into());
                 }
             }
             RunStockSpec::Turn(spec) => {
+                if self.initial_stock.is_some() {
+                    return Err(
+                        "height-field initial stock is not a turning stock declaration".into(),
+                    );
+                }
                 spec.validate()?;
                 let turning = self
                     .turning
@@ -507,9 +580,9 @@ impl CheckpointFields {
         // Height cells: 16 bytes. Turning cells: 32 bytes, then a u32 ring
         // count and 32 bytes per ring.
         let shape = match &manifest.stock {
-            RunStockSpec::Height(spec) => {
+            RunStockSpec::Height(_) | RunStockSpec::Mesh(_) => {
                 // A producer checkpoint may end with its proof states.
-                let (nx, ny, _) = spec.grid()?;
+                let (nx, ny, _) = manifest.stock.height()?.grid()?;
                 self.count == nx * ny
                     && cell_bytes
                         .checked_sub(self.count * 16)
@@ -562,6 +635,8 @@ pub struct StreamReceiver {
     controls: Option<ControlState>,
     /// The last committed motion's tool (None after a restore).
     last_tool: Option<String>,
+    /// Retained cells are not evidence of raw stock, even at cursor zero.
+    restored_from_checkpoint: bool,
     /// The per-move proof states a producer checkpoint kept (#108), until
     /// a producer restored from it takes them.
     restored_proofs: Option<Vec<Vec<u8>>>,
@@ -643,6 +718,7 @@ impl StreamProducer {
                     crate::stream_verification::Runtime::prepare(
                         &state.manifest,
                         state.sequence,
+                        state.restored_from_checkpoint,
                         proofs.as_deref(),
                     )
                 })
@@ -741,34 +817,13 @@ impl StreamProducer {
         frame(RESTORED, body, limit)
     }
     pub fn restore_checkpoint(&mut self, bytes: &[u8], limit: usize) -> Result<(), String> {
-        // Parse, then restore the proofs (all or nothing), then commit: a
-        // refused checkpoint leaves the producer as it was.
-        let mut restored =
-            StreamReceiver::from_checkpoint(self.state.manifest.clone(), bytes, limit)?;
-        let proofs = restored.restored_proofs.take();
-        if let Some(checks) = &mut self.checks {
-            checks.restore_proofs(restored.sequence, proofs.as_deref())?;
-        }
-        self.state = restored;
-        if !self.read_only
-            && self
-                .state
-                .manifest
-                .verification
-                .as_ref()
-                .is_some_and(|c| c.stock_contact.is_some())
-        {
-            self.state
-                .stock
-                .height_mut()?
-                .enable_contact_queries(&std::sync::atomic::AtomicBool::new(false))?;
-        }
-        if let Some(checks) = &mut self.checks {
-            checks.tracker = crate::stream_verification::Tracker::new(
-                checks.tracker.binding.clone(),
-                self.state.sequence,
-            );
-        }
+        let state = StreamReceiver::from_checkpoint(self.state.manifest.clone(), bytes, limit)?;
+        // Reuse construction so no proof counters, touched cells, active
+        // stages or history claims survive a stock replacement, except the
+        // proof states the checkpoint itself kept (#108). The whole
+        // replacement is prepared (a bad proof state refuses it) before any
+        // part of the restored state is committed.
+        *self = Self::from_state(state, self.read_only)?;
         Ok(())
     }
     /// Noncommitting prefix query. Consumers overlay it on the move-start stock;
@@ -891,6 +946,22 @@ impl StreamProducer {
         Ok((bytes, check, validation))
     }
     fn push_prepared_motion(
+        &mut self,
+        motion: Motion,
+        cached: Option<StockDelta>,
+        record: bool,
+        verified_cache: bool,
+        limit: usize,
+        cancel: &impl CancelSignal,
+    ) -> Result<PreparedMotionFrames, String> {
+        let result =
+            self.try_push_prepared_motion(motion, cached, record, verified_cache, limit, cancel);
+        if let Some(checks) = &mut self.checks {
+            checks.finish_motion(result.is_ok());
+        }
+        result
+    }
+    fn try_push_prepared_motion(
         &mut self,
         motion: Motion,
         cached: Option<StockDelta>,
@@ -1123,9 +1194,11 @@ impl StreamProducer {
 impl StreamReceiver {
     pub fn new(manifest: StreamManifest) -> Result<Self, String> {
         manifest.validate()?;
-        let stock = match &manifest.stock {
-            RunStockSpec::Height(spec) => RunStock::Height(Box::new(Stock::new(spec.clone())?)),
-            RunStockSpec::Turn(spec) => RunStock::Turn(TurnStock::new(spec.clone())?),
+        let stock = match (&manifest.stock, &manifest.initial_stock) {
+            (RunStockSpec::Height(spec), Some(initial)) => {
+                RunStock::Height(Box::new(Stock::from_initial(spec.clone(), initial)?))
+            }
+            _ => manifest.stock.initial_stock(&|| false)?,
         };
         let identity = identity_bytes(&manifest)?;
         Ok(Self {
@@ -1138,6 +1211,7 @@ impl StreamReceiver {
             last_motion_id: None,
             finished: false,
             last_tool: None,
+            restored_from_checkpoint: false,
             restored_proofs: None,
         })
     }
@@ -1305,7 +1379,9 @@ impl StreamReceiver {
                 if let Some(controls) = &self.controls {
                     put_control_json(&mut body, controls)?;
                 }
-                let section = proofs.map(proof_section).unwrap_or_default();
+                let section = proofs
+                    .map(|states| proof_section(states, &cells_digest(stock.cells())))
+                    .unwrap_or_default();
                 check_size(body.len() + stock.cells().len() * 16 + section.len(), limit)?;
                 body.reserve(stock.cells().len() * 16 + section.len());
                 for h in stock.cells() {
@@ -1390,6 +1466,7 @@ impl StreamReceiver {
             finished: false,
             controls: fields.controls,
             last_tool: None,
+            restored_from_checkpoint: true,
             restored_proofs: None,
         })
     }
@@ -1486,14 +1563,23 @@ impl StreamReceiver {
         manifest: StreamManifest,
         fields: CheckpointFields,
         cells: Vec<HeightBounds>,
-        restored_proofs: Option<Vec<Vec<u8>>>,
+        kept: Option<KeptProofs>,
     ) -> Result<Self, String> {
         let identity = identity_bytes(&manifest)?;
-        let stock = Stock::from_snapshot(StockSnapshot {
+        // Kept proof states describe the stock they were computed with: for
+        // any other cells they are discarded, and the resumed history is
+        // unseen (reported, never decided).
+        let restored_proofs = kept
+            .filter(|(digest, _)| *digest == cells_digest(&cells))
+            .map(|(_, states)| states);
+        let mut stock = Stock::from_snapshot(StockSnapshot {
             spec: manifest.stock.height()?.clone(),
             generation: fields.generation,
             cells,
         })?;
+        if let Some(initial) = &manifest.initial_stock {
+            stock.initial_volume(initial)?;
+        }
         Ok(Self {
             manifest,
             identity,
@@ -1504,6 +1590,7 @@ impl StreamReceiver {
             finished: false,
             controls: fields.controls,
             last_tool: None,
+            restored_from_checkpoint: true,
             restored_proofs,
         })
     }
@@ -1970,6 +2057,13 @@ pub fn read_frame(reader: &mut impl Read, limit: usize) -> Result<Option<Vec<u8>
     Ok(Some(output))
 }
 
+/// Frame kinds a frame reader in this crate may dispatch on.
+pub(crate) const CHUNK_KIND: u16 = CHUNK;
+pub(crate) const OPERATION_KIND: u16 = OPERATION;
+/// The kind of a complete frame, from its validated header.
+pub(crate) fn frame_kind(bytes: &[u8]) -> Result<u16, String> {
+    Ok(check_header(bytes, MAX_FRAME_BYTES)?.0)
+}
 fn point_valid(p: Vec3) -> bool {
     p.iter().all(|v| v.is_finite() && v.abs() <= 1e6)
 }
@@ -2115,8 +2209,22 @@ fn put_string(out: &mut Vec<u8>, v: &str) {
 /// per-move proof states, one per configured stage (empty for a stage
 /// without a proof). The frame's run identity, cursor and checksum cover it.
 const PROOF_SECTION: &[u8; 8] = b"CAMPRF01";
-fn proof_section(states: &[Vec<u8>]) -> Vec<u8> {
+/// SHA-256 of a height-field stock's cells as a checkpoint encodes them.
+/// The proof states bind it: a kept proof covers exactly the stock it was
+/// computed with (#108 with #133's raw-stock premise).
+fn cells_digest(cells: &[HeightBounds]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    let mut buffer = Vec::with_capacity(16);
+    for &cell in cells {
+        buffer.clear();
+        put_height(&mut buffer, cell);
+        hasher.update(&buffer);
+    }
+    hasher.finalize().into()
+}
+fn proof_section(states: &[Vec<u8>], cells: &[u8; 32]) -> Vec<u8> {
     let mut out = PROOF_SECTION.to_vec();
+    out.extend_from_slice(cells);
     put_u32(&mut out, states.len() as u32);
     for state in states {
         put_u64(&mut out, state.len() as u64);
@@ -2133,15 +2241,19 @@ fn max_proof_section(manifest: &StreamManifest, cells: usize) -> usize {
     if stages == 0 {
         return 0;
     }
-    PROOF_SECTION.len() + 4 + stages * (8 + crate::material::SweepProof::max_state_bytes(cells))
+    PROOF_SECTION.len()
+        + 32
+        + 4
+        + stages * (8 + crate::material::SweepProof::max_state_bytes(cells))
 }
-/// The proof states of a checkpoint's trailing section (none when absent:
-/// a consumer's checkpoint, or one from a run without material proofs).
+/// The proof states of a checkpoint's trailing section and the digest of
+/// the cells they were computed with (none when absent: a consumer's
+/// checkpoint, or one from a run without material proofs).
 fn read_proof_section(
     bytes: &[u8],
     manifest: &StreamManifest,
     cells: usize,
-) -> Result<Option<Vec<Vec<u8>>>, String> {
+) -> Result<Option<KeptProofs>, String> {
     if bytes.is_empty() {
         return Ok(None);
     }
@@ -2151,9 +2263,11 @@ fn read_proof_section(
         .as_ref()
         .map_or(0, |c| c.material.len());
     let mut body = Decoder { bytes, offset: 0 };
-    if body.take(PROOF_SECTION.len()).map_err(|_| bad())? != PROOF_SECTION
-        || body.u32().map_err(|_| bad())? as usize != stages
-    {
+    if body.take(PROOF_SECTION.len()).map_err(|_| bad())? != PROOF_SECTION {
+        return Err(bad());
+    }
+    let digest: [u8; 32] = body.take(32).map_err(|_| bad())?.try_into().unwrap();
+    if body.u32().map_err(|_| bad())? as usize != stages {
         return Err(bad());
     }
     let mut states = Vec::with_capacity(stages);
@@ -2167,8 +2281,10 @@ fn read_proof_section(
     if body.left() != 0 {
         return Err(bad());
     }
-    Ok(Some(states))
+    Ok(Some((digest, states)))
 }
+/// A checkpoint's kept proof states and the digest of their stock cells.
+type KeptProofs = ([u8; 32], Vec<Vec<u8>>);
 pub fn identity_bytes(manifest: &StreamManifest) -> Result<Vec<u8>, String> {
     let run = &manifest.run;
     let mut bytes = Vec::new();
@@ -2206,6 +2322,10 @@ fn put_motion(out: &mut Vec<u8>, m: &Motion) -> Result<(), String> {
             MoveKind::Tap => 6,
             MoveKind::Shift => 7,
             MoveKind::Thread => 8,
+            MoveKind::ProbePosition => 9,
+            MoveKind::ProbeMeasure => 10,
+            MoveKind::ProbeTouch => 11,
+            MoveKind::ProbeReturn => 12,
         },
     );
     put_u8(out, u8::from(m.feed_mm_min.is_some()));
@@ -2335,6 +2455,10 @@ impl<'a> Decoder<'a> {
             6 => MoveKind::Tap,
             7 => MoveKind::Shift,
             8 => MoveKind::Thread,
+            9 => MoveKind::ProbePosition,
+            10 => MoveKind::ProbeMeasure,
+            11 => MoveKind::ProbeTouch,
+            12 => MoveKind::ProbeReturn,
             _ => return Err("invalid binary motion kind".into()),
         };
         let feed_flag = self.u8()?;

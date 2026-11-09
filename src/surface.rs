@@ -418,6 +418,113 @@ struct Node {
     contact_plane: Option<PlaneBound>,
     horizontal_top: Option<f64>,
 }
+// Preparation work is charged before each facet/node visit, projected vertex,
+// sort comparison/swap, and reserved triangle/node record. A sort needs no
+// auxiliary allocation. The same counter can continue into material_bounds.
+fn preparation_charge(
+    work: &mut u64,
+    limit: u64,
+    amount: u64,
+    cancel: &impl CancelSignal,
+) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        return Err("surface preparation cancelled".into());
+    }
+    if amount > limit.saturating_sub(*work) {
+        return Err("surface preparation work limit; no prepared surface committed".into());
+    }
+    *work += amount;
+    Ok(())
+}
+fn preparation_node_capacity(triangles: usize) -> Result<usize, String> {
+    // Balanced halves at a level have floor(n/width) or ceil(n/width) facets.
+    // Count full levels, then only the remaining nine-facet nodes split.
+    // This O(log n) metadata calculation visits no facets and allocates nothing.
+    let overflow = || "surface preparation node capacity overflow".to_string();
+    let mut width = 1usize;
+    while triangles / width > 8 {
+        width = width.checked_mul(2).ok_or_else(overflow)?;
+    }
+    let extra = if triangles / width == 8 {
+        2 * (triangles % width)
+    } else {
+        0
+    };
+    width
+        .checked_mul(2)
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|n| n.checked_add(extra))
+        .ok_or_else(overflow)
+}
+fn preparation_bytes(triangles: usize, nodes: usize) -> u128 {
+    triangles as u128 * std::mem::size_of::<Triangle>() as u128
+        + nodes as u128 * std::mem::size_of::<Node>() as u128
+}
+fn preparation_memory(triangles: usize, nodes: usize) -> Result<(), String> {
+    crate::resources::check_memory(preparation_bytes(triangles, nodes), "surface preparation")
+}
+fn surface_order(a: &Triangle, b: &Triangle, axis: usize) -> std::cmp::Ordering {
+    (a.min[axis] + a.max[axis]).total_cmp(&(b.min[axis] + b.max[axis]))
+}
+fn sift_preparation_heap<T>(
+    values: &mut [T],
+    mut root: usize,
+    end: usize,
+    compare: &impl Fn(&T, &T) -> std::cmp::Ordering,
+    work: &mut u64,
+    limit: u64,
+    cancel: &impl CancelSignal,
+) -> Result<(), String> {
+    while root < end / 2 {
+        let mut child = root * 2 + 1;
+        if child + 1 < end {
+            preparation_charge(work, limit, 1, cancel)?;
+            if compare(&values[child], &values[child + 1]).is_lt() {
+                child += 1;
+            }
+        }
+        preparation_charge(work, limit, 1, cancel)?;
+        if !compare(&values[root], &values[child]).is_lt() {
+            break;
+        }
+        preparation_charge(work, limit, 1, cancel)?;
+        values.swap(root, child);
+        root = child;
+    }
+    Ok(())
+}
+fn sort_preparation<T>(
+    values: &mut [T],
+    compare: impl Fn(&T, &T) -> std::cmp::Ordering,
+    work: &mut u64,
+    limit: u64,
+    cancel: &impl CancelSignal,
+    legacy_sort: bool,
+) -> Result<(), String> {
+    if legacy_sort {
+        // Preserve the ordinary prepare API's exact existing unstable-sort tie
+        // order. Polling never changes the comparator's consistent total order.
+        let mut failure = None;
+        values.sort_unstable_by(|a, b| {
+            if failure.is_none() {
+                failure = preparation_charge(work, limit, 1, cancel).err();
+            }
+            compare(a, b)
+        });
+        return failure.map_or(Ok(()), Err);
+    }
+    // In-place heapsort permits refusal BEFORE every comparison and swap.
+    // O(n log n) time, O(1) sort scratch; cancellation never changes ordering.
+    for root in (0..values.len() / 2).rev() {
+        sift_preparation_heap(values, root, values.len(), &compare, work, limit, cancel)?;
+    }
+    for end in (1..values.len()).rev() {
+        preparation_charge(work, limit, 1, cancel)?;
+        values.swap(0, end);
+        sift_preparation_heap(values, 0, end, &compare, work, limit, cancel)?;
+    }
+    Ok(())
+}
 pub struct PreparedSurface {
     triangles: Vec<Triangle>,
     nodes: Vec<Node>,
@@ -425,7 +532,7 @@ pub struct PreparedSurface {
     convex_solid: std::sync::OnceLock<bool>,
 }
 impl SurfaceMesh {
-    fn validate_input(&self, floor: f64, tolerance: f64) -> Result<(), String> {
+    pub(crate) fn validate_input(&self, floor: f64, tolerance: f64) -> Result<(), String> {
         if self.version != 1 {
             return Err(format!(
                 "surface mesh version {} is unsupported; expected 1",
@@ -454,6 +561,24 @@ impl SurfaceMesh {
             return Err(format!(
                 "surface tolerance {tolerance} must be finite and positive"
             ));
+        }
+        Ok(())
+    }
+
+    /// Shared native facet validation, including callers using another index.
+    pub(crate) fn validate_triangle(
+        p: [Vec3; 3],
+        floor: f64,
+        tolerance: f64,
+    ) -> Result<(), String> {
+        if p.iter().flatten().any(|x| !x.is_finite() || x.abs() > 1e6)
+            || p.iter().any(|q| q[2] < floor)
+        {
+            return Err("surface vertices must be finite, bounded and above the base plane".into());
+        }
+        let area = cross(sub(p[1], p[0]), sub(p[2], p[0]));
+        if dot(area, area).sqrt() <= tolerance * tolerance {
+            return Err("degenerate surface triangle".into());
         }
         Ok(())
     }
@@ -540,36 +665,69 @@ impl SurfaceMesh {
         tolerance: f64,
         cancel: &impl CancelSignal,
     ) -> Result<PreparedSurface, String> {
+        self.prepare_with_budget(floor, tolerance, &mut 0, u64::MAX, cancel, true)
+    }
+
+    /// Prepare with one caller-owned work counter, suitable for continuing into
+    /// geometry queries. Exhaustion returns no prepared surface. Work units are
+    /// reserved triangle/node records, facet/node visits, projected vertices,
+    /// and sort comparisons/swaps; every charge precedes its work/allocation.
+    pub fn prepare_bounded(
+        &self,
+        floor: f64,
+        tolerance: f64,
+        work: &mut u64,
+        max_work: u64,
+        cancel: &impl CancelSignal,
+    ) -> Result<PreparedSurface, String> {
+        self.prepare_with_budget(floor, tolerance, work, max_work, cancel, false)
+    }
+    fn prepare_with_budget(
+        &self,
+        floor: f64,
+        tolerance: f64,
+        work: &mut u64,
+        max_work: u64,
+        cancel: &impl CancelSignal,
+        legacy_sort: bool,
+    ) -> Result<PreparedSurface, String> {
         self.validate_input(floor, tolerance)?;
-        let mut triangles = Vec::with_capacity(self.triangles.len());
+        let count = self.triangles.len();
+        let node_capacity = preparation_node_capacity(count)?;
+        // Reserve allocation records and the complete facet validation/conversion
+        // pass before either large allocation or the first facet examination.
+        preparation_charge(
+            work,
+            max_work,
+            (count as u64)
+                .saturating_mul(2)
+                .saturating_add(node_capacity as u64),
+            cancel,
+        )?;
+        preparation_memory(count, node_capacity)?;
+        let mut triangles = Vec::with_capacity(count);
+        let nodes = Vec::with_capacity(node_capacity);
         for &p in self.triangles.iter() {
             if cancel.is_cancelled() {
                 return Err("surface preparation cancelled".into());
             }
-            if p.iter().flatten().any(|x| !x.is_finite() || x.abs() > 1e6)
-                || p.iter().any(|q| q[2] < floor)
-            {
-                return Err(
-                    "surface vertices must be finite, bounded and above the base plane".into(),
-                );
-            }
-            let area = cross(sub(p[1], p[0]), sub(p[2], p[0]));
-            if dot(area, area).sqrt() <= tolerance * tolerance {
-                return Err("degenerate surface triangle".into());
-            }
+            Self::validate_triangle(p, floor, tolerance)?;
             triangles.push(Triangle::new(p));
         }
         let mut result = PreparedSurface {
             triangles,
-            nodes: vec![],
+            nodes,
             floor,
             convex_solid: std::sync::OnceLock::new(),
         };
-        result.build(0..self.triangles.len());
+        result.build(0..count, work, max_work, cancel, legacy_sort)?;
         Ok(result)
     }
 }
 impl PreparedSurface {
+    pub(crate) fn allocation_bytes(&self) -> u128 {
+        preparation_bytes(self.triangles.capacity(), self.nodes.capacity())
+    }
     pub fn prism_count(&self) -> usize {
         self.triangles.len()
     }
@@ -827,30 +985,49 @@ impl PreparedSurface {
             witness,
         }))
     }
-    fn build(&mut self, range: std::ops::Range<usize>) -> usize {
-        let min = std::array::from_fn(|i| {
-            self.triangles[range.clone()]
-                .iter()
-                .map(|t| t.min[i])
-                .fold(f64::INFINITY, f64::min)
-        });
-        let max = std::array::from_fn(|i| {
-            self.triangles[range.clone()]
-                .iter()
-                .map(|t| t.max[i])
-                .fold(f64::NEG_INFINITY, f64::max)
-        });
-        // Normals choose a direction only. MAX projection over every source
-        // vertex establishes the enclosing halfspace, including all downward
-        // prisms. No fitted plane or representative facet supplies the bound.
-        let normal = self.triangles[range.clone()]
+    fn build(
+        &mut self,
+        range: std::ops::Range<usize>,
+        work: &mut u64,
+        max_work: u64,
+        cancel: &impl CancelSignal,
+        legacy_sort: bool,
+    ) -> Result<usize, String> {
+        preparation_charge(work, max_work, 1, cancel)?;
+        let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        let mut normal = [0.; 3];
+        let mut horizontal_top: Option<f64> = None;
+        for t in &self.triangles[range.clone()] {
+            preparation_charge(work, max_work, 1, cancel)?;
+            for i in 0..3 {
+                min[i] = min[i].min(t.min[i]);
+                max[i] = max[i].max(t.max[i]);
+            }
+            normal = add(normal, t.normal);
+            if t.p[0][2] == t.p[1][2]
+                && t.p[1][2] == t.p[2][2]
+                && horizontal_top.is_none_or(|z| !t.p[0][2].total_cmp(&z).is_lt())
+            {
+                horizontal_top = Some(t.p[0][2]);
+            }
+        }
+        // MAX projection over every vertex establishes the enclosing halfspace.
+        // A partial plane is discarded together with the entire preparation.
+        let mut failure = None;
+        let points = self.triangles[range.clone()]
             .iter()
-            .fold([0.; 3], |n, t| add(n, t.normal));
-        let contact_plane = PlaneBound::new(
-            normal,
-            self.triangles[range.clone()].iter().flat_map(|t| t.p),
-            self.triangles[range.start].p[0],
-        );
+            .flat_map(|t| t.p)
+            .map_while(|p| match preparation_charge(work, max_work, 1, cancel) {
+                Ok(()) => Some(p),
+                Err(error) => {
+                    failure = Some(error);
+                    None
+                }
+            });
+        let contact_plane = PlaneBound::new(normal, points, self.triangles[range.start].p[0]);
+        if let Some(error) = failure {
+            return Err(error);
+        }
         let id = self.nodes.len();
         self.nodes.push(Node {
             min,
@@ -858,25 +1035,26 @@ impl PreparedSurface {
             range: range.clone(),
             children: None,
             contact_plane,
-            horizontal_top: self.triangles[range.clone()]
-                .iter()
-                .filter(|t| t.p[0][2] == t.p[1][2] && t.p[1][2] == t.p[2][2])
-                .map(|t| t.p[0][2])
-                .max_by(f64::total_cmp),
+            horizontal_top,
         });
         if range.len() > 8 {
             let axis = (0..3)
                 .max_by(|&a, &b| (max[a] - min[a]).total_cmp(&(max[b] - min[b])))
                 .unwrap();
-            self.triangles[range.clone()].sort_unstable_by(|a, b| {
-                (a.min[axis] + a.max[axis]).total_cmp(&(b.min[axis] + b.max[axis]))
-            });
+            sort_preparation(
+                &mut self.triangles[range.clone()],
+                |a, b| surface_order(a, b, axis),
+                work,
+                max_work,
+                cancel,
+                legacy_sort,
+            )?;
             let mid = range.start + range.len() / 2;
-            let left = self.build(range.start..mid);
-            let right = self.build(mid..range.end);
+            let left = self.build(range.start..mid, work, max_work, cancel, legacy_sort)?;
+            let right = self.build(mid..range.end, work, max_work, cancel, legacy_sort)?;
             self.nodes[id].children = Some([left, right]);
         }
-        id
+        Ok(id)
     }
     pub fn max_z(&self) -> f64 {
         self.nodes[0].max[2]
@@ -994,37 +1172,48 @@ impl PreparedSurface {
         maximum_radius: f64,
         cancel: &impl CancelSignal,
     ) -> Result<Option<Self>, String> {
-        let mut triangles = Vec::new();
-        for t in &self.triangles {
+        let keep = |t: &Triangle| {
+            let guard =
+                4096. * f64::EPSILON * (1. + minimum.abs() + maximum_radius + t.max[2].abs());
+            t.max[2] + maximum_radius + guard >= minimum
+        };
+        let (mut count, mut highest) = (0usize, 0usize);
+        for (index, t) in self.triangles.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err("surface contact preparation cancelled".into());
             }
-            let guard =
-                4096. * f64::EPSILON * (1. + minimum.abs() + maximum_radius + t.max[2].abs());
-            if t.max[2] + maximum_radius + guard >= minimum {
-                triangles.push(t.clone());
+            count += usize::from(keep(t));
+            if !t.max[2].total_cmp(&self.triangles[highest].max[2]).is_lt() {
+                highest = index;
             }
         }
-        if triangles.len() == self.triangles.len() {
+        if count == self.triangles.len() {
             return Ok(None);
         }
-        // Keep a harmless below-floor facet for the normal nonempty BVH contract.
-        if triangles.is_empty() {
-            triangles.push(
-                self.triangles
-                    .iter()
-                    .max_by(|a, b| a.max[2].total_cmp(&b.max[2]))
-                    .unwrap()
-                    .clone(),
-            );
+        let capacity = count.max(1);
+        let node_capacity = preparation_node_capacity(capacity)?;
+        preparation_memory(capacity, node_capacity)?;
+        let mut triangles = Vec::with_capacity(capacity);
+        if count == 0 {
+            // Harmless below-floor facet for the normal nonempty BVH contract.
+            triangles.push(self.triangles[highest].clone());
+        } else {
+            for t in &self.triangles {
+                if cancel.is_cancelled() {
+                    return Err("surface contact preparation cancelled".into());
+                }
+                if keep(t) {
+                    triangles.push(t.clone());
+                }
+            }
         }
         let mut surface = Self {
             triangles,
-            nodes: Vec::new(),
+            nodes: Vec::with_capacity(node_capacity),
             floor: self.floor,
             convex_solid: std::sync::OnceLock::new(),
         };
-        surface.build(0..surface.triangles.len());
+        surface.build(0..surface.triangles.len(), &mut 0, u64::MAX, cancel, true)?;
         Ok(Some(surface))
     }
     pub fn contact(
@@ -1582,5 +1771,51 @@ mod fast_distance_tests {
             }
         }
         assert!(worst < 1e-10, "worst relative difference {worst}");
+    }
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    fn mesh(count: usize) -> SurfaceMesh {
+        SurfaceMesh {
+            version: 1,
+            units: "mm".into(),
+            triangles: vec![[[0., 0., 1.], [1., 0., 1.], [0., 1., 1.]]; count].into(),
+            surface_error_mm: 0.,
+            source: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn node_capacity_covers_exactly_the_balanced_tree_without_reallocation() {
+        for count in 1..=257 {
+            let prepared = mesh(count).prepare(0., 1e-6, &|| false).unwrap();
+            assert_eq!(
+                prepared.nodes.capacity(),
+                prepared.nodes.len(),
+                "{count} facets"
+            );
+        }
+    }
+
+    #[test]
+    fn bvh_storage_is_guarded_even_when_all_triangle_records_fit() {
+        let count = 128;
+        let mesh = mesh(count);
+        let polls = Cell::new(0);
+        let triangle_bytes = count * std::mem::size_of::<Triangle>();
+        let error = crate::resources::with_memory_budget(triangle_bytes as u64, || {
+            mesh.prepare_bounded(0., 1e-6, &mut 0, 1_000_000, &|| {
+                polls.set(polls.get() + 1);
+                false
+            })
+            .err()
+            .unwrap()
+        });
+        assert!(error.contains("surface preparation needs"), "{error}");
+        assert_eq!(polls.get(), 1, "examined facets before guarding BVH memory");
     }
 }

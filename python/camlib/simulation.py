@@ -41,6 +41,24 @@ _PAIR = struct.Struct("<dd")
 _ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 
+# Move kinds in their wire order (src/stream.rs).
+_MOVE_KINDS = (
+    "rapid",
+    "cut",
+    "plunge",
+    "lead",
+    "link",
+    "retract",
+    "tap",
+    "shift",
+    "thread",
+    "probe_position",
+    "probe_measure",
+    "probe_touch",
+    "probe_return",
+)
+
+
 class ProtocolError(ValueError):
     pass
 
@@ -57,17 +75,318 @@ class SimulationError(RuntimeError):
     pass
 
 
+_REACH_MARKER = "camlib-reach-refusal: "
+
+
+@dataclass(frozen=True)
+class ReachRefusal:
+    """Why a tool assembly cannot reach the depth an operation needs.
+
+    ``limit`` is ``"cutting_length"``, ``"neck"``, ``"shank"`` or ``"holder"``
+    (``holder_section`` gives which). Depths are measured down from
+    ``top_z_mm`` (the operation's top for the cutting length, the
+    obstruction's top for a neck, shank or holder section) to ``z_mm``, the
+    lowest tip Z the operation needs: ``depth_needed_mm = top_z_mm - z_mm``.
+    ``depth_available_mm`` is how far below that top the tip can go before the
+    limiting part meets it (the cutting length, or the part's bottom height
+    above the tip)."""
+
+    operation: str
+    tool: str
+    limit: str
+    holder_section: int | None
+    depth_needed_mm: float
+    depth_available_mm: float
+    top_z_mm: float
+    z_mm: float
+
+
+class ReachRefused(SimulationError):
+    """A planning refusal because the tool assembly cannot reach: the
+    message is the engine's, and ``refusal`` holds the typed reason."""
+
+    def __init__(self, message, refusal):
+        super().__init__(message)
+        self.refusal = refusal
+
+
+def _stream_error(diagnostic):
+    """The error for a native stream's diagnostic: ``ReachRefused`` when the
+    engine refused for reach (its marker line is removed from the message),
+    otherwise ``SimulationError``."""
+    at = diagnostic.rfind(_REACH_MARKER)
+    if at < 0:
+        return SimulationError(diagnostic)
+    try:
+        data, _ = json.JSONDecoder().raw_decode(diagnostic, at + len(_REACH_MARKER))
+        refusal = ReachRefusal(**data)
+    except (ValueError, TypeError):
+        return SimulationError(diagnostic)
+    return ReachRefused(diagnostic[:at].rstrip("\n"), refusal)
+
+
+class StockMesh:
+    """A stock solid as a closed triangle mesh, in millimetres, in the frame of
+    the job it is given to (castings, pre-machined or sawn blanks, or an
+    earlier setup's finished stock moved into this setup's frame).
+
+    ``vertices`` are (x, y, z) points and ``indices`` (a, b, c) triangles,
+    counter-clockwise seen from outside. The mesh must be a closed,
+    consistently oriented surface: every edge is matched by an edge running
+    the other way (vertices are matched by exact coordinates) and the enclosed
+    volume is positive. It is checked by the native engine when made.
+
+    ``approximation`` is None for a mesh that is the stock as given, and says
+    how the mesh differs from the stock otherwise (``StockState.stock_mesh``).
+    ``vertices`` and ``indices`` read as flat, read-only buffers
+    (``numpy.frombuffer(mesh.vertices).reshape(-1, 3)``).
+    """
+
+    __slots__ = ("_vertices", "_indices", "_bounds", "_volume", "_approximation")
+
+    def __init__(self, vertices, indices, *, approximation=None):
+        flat = array("d")
+        for point in vertices:
+            point = tuple(itertools.islice(iter(point), 4))
+            if len(point) != 3:
+                raise ValueError("stock mesh vertex needs exactly three coordinates")
+            flat.extend(float(c) for c in point)
+            if len(flat) % (3 << 16) == 0:
+                _resources.check_memory(len(flat) * 16, "stock mesh vertices", ValueError)
+        triangles = array("I")
+        if triangles.itemsize != 4:
+            triangles = array("L")
+        for triangle in indices:
+            triangle = tuple(itertools.islice(iter(triangle), 4))
+            if len(triangle) != 3 or not all(type(i) is int and 0 <= i <= 0xFFFFFFFF for i in triangle):
+                raise ValueError("stock mesh triangle needs exactly three vertex indices")
+            triangles.extend(triangle)
+        self._set(flat, triangles, approximation, None)
+
+    def _set(self, vertices, indices, approximation, checked):
+        if approximation is not None and not isinstance(approximation, str):
+            raise TypeError("approximation is None (exact) or a description of how the mesh differs")
+        if checked is None:
+            lo, hi, volume = _native_buffers.stock_mesh_check(_le_bytes(vertices), _le_bytes(indices))
+        else:
+            lo, hi, volume = checked
+        self._vertices, self._indices = vertices, indices
+        self._bounds, self._volume = (tuple(lo), tuple(hi)), volume
+        self._approximation = approximation
+
+    @classmethod
+    def from_triangles(cls, triangles, *, approximation=None):
+        """A mesh from separate triangles of three (x, y, z) points; equal
+        points become one vertex."""
+        lookup, vertices, indices = {}, [], []
+        for triangle in triangles:
+            points = tuple(itertools.islice(iter(triangle), 4))
+            if len(points) != 3:
+                raise ValueError("triangle needs exactly three points")
+            row = []
+            for point in points:
+                point = tuple(float(c) for c in itertools.islice(iter(point), 4))
+                if len(point) != 3:
+                    raise ValueError("stock mesh point needs exactly three coordinates")
+                key = struct.pack("<3d", *point)
+                if key not in lookup:
+                    lookup[key] = len(vertices)
+                    vertices.append(point)
+                row.append(lookup[key])
+            indices.append(row)
+        return cls(vertices, indices, approximation=approximation)
+
+    @classmethod
+    def _checked(cls, vertex_bytes, index_bytes, lo, hi, volume, approximation):
+        mesh = object.__new__(cls)
+        vertices, indices = array("d"), array("I" if array("I").itemsize == 4 else "L")
+        vertices.frombytes(vertex_bytes)
+        indices.frombytes(index_bytes)
+        if sys.byteorder != "little":
+            vertices.byteswap()
+            indices.byteswap()
+        mesh._set(vertices, indices, approximation, (lo, hi, volume))
+        return mesh
+
+    @property
+    def vertices(self):
+        return memoryview(self._vertices).toreadonly()
+
+    @property
+    def indices(self):
+        return memoryview(self._indices).toreadonly()
+
+    @property
+    def vertex_count(self):
+        return len(self._vertices) // 3
+
+    @property
+    def triangle_count(self):
+        return len(self._indices) // 3
+
+    @property
+    def bounds(self):
+        """Smallest and largest vertex coordinates: ((x, y, z), (x, y, z))."""
+        return self._bounds
+
+    @property
+    def volume_mm3(self):
+        return self._volume
+
+    @property
+    def approximation(self):
+        return self._approximation
+
+    def triangles(self):
+        """The triangles, each three (x, y, z) points."""
+        v, t = self._vertices, self._indices
+        for k in range(0, len(t), 3):
+            yield tuple((v[3 * i], v[3 * i + 1], v[3 * i + 2]) for i in t[k : k + 3])
+
+    def transformed(self, rotation=((1, 0, 0), (0, 1, 0), (0, 0, 1)), translation_mm=(0, 0, 0)):
+        """The mesh moved rigidly: each point p becomes rotation @ p +
+        translation_mm (rotation given by rows). Use it to move one setup's
+        finished stock into the next setup's frame. The rotation must be
+        proper (orthonormal, determinant +1): a mirror would turn the mesh
+        inside out. Its approximation, if any, is kept."""
+        r = [tuple(float(c) for c in row) for row in rotation]
+        t = tuple(float(c) for c in translation_mm)
+        if len(r) != 3 or any(len(row) != 3 for row in r) or len(t) != 3:
+            raise ValueError("rotation needs 3 rows of 3 and translation_mm 3 values")
+        if not all(math.isfinite(c) for row in r for c in row) or not all(map(math.isfinite, t)):
+            raise ValueError("rotation and translation_mm must be finite")
+        for a in range(3):
+            for b in range(3):
+                if abs(sum(r[a][k] * r[b][k] for k in range(3)) - (a == b)) > 1e-9:
+                    raise ValueError("rotation must be orthonormal (a rigid turn, no scaling or shear)")
+        det = (
+            r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
+            - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+            + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0])
+        )
+        if det < 0:
+            raise ValueError("rotation is a mirror (determinant -1); a stock can only be turned, not mirrored")
+        v = self._vertices
+        moved = array("d")
+        for k in range(0, len(v), 3):
+            p = (v[k], v[k + 1], v[k + 2])
+            moved.extend(sum(row[m] * p[m] for m in range(3)) + t[n] for n, row in enumerate(r))
+        mesh = object.__new__(StockMesh)
+        mesh._set(moved, array(self._indices.typecode, self._indices), self._approximation, None)
+        return mesh
+
+    def to_dict(self):
+        v, t = self._vertices, self._indices
+        return {
+            "vertices": [[v[k], v[k + 1], v[k + 2]] for k in range(0, len(v), 3)],
+            "indices": [[t[k], t[k + 1], t[k + 2]] for k in range(0, len(t), 3)],
+        }
+
+    def __repr__(self):
+        return (
+            f"StockMesh({self.vertex_count} vertices, {self.triangle_count} triangles, "
+            f"bounds={self._bounds}, approximate={self._approximation is not None})"
+        )
+
+
+def _le_bytes(values):
+    if sys.byteorder == "little":
+        return values.tobytes()
+    swapped = array(values.typecode, values)
+    swapped.byteswap()
+    return swapped.tobytes()
+
+
 @dataclass(frozen=True)
 class StockSpec:
+    """A milling or thermal job's stock: a height-field grid over the box
+    ``min_mm``..``max_mm`` with ``cell_size_mm`` cells. Without ``mesh`` the
+    stock is the whole box. With ``mesh`` (a ``StockMesh`` inside the box,
+    see ``StockSpec.from_mesh``) the job starts from that solid, converted to
+    the height field conservatively: each cell may hold material up to the
+    highest point of the mesh above it, and is certain only where the whole
+    column is solid from the box's bottom up. Undercuts and voids are counted
+    as possibly material, never dropped."""
+
     min_mm: tuple
     max_mm: tuple
     cell_size_mm: float = 0.1
     # Optional per-job budget; default is the format invariant (u32 cell
     # indices). Memory: 16 bytes per cell in the engine plus a Python copy.
     max_cells: int = 0xFFFFFFFF
+    mesh: StockMesh | None = None
+
+    def __post_init__(self):
+        if self.mesh is not None:
+            if not isinstance(self.mesh, StockMesh):
+                raise TypeError("StockSpec mesh must be a StockMesh")
+            lo, hi = self.mesh.bounds
+            if any(lo[k] < self.min_mm[k] or hi[k] > self.max_mm[k] for k in range(3)):
+                raise ValueError(
+                    f"stock mesh (from {lo} to {hi}) extends outside the stock box (from "
+                    f"{tuple(self.min_mm)} to {tuple(self.max_mm)}); use StockSpec.from_mesh"
+                )
+
+    @classmethod
+    def from_mesh(cls, mesh, cell_size_mm, max_cells=0xFFFFFFFF):
+        """Stock given as a closed mesh, on a grid over the mesh's bounds."""
+        if not isinstance(mesh, StockMesh):
+            raise TypeError("StockSpec.from_mesh needs a StockMesh")
+        lo, hi = mesh.bounds
+        return cls(tuple(lo), tuple(hi), cell_size_mm, max_cells, mesh)
+
+    def grid_dict(self):
+        """The height-field grid alone (what stock reports refer to)."""
+        return {
+            "version": 1,
+            "units": "mm",
+            "min_mm": tuple(self.min_mm),
+            "max_mm": tuple(self.max_mm),
+            "cell_size_mm": self.cell_size_mm,
+            "max_cells": self.max_cells,
+        }
 
     def to_dict(self):
-        return {"version": 1, "units": "mm", **asdict(self)}
+        result = self.grid_dict()
+        if self.mesh is not None:
+            result["mesh"] = self.mesh.to_dict()
+        return result
+
+
+@dataclass(frozen=True)
+class InitialStock:
+    """Declared whole-cell top-down blank bounds in the setup frame.
+
+    ``bounds_mm`` has one (lower, upper) pair per StockSpec grid cell, in
+    row-major XY order. The caller establishes that the bounds cover the real
+    blank, its placement and source error. Cavities under overhangs are not
+    represented. This is a new stock premise, never a snapshot-proof shortcut.
+    """
+
+    source_id: str
+    revision: str
+    source_sha256: str
+    bounds_mm: tuple
+    source_to_setup: object
+    uncertainty_mm: float
+
+    def __post_init__(self):
+        if not isinstance(self.bounds_mm, (list, tuple)) or any(
+            not isinstance(pair, (list, tuple)) or len(pair) != 2 for pair in self.bounds_mm
+        ):
+            raise TypeError('initial stock bounds need a finite collection of lower/upper pairs')
+        object.__setattr__(self, 'bounds_mm', tuple(tuple(pair) for pair in self.bounds_mm))
+
+    def to_dict(self):
+        return dict(
+            source_id=self.source_id,
+            revision=self.revision,
+            source_sha256=self.source_sha256,
+            source_to_setup=asdict(self.source_to_setup),
+            uncertainty_mm=self.uncertainty_mm,
+            representation='whole_cell_top_down',
+            bounds=[dict(lower_mm=lo, upper_mm=hi) for lo, hi in self.bounds_mm],
+        )
 
 
 @dataclass(frozen=True)
@@ -269,7 +588,7 @@ class _Decoder:
         feed_flag, feed = self.unpack("<Bd")
         curve_kind = self.number("<B")
         start, end = self.unpack("<3d"), self.unpack("<3d")
-        if kind > 8 or curve_kind > 2 or feed_flag > 1 or (not feed_flag and feed != 0):
+        if kind >= len(_MOVE_KINDS) or curve_kind > 2 or feed_flag > 1 or (not feed_flag and feed != 0):
             raise ProtocolError("invalid motion/curve/feed discriminator")
         curve = {"kind": ("line", "arc", "helix")[curve_kind], "start": start, "end": end}
         if curve_kind:
@@ -282,7 +601,7 @@ class _Decoder:
             "id": identifier,
             "operation": operation,
             "tool": tool,
-            "kind": ("rapid", "cut", "plunge", "lead", "link", "retract", "tap", "shift", "thread")[kind],
+            "kind": _MOVE_KINDS[kind],
             "feed_mm_min": feed if feed_flag else None,
             "curve": curve,
         }
@@ -461,6 +780,9 @@ class VerificationUpdate:
                     source="stock",
                     cell_range=finding["cell_range"],
                     contact_point_mm=finding["contact_point_mm"],
+                    obstruction_top_mm=finding.get("obstruction_top_mm"),
+                    lowest_tip_z_mm=finding.get("lowest_tip_z_mm"),
+                    max_clear_radius_mm=finding.get("max_clear_radius_mm"),
                 )
 
 
@@ -548,7 +870,7 @@ class StockState:
         if (
             not required
             <= set(m)
-            <= required | {"operations", "verification", "geometry", "tool_change", "rapid_retracts"}
+            <= required | {"operations", "verification", "geometry", "tool_change", "rapid_retracts", "initial_stock"}
             or type(m["version"]) is not int
             or m["version"] not in (1, 2)
         ):
@@ -587,7 +909,23 @@ class StockState:
             except (ValueError, TypeError, UnicodeError) as error:
                 raise ProtocolError(str(error)) from error
         self._heights = _height_storage(count * 2)
-        _native_buffers.initialise_heights(self._heights, self.min_mm[2], self.max_mm[2])
+        self._initial_volume = None
+        if 'initial_stock' in m:
+            try:
+                _native_buffers.initialise_declared_stock(self._heights, self.canonical_manifest.decode())
+                self._initial_volume = _native_buffers.volume(
+                    self._heights, self.min_mm[2], self.max_mm[2], self.dx * self.dy
+                )[:2]
+            except (ValueError, TypeError) as error:
+                raise ProtocolError(str(error)) from error
+        elif "mesh" in spec:
+            # The run starts from the mesh, converted as the engine does.
+            try:
+                _native_buffers.initialise_stock(self._heights, json.dumps(spec, allow_nan=False))
+            except ValueError as error:
+                raise ProtocolError(str(error)) from error
+        else:
+            _native_buffers.initialise_heights(self._heights, self.min_mm[2], self.max_mm[2])
         self.completed, self.fraction, self.finished = 0, 0.0, False
         self.position = tuple(m["initial_position_mm"])
         self.last_motion_id = None
@@ -607,6 +945,8 @@ class StockState:
         ):
             raise ProtocolError("invalid tool change pose")
         self._tool_change = change
+        # Fresh native-initialized cells match the manifest's initial premise.
+        # Restoring any checkpoint resets this flag, even at move zero.
         self._token, self._initial_full_stock = object(), True
 
     def tool_change_tip(self, tool, position=None):
@@ -632,6 +972,20 @@ class StockState:
     @property
     def heights(self):
         return memoryview(self._heights).toreadonly()
+
+    def stock_mesh(self):
+        """The stock as a closed ``StockMesh``, in this run's frame.
+
+        Approximate (``mesh.approximation`` says how): the height-field stock
+        returns each cell as a solid column from the stock's bottom up to the
+        highest material that may remain over it. The mesh contains all the
+        material that may remain, but also everything below it in each column
+        and up to one cell of removed material beside walls. It is
+        conservative stock for a later setup (``StockSpec.from_mesh`` after
+        ``StockMesh.transformed``), not a measured or verified part. Refused
+        when no material is left."""
+        grid = {k: v for k, v in self._manifest["stock"].items() if k != "mesh"}
+        return StockMesh._checked(*_native_buffers.stock_mesh(self._heights, json.dumps(grid, allow_nan=False)))
 
     @property
     def checkpoint_bytes(self):
@@ -705,7 +1059,10 @@ class StockState:
                 raise ProtocolError("programmed feed must be positive and finite")
         if self._control_context is not None:
             try:
-                self._control_context.check_tool(motion['tool'], motion['kind'] in ('rapid', 'shift'))
+                # Rapids, oriented shifts and probing moves need no running spindle.
+                self._control_context.check_tool(
+                    motion['tool'], motion['kind'] in ('rapid', 'shift') or motion['kind'].startswith('probe_')
+                )
             except ValueError as error:
                 raise ProtocolError(str(error)) from error
 
@@ -891,6 +1248,12 @@ class StockState:
 
     def volume(self):
         values = _native_buffers.volume(self._heights, self.min_mm[2], self.max_mm[2], self.dx * self.dy)
+        return self._volume_from_bounds(values)
+
+    def _volume_from_bounds(self, values):
+        if self._initial_volume is not None:
+            lo, hi = values[:2]
+            values = (lo, hi, max(0, self._initial_volume[0] - hi), max(0, self._initial_volume[1] - lo))
         return dict(
             zip(("remaining_lower_mm3", "remaining_upper_mm3", "removed_lower_mm3", "removed_upper_mm3"), values)
         )
@@ -1169,6 +1532,60 @@ class MaterialStage:
     after_operation: str
 
 
+def simulation_manifest(
+    stock,
+    tools,
+    *,
+    revision,
+    initial_position_mm,
+    run_id=None,
+    sweep=None,
+    operations=(),
+    verification=None,
+    stream_version=1,
+    tool_change=None,
+    rapid_retracts=True,
+    turning=None,
+    initial_stock=None,
+):
+    """The JSON stream manifest a ``Simulation`` sends to ``cam-sim-stream``
+    (also the setup manifest of a ``camlib.post.post_job`` input)."""
+    if type(stream_version) is not int or stream_version not in (1, 2) or stream_version == 2 and operations:
+        raise ValueError('stream_version must be 1 or 2; version 2 uses authored typed events')
+    manifest = {
+        "version": stream_version,
+        "run": {"id": run_id or uuid.uuid4().hex, "revision": revision},
+        "stock": stock.to_dict() if hasattr(stock, "to_dict") else stock,
+        "tools": [t.to_dict() if hasattr(t, "to_dict") else t for t in tools],
+        "initial_position_mm": initial_position_mm,
+        "sweep": dict(sweep) if isinstance(sweep, dict) else asdict(sweep or SweepOptions()),
+    }
+    if operations:
+        if not isinstance(operations, (list, tuple)):
+            raise TypeError("operations must be a list or tuple (a finite collection)")
+        definitions = list(operations)
+        manifest["operations"] = [op.to_dict() if hasattr(op, "to_dict") else op for op in definitions]
+    if initial_stock is not None:
+        manifest["initial_stock"] = initial_stock.to_dict() if hasattr(initial_stock, "to_dict") else initial_stock
+    if verification is not None:
+        manifest["verification"] = verification.to_dict() if hasattr(verification, "to_dict") else verification
+    if tool_change is not None:
+        manifest["tool_change"] = tool_change.to_dict() if hasattr(tool_change, "to_dict") else dict(tool_change)
+    if type(rapid_retracts) is not bool:
+        raise ValueError("rapid_retracts must be a bool")
+    if turning is not None:
+        # A lathe run: its turning setup plans and checks every move.
+        if operations or verification is not None or tool_change is not None:
+            raise ValueError("a lathe run takes its operations from its turning setup (no milling checks/poses)")
+        manifest["turning"] = turning
+    elif rapid_retracts:
+        manifest["rapid_retracts"] = True
+    from ._geometry import share_geometry
+
+    manifest = share_geometry(manifest)
+    return manifest
+
+
 class Simulation:
     """Synchronous headless API; each yielded update includes authoritative stock.
 
@@ -1193,39 +1610,24 @@ class Simulation:
         tool_change=None,
         rapid_retracts=True,
         turning=None,
+        initial_stock=None,
         _on_spawn=None,
     ):
-        if type(stream_version) is not int or stream_version not in (1, 2) or stream_version == 2 and operations:
-            raise ValueError('stream_version must be 1 or 2; version 2 uses authored typed events')
-        manifest = {
-            "version": stream_version,
-            "run": {"id": run_id or uuid.uuid4().hex, "revision": revision},
-            "stock": stock.to_dict() if hasattr(stock, "to_dict") else stock,
-            "tools": [t.to_dict() if hasattr(t, "to_dict") else t for t in tools],
-            "initial_position_mm": initial_position_mm,
-            "sweep": dict(sweep) if isinstance(sweep, dict) else asdict(sweep or SweepOptions()),
-        }
-        if operations:
-            if not isinstance(operations, (list, tuple)):
-                raise TypeError("operations must be a list or tuple (a finite collection)")
-            definitions = list(operations)
-            manifest["operations"] = [op.to_dict() if hasattr(op, "to_dict") else op for op in definitions]
-        if verification is not None:
-            manifest["verification"] = verification.to_dict() if hasattr(verification, "to_dict") else verification
-        if tool_change is not None:
-            manifest["tool_change"] = tool_change.to_dict() if hasattr(tool_change, "to_dict") else dict(tool_change)
-        if type(rapid_retracts) is not bool:
-            raise ValueError("rapid_retracts must be a bool")
-        if turning is not None:
-            # A lathe run: its turning setup plans and checks every move.
-            if operations or verification is not None or tool_change is not None:
-                raise ValueError("a lathe run takes its operations from its turning setup (no milling checks/poses)")
-            manifest["turning"] = turning
-        elif rapid_retracts:
-            manifest["rapid_retracts"] = True
-        from ._geometry import share_geometry
-
-        manifest = share_geometry(manifest)
+        manifest = simulation_manifest(
+            stock,
+            tools,
+            revision=revision,
+            initial_position_mm=initial_position_mm,
+            run_id=run_id,
+            sweep=sweep,
+            operations=operations,
+            verification=verification,
+            stream_version=stream_version,
+            tool_change=tool_change,
+            rapid_retracts=rapid_retracts,
+            turning=turning,
+            initial_stock=initial_stock,
+        )
         self._regeneration = regeneration
         self.executable = _executable("cam-sim-stream", executable)
         self._errors = tempfile.TemporaryFile()
@@ -1258,7 +1660,7 @@ class Simulation:
             self._process.stdin.write(raw)
             self._process.stdin.flush()
         except (OSError, ValueError) as error:
-            raise SimulationError(self._diagnostic()) from error
+            raise _stream_error(self._diagnostic()) from error
 
     def _diagnostic(self):
         if self.cancelled:
@@ -1288,7 +1690,7 @@ class Simulation:
         if not self._fill(20):
             if len(self._buffer) > self._at:
                 raise ProtocolError("truncated simulation stream")
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         magic, version, kind, length, _ = _HEADER.unpack_from(self._buffer, self._at)
         if magic != b"CAMLSTRM" or version != 1 or kind not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
             raise ProtocolError("unsupported stream header")
@@ -1305,7 +1707,7 @@ class Simulation:
         committed-motion frames already buffered (at least one, reading if
         needed); None when the next frame is another kind."""
         if not self._fill(20):
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         kind = _HEADER.unpack_from(self._buffer, self._at)[2]
         if kind not in (1, 10) and not (kind == 8 and checks and self._last_motion_frame is not None):
             return None
@@ -1566,7 +1968,10 @@ class Simulation:
                         or data["report"].get("geometric_residual_status") not in ("estimated", "unknown")
                     ):
                         raise ProtocolError("operation end order mismatch")
-                    if active_cuts == 0:
+                    if definitions[completed_operations].get("kind") == "probe":
+                        # Probing and tool setting never cut, by design.
+                        pass
+                    elif active_cuts == 0:
                         warnings.warn(
                             f"operation {active!r} produced no cutting motion (region smaller "
                             "than the tool, outside the stock, or already cleared)",
@@ -1609,7 +2014,7 @@ class Simulation:
                 if self._verification is not None:
                     self._verification.finish(self.state.completed)
                 if self._process.wait(timeout=5) != 0:
-                    raise SimulationError(self._diagnostic())
+                    raise _stream_error(self._diagnostic())
                 self._pending, self.end_frame = 0, frame
                 return
             else:
@@ -1633,7 +2038,7 @@ class Simulation:
         if not self.state.finished:
             raise ProtocolError("native simulation did not send explicit finish")
         if self._process.wait(timeout=5) != 0:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         self.end_frame = frame
         if self._verification is not None:
             self._verification.finish(self.state.completed)
@@ -1707,21 +2112,21 @@ class PrefixSession:
 
     def _next(self):
         if self._closed:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         frame = Frame.read(self._process.stdout)
         if frame is None:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         return frame
 
     def _send(self, command):
         if self._closed:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         raw = json.dumps(command, allow_nan=False, separators=(",", ":")).encode() + b"\n"
         try:
             self._process.stdin.write(raw)
             self._process.stdin.flush()
         except (OSError, ValueError) as error:
-            raise SimulationError(self._diagnostic()) from error
+            raise _stream_error(self._diagnostic()) from error
 
     def _matching_state(self, state):
         if state.fraction or state.finished or state._digest != self._digest:

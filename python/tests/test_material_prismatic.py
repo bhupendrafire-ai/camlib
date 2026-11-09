@@ -269,12 +269,14 @@ class PrismaticMaterialTest(unittest.TestCase):
         self.assertTrue(material["exported"])
 
     def test_default_tolerance_cannot_prove_tangent_walls(self):
-        # 0.001 mm is below the mesh error plus the posted rounding: the
-        # wall passes stay unproven (and say so); other cells are decided.
+        # 0.001 mm is below the mesh error plus posted rounding. With the
+        # source expanded by its error, unproven wall moves touch every
+        # possible-gouge cell in this fixture. Air/top proofs cannot clear them.
         material, report = run(0.5, export=True)
         proof = material["sweep_proof"]
+        self.assertTrue(report["complete"])  # This is not a work-budget refusal.
         self.assertGreater(proof["unproven_moves"], 0)
-        self.assertGreater(proof["decided_cells"], 0)
+        self.assertEqual(proof["decided_cells"], 0)
         self.assertLess(proof["decided_cells"], material["gouge"]["possible_only_cells"])
         self.assertEqual(material_status({**report, "gouge": material["gouge"]}, proof), "uncertain")
         self.assertFalse(material["exported"])

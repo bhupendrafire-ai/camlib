@@ -406,7 +406,7 @@ impl<'a> FinishingAccumulator<'a> {
             return Ok(());
         };
         let guard = self.guard;
-        let tol = self.target.options().comparison_tolerance_mm;
+        let tol = self.target.options().residual_tolerance();
         let area = self.area;
         self.deferred.add(
             band(actual, target, [self.scope.floor_z_mm; 2], guard),

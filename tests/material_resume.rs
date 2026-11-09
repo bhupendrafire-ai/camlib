@@ -33,6 +33,7 @@ fn cuboid(lo: Vec3, hi: Vec3) -> Vec<[Vec3; 3]> {
 fn manifest() -> StreamManifest {
     StreamManifest {
         tool_change: None,
+        initial_stock: None,
         rapid_retracts: false,
         turning: None,
         version: 1,
@@ -421,19 +422,34 @@ fn malformed_or_foreign_proof_sections_are_refused() {
     )
     .unwrap();
     // Wrong tag, wrong stage count, a truncated state, a trailing byte,
-    // a state for another grid.
+    // a state for another grid. (The tag is followed by the 32-byte digest
+    // of the cells the states were computed with.)
     let mut bad = body.to_vec();
     bad[at] ^= 1;
     refused(bad);
     let mut bad = body.to_vec();
-    bad[at + 8] = 2;
+    bad[at + 8 + 32] = 2;
     refused(bad);
     refused(body[..body.len() - 1].to_vec());
     refused([body, &[0]].concat());
     let mut bad = body.to_vec();
-    let cells = at + 8 + 4 + 8 + 17;
+    let cells = at + 8 + 32 + 4 + 8 + 17;
     bad[cells] ^= 1;
     refused(bad);
+    // States kept for other cells (here: the digest differs) restore the
+    // stock but not the proof: the history before the resume is unseen.
+    let mut other_cells = body.to_vec();
+    other_cells[at + 8] ^= 1;
+    let mut resumed = StreamProducer::from_checkpoint(
+        m.clone(),
+        &reframe(&checkpoint, &other_cells),
+        CHECKPOINT_FRAME_LIMIT,
+    )
+    .unwrap();
+    push(&mut resumed, &moves[5..]);
+    let (_, proof) = finish(&mut resumed, &m);
+    assert!(!proof.history_complete);
+    assert_eq!(proof.decided_cells, 0);
     // A checksum mismatch alone is refused as before.
     let mut corrupt = checkpoint.clone();
     *corrupt.last_mut().unwrap() ^= 1;

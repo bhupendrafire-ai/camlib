@@ -140,7 +140,7 @@ fn decode_committed_chunk<'py>(
     let (feed_flag, feed) = (d.u8()?, d.f64()?);
     let curve_kind = d.u8()?;
     let (a, b) = (d.point()?, d.point()?);
-    if kind > 8 || curve_kind > 2 || feed_flag > 1 || (feed_flag == 0 && feed != 0.) {
+    if kind > 12 || curve_kind > 2 || feed_flag > 1 || (feed_flag == 0 && feed != 0.) {
         return Err(PyValueError::new_err(
             "invalid motion/curve/feed discriminator",
         ));
@@ -198,7 +198,19 @@ fn decode_committed_chunk<'py>(
     motion.set_item(
         "kind",
         [
-            "rapid", "cut", "plunge", "lead", "link", "retract", "tap", "shift", "thread",
+            "rapid",
+            "cut",
+            "plunge",
+            "lead",
+            "link",
+            "retract",
+            "tap",
+            "shift",
+            "thread",
+            "probe_position",
+            "probe_measure",
+            "probe_touch",
+            "probe_return",
         ][kind as usize],
     )?;
     motion.set_item("feed_mm_min", (feed_flag == 1).then_some(feed))?;
@@ -627,6 +639,106 @@ fn initialise_heights(
         .as_mut_slice(py)
         .ok_or_else(|| PyValueError::new_err("height buffer must be writable contiguous f64"))?;
     buffers::initialise_heights(&mut Writable(cells), bottom, top).map_err(PyValueError::new_err)
+}
+
+#[pyfunction]
+fn initialise_declared_stock(
+    py: Python<'_>,
+    heights: &Bound<'_, PyAny>,
+    manifest: &str,
+) -> PyResult<()> {
+    let manifest: camlib::stream::StreamManifest =
+        serde_json::from_str(manifest).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    manifest.validate().map_err(PyValueError::new_err)?;
+    let spec = manifest.stock.height().map_err(PyValueError::new_err)?;
+    let initial = manifest
+        .initial_stock
+        .as_ref()
+        .ok_or_else(|| PyValueError::new_err("manifest has no declared initial stock"))?;
+    initial.validate(spec).map_err(PyValueError::new_err)?;
+    let lease = PyBuffer::<f64>::get(heights)?;
+    if lease.dimensions() != 1 {
+        return Err(PyValueError::new_err(
+            "height buffer must be one-dimensional",
+        ));
+    }
+    let cells = lease
+        .as_mut_slice(py)
+        .ok_or_else(|| PyValueError::new_err("height buffer must be writable contiguous f64"))?;
+    if cells.len() != initial.bounds.len() * 2 {
+        return Err(PyValueError::new_err(
+            "initial stock buffer/grid length mismatch",
+        ));
+    }
+    for (pair, bounds) in cells.as_chunks::<2>().0.iter().zip(&initial.bounds) {
+        pair[0].set(bounds.lower_mm);
+        pair[1].set(bounds.upper_mm);
+    }
+    Ok(())
+}
+/// A run's starting stock (a box or a mesh stock, as JSON) into a fresh
+/// height buffer.
+#[pyfunction]
+fn initialise_stock(py: Python<'_>, heights: &Bound<'_, PyAny>, stock_json: &str) -> PyResult<()> {
+    let lease = PyBuffer::<f64>::get(heights)?;
+    if lease.dimensions() != 1 {
+        return Err(PyValueError::new_err(
+            "height buffer must be one-dimensional",
+        ));
+    }
+    let cells = lease
+        .as_mut_slice(py)
+        .ok_or_else(|| PyValueError::new_err("height buffer must be writable contiguous f64"))?;
+    camlib::stock_mesh::initialise_stock(&mut Writable(cells), stock_json, &|| false)
+        .map_err(PyValueError::new_err)
+}
+/// Check a stock mesh (little-endian f64 vertices, u32 triangle indices):
+/// its bounds and enclosed volume.
+#[pyfunction]
+fn stock_mesh_check(vertices: &[u8], indices: &[u8]) -> PyResult<([f64; 3], [f64; 3], f64)> {
+    let mesh =
+        camlib::stock_mesh::mesh_from_bytes(vertices, indices).map_err(PyValueError::new_err)?;
+    let [lo, hi] = mesh.bounds();
+    Ok((lo, hi, mesh.volume_mm3()))
+}
+/// The closed mesh of a height buffer's upper bounds on the grid given as
+/// JSON: vertex bytes, index bytes, bounds, enclosed volume and what the
+/// mesh approximates.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn stock_mesh<'py>(
+    py: Python<'py>,
+    heights: &Bound<'py, PyAny>,
+    grid_json: &str,
+) -> PyResult<(
+    Bound<'py, PyBytes>,
+    Bound<'py, PyBytes>,
+    [f64; 3],
+    [f64; 3],
+    f64,
+    &'static str,
+)> {
+    let lease = PyBuffer::<f64>::get(heights)?;
+    if lease.dimensions() != 1 {
+        return Err(PyValueError::new_err(
+            "height buffer must be one-dimensional",
+        ));
+    }
+    let cells = lease
+        .as_slice(py)
+        .ok_or_else(|| PyValueError::new_err("height buffer must be contiguous f64"))?;
+    let mesh = camlib::stock_mesh::buffer_mesh(&Readable(cells), grid_json, &|| false)
+        .map_err(PyValueError::new_err)?;
+    let (vertices, indices) = camlib::stock_mesh::mesh_to_bytes(&mesh);
+    let [lo, hi] = mesh.bounds();
+    Ok((
+        PyBytes::new(py, &vertices),
+        PyBytes::new(py, &indices),
+        lo,
+        hi,
+        mesh.volume_mm3(),
+        camlib::stock_mesh::HEIGHT_FIELD_APPROXIMATION,
+    ))
 }
 #[pyfunction]
 fn validate_delta(
@@ -1209,6 +1321,81 @@ fn schedule_motion<'py>(
     })?;
     Ok(PyBytes::new(py, &bytes))
 }
+
+#[pyfunction]
+#[pyo3(signature = (program_json, stock_json, policy_json, cancel=None))]
+fn schedule_engagement<'py>(
+    py: Python<'py>,
+    program_json: &str,
+    stock_json: &str,
+    policy_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if program_json
+        .len()
+        .saturating_add(stock_json.len())
+        .saturating_add(policy_json.len())
+        > 256 * 1024 * 1024
+    {
+        return Err(PyValueError::new_err("engagement input byte cap"));
+    }
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    let bytes = py.detach(|| {
+        let program = serde_json::from_str(program_json)
+            .map_err(|e| PyValueError::new_err(format!("program: {e}")))?;
+        let (stock, initial, sweep): (
+            camlib::stock::StockSpec,
+            Option<camlib::stock::InitialStock>,
+            camlib::stock::SweepOptions,
+        ) = serde_json::from_str(stock_json)
+            .map_err(|e| PyValueError::new_err(format!("stock: {e}")))?;
+        let policy = serde_json::from_str(policy_json)
+            .map_err(|e| PyValueError::new_err(format!("feed policy: {e}")))?;
+        let report = camlib::feed_policy::apply(&program, stock, initial, sweep, &policy, &*flag)
+            .map_err(PyValueError::new_err)?;
+        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(PyValueError::new_err("engagement feed analysis cancelled"));
+        }
+        serde_json::to_vec(&report).map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(PyBytes::new(py, &bytes))
+}
+#[pyfunction]
+#[pyo3(signature = (kind, request_json, cancel=None))]
+fn prepare_geometry<'py>(
+    py: Python<'py>,
+    kind: &str,
+    request_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    if request_json.len() > 256 * 1024 * 1024 {
+        return Err(PyValueError::new_err("preparation input byte cap"));
+    }
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    let bytes = py.detach(|| {
+        let value = match kind {
+            "reach" => {
+                let request = serde_json::from_str(request_json)
+                    .map_err(|e| PyValueError::new_err(format!("reach request: {e}")))?;
+                serde_json::to_vec(
+                    &camlib::preparation::reach(&request, &*flag).map_err(PyValueError::new_err)?,
+                )
+            }
+            "blank" => {
+                let request = serde_json::from_str(request_json)
+                    .map_err(|e| PyValueError::new_err(format!("blank request: {e}")))?;
+                serde_json::to_vec(
+                    &camlib::preparation::enclose_blank(&request, &*flag)
+                        .map_err(PyValueError::new_err)?,
+                )
+            }
+            _ => return Err(PyValueError::new_err("unknown preparation query")),
+        };
+        value.map_err(|e| PyValueError::new_err(e.to_string()))
+    })?;
+    Ok(PyBytes::new(py, &bytes))
+}
+
 /// Generic syntax-independent geometry checker used by ordinary Python posts.
 #[pyclass]
 struct IntentSession {
@@ -1535,6 +1722,34 @@ type MotionWords = (
     bool,
 );
 
+/// Post a setup from its JSON job with the Rust default post
+/// (`camlib::post_job`); returns the JSON report.
+#[pyfunction]
+#[pyo3(signature=(input_json, cancel=None))]
+fn post_job(
+    py: Python<'_>,
+    input_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<String> {
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    py.detach(|| camlib::post_job::run(input_json, &*flag))
+        .map_err(PyValueError::new_err)
+}
+
+/// Post an explicit program's events with the Rust default post
+/// (`camlib::gcode::post_program`); returns JSON.
+#[pyfunction]
+#[pyo3(signature=(input_json, cancel=None))]
+fn post_program(
+    py: Python<'_>,
+    input_json: &str,
+    cancel: Option<PyRef<'_, PostCancellation>>,
+) -> PyResult<String> {
+    let flag = cancel.map(|c| c.flag.clone()).unwrap_or_default();
+    py.detach(|| camlib::gcode::post_program(input_json, &*flag))
+        .map_err(PyValueError::new_err)
+}
+
 /// The highest spindle speed along a move at constant surface speed (the
 /// engine's own bound, so posts and decoders agree with the validator).
 #[pyfunction]
@@ -1545,6 +1760,40 @@ fn css_rpm_bound(curve_json: &str, m_min: f64, max_rpm: f64) -> PyResult<f64> {
     let curve: camlib::motion::Curve =
         serde_json::from_str(curve_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
     Ok(camlib::motion::css_rpm_bound(&curve, m_min, max_rpm))
+}
+
+/// The moves of a probing cycle (`camlib::probe::ProbeCycle::legs`) from
+/// its start, for posts that write the cycle as controller blocks: (kind,
+/// end, feed or None). `radius_mm` is the stylus ball radius, or the
+/// measured cutter's for tool setting. Decoders must not use this: they read
+/// the moves back from the written blocks.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn probe_legs(
+    cycle_json: &str,
+    radius_mm: f64,
+) -> PyResult<((f64, f64, f64), Vec<(String, (f64, f64, f64), Option<f64>)>)> {
+    if cycle_json.len() > 16384 {
+        return Err(PyValueError::new_err(
+            "probe cycle input exceeds 16384 bytes",
+        ));
+    }
+    let cycle: camlib::probe::ProbeCycle =
+        serde_json::from_str(cycle_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let start = cycle.start(radius_mm).map_err(PyValueError::new_err)?;
+    let legs = cycle.legs(radius_mm).map_err(PyValueError::new_err)?;
+    Ok((
+        (start[0], start[1], start[2]),
+        legs.into_iter()
+            .map(|l| {
+                let kind = serde_json::to_value(l.kind)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                (kind, (l.end[0], l.end[1], l.end[2]), l.feed_mm_min)
+            })
+            .collect(),
+    ))
 }
 
 #[pyfunction]
@@ -2115,12 +2364,18 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(turning_rectangle_holder, module)?)?;
     module.add_function(wrap_pyfunction!(turning_validate_tool, module)?)?;
     module.add_function(wrap_pyfunction!(schedule_motion, module)?)?;
+    module.add_function(wrap_pyfunction!(schedule_engagement, module)?)?;
     module.add_function(wrap_pyfunction!(validate_heights, module)?)?;
     module.add_function(wrap_pyfunction!(decode_committed_chunk, module)?)?;
     module.add_function(wrap_pyfunction!(accept_motion_frames, module)?)?;
     module.add_function(wrap_pyfunction!(volume, module)?)?;
     module.add_function(wrap_pyfunction!(display_patch, module)?)?;
     module.add_function(wrap_pyfunction!(initialise_heights, module)?)?;
+    module.add_function(wrap_pyfunction!(initialise_declared_stock, module)?)?;
+    module.add_function(wrap_pyfunction!(prepare_geometry, module)?)?;
+    module.add_function(wrap_pyfunction!(initialise_stock, module)?)?;
+    module.add_function(wrap_pyfunction!(stock_mesh_check, module)?)?;
+    module.add_function(wrap_pyfunction!(stock_mesh, module)?)?;
     module.add_function(wrap_pyfunction!(validate_delta, module)?)?;
     module.add_function(wrap_pyfunction!(display_overlay_patch, module)?)?;
     module.add_class::<MaterialTarget>()?;
@@ -2130,6 +2385,9 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(format_post_words, module)?)?;
     module.add_function(wrap_pyfunction!(round_circular_words, module)?)?;
     module.add_function(wrap_pyfunction!(css_rpm_bound, module)?)?;
+    module.add_function(wrap_pyfunction!(post_job, module)?)?;
+    module.add_function(wrap_pyfunction!(post_program, module)?)?;
+    module.add_function(wrap_pyfunction!(probe_legs, module)?)?;
     module.add_class::<PostCancellation>()?;
     module.add_class::<StreamVerification>()?;
     module.add_class::<StreamControlContext>()?;

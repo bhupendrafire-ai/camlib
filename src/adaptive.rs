@@ -427,10 +427,20 @@ impl AdaptivePlan {
         first_id: u64,
         cancel: &impl CancelSignal,
     ) -> Result<Self, String> {
+        let scope = crate::pocket::ReachScope {
+            operation: &op.pocket.id,
+            tool,
+            region: &op.pocket.region,
+            lowest_tip_z: op.pocket.floor_z_mm + op.pocket.bottom_allowance_mm,
+            clearance_z: op.pocket.clearance_z_mm,
+            // Adaptive paths may approach the boundary within this tolerance.
+            boundary_slack_mm: op.boundary_tolerance_mm,
+        };
         let (envelope, bound) = crate::pocket::StockTop::prepare(
             stock,
             op.pocket.top_z_mm,
             op.pocket.tolerance_mm,
+            &scope,
             cancel,
         )?;
         let mut plan = Self::prepare(op, tool, &envelope, initial, first_id, cancel)?;
@@ -1054,6 +1064,17 @@ impl AdaptivePlan {
         }
     }
     pub fn next_motion_with_stock(
+        &mut self,
+        stock: &Stock,
+        cancel: &impl CancelSignal,
+    ) -> Result<Option<Motion>, String> {
+        let result = self.next_planned(stock, cancel)?;
+        if let (Some(bound), Some(motion)) = (&self.stock_top, &result) {
+            bound.admit(motion)?;
+        }
+        Ok(result)
+    }
+    fn next_planned(
         &mut self,
         stock: &Stock,
         cancel: &impl CancelSignal,

@@ -49,6 +49,7 @@ dependencies = [
  "camlib",
  "crc32fast",
  "pyo3",
+ "pyo3-build-config",
  "serde",
  "serde_json",
 ]

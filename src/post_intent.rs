@@ -109,6 +109,18 @@ pub struct IntentChecker {
     deferred_compensation: Option<Event>,
 }
 
+/// Transport bound on the blocks one source event writes: 8, or for a
+/// probing cycle, which writes all its moves and their checks, 512 (a cycle
+/// has at most a few dozen moves of at most four blocks each).
+const PROBE_BLOCK_LINES: usize = 512;
+fn block_lines(event: &Event) -> usize {
+    if matches!(event, Event::Probe { .. }) {
+        PROBE_BLOCK_LINES
+    } else {
+        8
+    }
+}
+
 fn cancelled(cancel: &impl CancelSignal) -> Result<(), String> {
     if cancel.is_cancelled() {
         Err("post cancelled; batch not committed".into())
@@ -519,6 +531,15 @@ impl IntentChecker {
                 ));
             }
             self.cycle = (!lines.is_empty()).then_some((index, index + *covers as usize));
+        } else if let Event::Probe { covers, .. } = expected {
+            // A probing cycle is always written as the controller's probing
+            // blocks (they decode to the cycle; its moves come from them).
+            if lines.is_empty() {
+                return Err(format!(
+                    "event {index}: a probing cycle must be written as probing blocks"
+                ));
+            }
+            self.cycle = Some((index, index + *covers as usize));
         } else if let Some((cycle, last)) = self.cycle
             && index > cycle
             && index <= last
@@ -679,6 +700,38 @@ impl IntentChecker {
             // A controller's dwell resolution may round the time: never more
             // than 0.5 ms short, at most 10 ms long.
             (Event::Cycle { .. }, []) => (None, None),
+            // The decoded cycle: what is measured and stored exactly, the
+            // search within the output tolerance (its words are rounded).
+            (
+                Event::Probe {
+                    cycle: a,
+                    covers: n,
+                },
+                [
+                    Event::Probe {
+                        cycle: b,
+                        covers: m,
+                    },
+                ],
+            ) if n == m
+                && a.feature == b.feature
+                && a.result == b.result
+                && a.retract_z_mm == b.retract_z_mm
+                && (a.search_mm - b.search_mm).abs() <= self.settings.tolerance_mm
+                && [
+                    (a.position_feed_mm_min, b.position_feed_mm_min),
+                    (Some(a.measure_feed_mm_min), Some(b.measure_feed_mm_min)),
+                    (Some(a.return_feed_mm_min), Some(b.return_feed_mm_min)),
+                ]
+                .iter()
+                .all(|f| match f {
+                    (Some(x), Some(y)) => (x - y).abs() <= self.settings.feed_tolerance_mm_min,
+                    (None, None) => true,
+                    _ => false,
+                }) =>
+            {
+                (None, None)
+            }
             // Laser power words have a controller resolution (GRBL: S of
             // $30): within half a percent.
             (Event::Beam { power_percent: a }, [Event::Beam { power_percent: b }])
@@ -815,7 +868,10 @@ impl IntentChecker {
             || source.len() > 64
             || source.len() != decoded.len()
             || source.len() != blocks.len()
-            || blocks.iter().any(|b| b.len() > 8)
+            || blocks
+                .iter()
+                .zip(source)
+                .any(|(b, e)| b.len() > block_lines(e))
             || decoded.iter().any(|b| b.len() > 8)
         {
             return Err(
@@ -1072,7 +1128,7 @@ impl IntentChecker {
             || ranges.len() > 64
             || ranges.len() != decoded.len()
             || ranges.len() != blocks.len()
-            || blocks.iter().any(|b| b.len() > 8)
+            || blocks.iter().any(|b| b.len() > PROBE_BLOCK_LINES)
             || decoded.iter().any(|b| b.len() > 8)
         {
             return Err("generic lowering lifecycle/batch/block cap".into());
@@ -1111,6 +1167,9 @@ impl IntentChecker {
             let index = p.event_index;
             let actual_start = p.actual_start;
             let whole = p.whole;
+            if lines.len() > block_lines(&event) {
+                return Err("generic lowering lifecycle/batch/block cap".into());
+            }
             let mut chunk = next.decoded_event(&event, actual, lines, index)?;
             if let Event::Motion { motion } = &original {
                 let decoded = chunk.checked[0].motion.as_ref();

@@ -866,11 +866,11 @@ impl WaterlinePlan {
                 ),
                 (
                     spec.max_mm[2] - op.bottom_z_mm < cutter.cutting_length_mm - guard,
-                    format!(
+                    crate::reach::ReachRefusal::cutting_length(&op.id, &op.tool, spec.max_mm[2], op.bottom_z_mm, cutter.cutting_length_mm).error(format_args!(
                         "depth {} below the stock top exceeds the cutting length {}",
                         spec.max_mm[2] - op.bottom_z_mm,
                         cutter.cutting_length_mm
-                    ),
+                    )),
                 ),
                 (
                     initial.iter().all(|v| v.is_finite() && v.abs() <= 1e6),

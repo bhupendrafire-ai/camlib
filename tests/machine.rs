@@ -4,6 +4,7 @@ use serde_json::json;
 use std::sync::atomic::AtomicBool;
 fn manifest() -> StreamManifest {
     StreamManifest {
+        initial_stock: None,
         version: 1,
         run: RunIdentity {
             id: "machine-test".into(),

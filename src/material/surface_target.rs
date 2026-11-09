@@ -69,6 +69,9 @@ impl SurfaceTarget {
         cancel: &impl CancelSignal,
     ) -> Result<PreparedSurfaceTarget, String> {
         options.validate()?;
+        if options.scope_to_region {
+            return Err("local region scope requires a prismatic target".into());
+        }
         if self.version != 1
             || self.units != "mm"
             || !valid_id(&self.id)
@@ -205,16 +208,30 @@ impl MaterialGeometry for PreparedSurfaceTarget {
             }
         }
     }
-    /// Only cells charge (larger tiles are mixed without a query). Per
-    /// cell the envelope query charges at most every hierarchy node, every
-    /// facet, and per candidate facet 3 plus every open edge so far (at
-    /// most 3 per facet): N + T + T(3 + 3T); the inner patches charge
-    /// their segments once each.
+    /// Only cells charge (larger tiles are mixed without a query). Per cell
+    /// the envelope query (`PreparedSurface::material_bounds`, with T facets,
+    /// N hierarchy nodes and L = ⌊log2 T⌋ + 1) charges at most: its stack
+    /// (L + 1); every node (N) and facet (T); the candidate buffer's growth
+    /// (doublings sum to its final capacity, at most T); the charged heapsort
+    /// (per level one swap of the extraction plus at most three charges per
+    /// sift level: T(1 + 5L)); and per candidate 3, per edge 1 + its tree
+    /// lookup allowance 16(⌊log2 3T⌋ + 1) + 1 insertion, and a boundary scan
+    /// of at most 3T stored edges. The inner patches charge their segments
+    /// once each.
     fn boundary_tests_needed(&self, cells: u64, _tiles: u64) -> u64 {
         let t = self.surface.prism_count() as u64;
-        let per_cell = (self.surface.node_count() as u64)
-            .saturating_add(t)
-            .saturating_add(t.saturating_mul(3u64.saturating_add(t.saturating_mul(3))))
+        let n = self.surface.node_count() as u64;
+        let bits = |v: u64| u64::from(u64::BITS - v.leading_zeros());
+        let depth = bits(t.max(1));
+        let lookup = 16u64.saturating_mul(bits(t.saturating_mul(3).max(1)));
+        let per_candidate = 3u64
+            .saturating_add(3u64.saturating_mul(lookup.saturating_add(2)))
+            .saturating_add(t.saturating_mul(3));
+        let per_cell = (depth + 1)
+            .saturating_add(n)
+            .saturating_add(t.saturating_mul(2))
+            .saturating_add(t.saturating_mul(depth.saturating_mul(5).saturating_add(1)))
+            .saturating_add(t.saturating_mul(per_candidate))
             .saturating_add(self.patches.segments());
         cells.saturating_mul(per_cell)
     }

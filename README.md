@@ -58,6 +58,7 @@ and writes G-code through a postprocessor you can read and change.
 | Machining limits | Avoid areas (clamps) and containment regions for every operation, rapids and links |
 | Plasma and laser cutting | Kerf-compensated sheet parts: leads, pierce clearance, inner features first, small holes, micro-joints, torch height control, programmed or controller heights |
 | Feeds and speeds | rpm and feed from cutting data (chip thinning, ball effective diameter) |
+| Probing, tool setting | Work-offset probing of surfaces, corners, bores, bosses, pockets and webs, tool length and diameter on a tool setter; LinuxCNC G38 or Renishaw Inspection Plus macros, decoded back and checked |
 | Turning (lathe) | Facing, outside and inside roughing and finishing (boring), grooving, parting off, external and internal threading, drilling on the axis, constant surface speed and feed per revolution; insert, holder and boring-bar checks against the part, bore, stock and chuck; a lathe setup is an ordinary `Setup` (`turning=TurningSetup(...)`), streamed, played back and posted like any other, with a material check after each operation |
 
 Every setup (milling, plasma/laser and lathe) runs as one stream: each move
@@ -84,6 +85,17 @@ supported yet: 4/5-axis, undercuts.
 Details and limits: [capabilities](docs/library-capabilities.md). Measured
 toolpath quality and engine performance for every toolpath:
 [benchmarks](docs/benchmarks.md).
+
+Optional [checked recipe planning](docs/planning.md) compares supplied milling
+strategies and cutter recipes, retains the reference, and can append bounded
+native rest corrections from residual findings. It uses the existing checks
+and explicit machine/cutting data; it produces advice and never releases NC.
+The same guide covers opt-in engagement slowdown caps, declared initial-blank
+bounds, and a host-side example for colour intent and confirmed blank placement.
+
+Native [bounded preparation](docs/preparation.md) can screen supplied samples
+and calibrated assemblies and enclose a declared top-down blank. These queries
+produce explicit premises and advice; ordinary job verification still decides release.
 
 ## Install
 
