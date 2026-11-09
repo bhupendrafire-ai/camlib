@@ -485,6 +485,78 @@ def deburr_levels(
     )
 
 
+def deburr_edges(shape, *, max_error_mm=0.005, tangent_tolerance_deg=0.05, tolerance_mm=1e-6, cancel=None):
+    """Every convex edge of a solid, as ``camlib.operations.DeburrEdge``, for
+    ``camlib.Deburr(edges=...)``: its type (``"horizontal"``, ``"vertical"`` or
+    ``"sloped"``), a polyline within ``max_error_mm`` of it, whether it is
+    straight, and its two faces' outward normals at its midpoint.
+
+    Convexity is OpenCascade's (``BRepOffset_Analyse``): an edge whose faces
+    meet tangentially (within ``tangent_tolerance_deg``, a fillet) or
+    concavely is not listed. An edge is horizontal when its points are within
+    ``tolerance_mm`` in height, vertical when a straight edge's ends are
+    within ``tolerance_mm`` in XY, and sloped otherwise. The Deburr report
+    accounts for every listed edge: cut, or skipped with a reason. Edge ids
+    are ``edge-<index>`` in the order of ``solid.Edges()``.
+    """
+    import cadquery as cq
+    from OCP.BRepAdaptor import BRepAdaptor_Curve
+    from OCP.BRepOffset import BRepOffset_Analyse
+    from OCP.ChFiDS import ChFiDS_TypeOfConcavity
+    from OCP.GCPnts import GCPnts_QuasiUniformDeflection
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
+    from OCP.TopExp import TopExp
+    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+
+    from .operations import DeburrEdge
+
+    if not (math.isfinite(tangent_tolerance_deg) and 0 < tangent_tolerance_deg <= 1):
+        raise ValueError("tangent_tolerance_deg must be within (0, 1]")
+    if not (math.isfinite(max_error_mm) and 1e-6 <= max_error_mm <= 0.1):
+        raise ValueError("max_error_mm must be finite in [1e-6, .1]")
+    solid = shape.val() if hasattr(shape, "val") else shape
+    analyse = BRepOffset_Analyse(solid.wrapped, math.radians(tangent_tolerance_deg))
+    faces_of = TopTools_IndexedDataMapOfShapeListOfShape()
+    TopExp.MapShapesAndAncestors_s(solid.wrapped, TopAbs_EDGE, TopAbs_FACE, faces_of)
+    edges = []
+    for index, edge in enumerate(solid.Edges()):
+        _fixture_cancel(cancel)
+        intervals = analyse.Type(edge.wrapped)
+        if not intervals or any(i.Type() != ChFiDS_TypeOfConcavity.ChFiDS_Convex for i in intervals):
+            continue
+        straight = edge.geomType() == "LINE"
+        if straight:
+            points = (edge.startPoint().toTuple(), edge.endPoint().toTuple())
+        else:
+            sampler = GCPnts_QuasiUniformDeflection(BRepAdaptor_Curve(edge.wrapped), max_error_mm)
+            if not sampler.IsDone() or sampler.NbPoints() < 2:
+                raise ValueError(f"deburr_edges could not sample edge {index}")
+            points = tuple((p.X(), p.Y(), p.Z()) for p in (sampler.Value(i) for i in range(1, sampler.NbPoints() + 1)))
+        heights = [p[2] for p in points]
+        if max(heights) - min(heights) <= tolerance_mm:
+            kind = "horizontal"
+        elif straight and math.dist(points[0][:2], points[-1][:2]) <= tolerance_mm:
+            kind = "vertical"
+        else:
+            kind = "sloped"
+        faces = [cq.Face(f) for f in faces_of.FindFromKey(edge.wrapped)]
+        if len(faces) != 2:
+            raise ValueError(f"deburr_edges: edge {index} does not bound exactly two faces")
+        middle = edge.positionAt(0.5)
+        edges.append(
+            DeburrEdge(
+                f"edge-{index}",
+                kind,
+                points,
+                0.0 if straight else max_error_mm,
+                straight,
+                tuple(face.normalAt(middle).normalized().toTuple() for face in faces),
+                tuple(face.geomType() == "PLANE" for face in faces),
+            )
+        )
+    return tuple(edges)
+
+
 def _analytic_floor_region(
     face, *, name, source, topology_tolerance, started, chord_budget=None, max_segments=None, cancel=None
 ):

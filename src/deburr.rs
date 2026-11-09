@@ -55,6 +55,9 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+mod edges;
+pub use edges::{DeburrEdge, DeburrEdgeReport};
+
 fn climb() -> String {
     "climb".into()
 }
@@ -88,6 +91,12 @@ pub struct DeburrOperation<G = SurfaceMesh> {
     /// The finished part (what must not be cut beyond the breaks).
     pub surface: G,
     pub levels: Vec<DeburrLevel>,
+    /// Every convex edge of the part (`camlib.cadquery.deburr_edges`): the
+    /// report accounts for each, cut or skipped with a reason, and straight
+    /// edges between planar faces that no level covers (sloped edges) are
+    /// broken with a ball-end mill.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<DeburrEdge>,
     /// Break width on the face (horizontal leg). With a ball-end or
     /// bull-nose mill, both legs (face and vertical wall). Give this or
     /// `break_radius_mm`.
@@ -136,6 +145,7 @@ impl<G> DeburrOperation<G> {
             id: self.id,
             tool: self.tool,
             levels: self.levels,
+            edges: self.edges,
             width_mm: self.width_mm,
             break_radius_mm: self.break_radius_mm,
             tip_clearance_mm: self.tip_clearance_mm,
@@ -159,7 +169,11 @@ impl<G> DeburrOperation<G> {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SkippedSpan {
-    pub level: usize,
+    /// The level whose boundary this is (None for a listed edge's span).
+    pub level: Option<usize>,
+    /// The listed edge this span is on (`DeburrEdge::id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge: Option<String>,
     pub from_mm: Vec3,
     pub to_mm: Vec3,
     pub length_mm: f64,
@@ -204,6 +218,8 @@ pub struct DeburrReport {
     pub already_broken_length_mm: f64,
     /// Per level: where the tool ran and the steepest drafted wall broken.
     pub level_details: Vec<DeburrLevelReport>,
+    /// Every listed convex edge: cut, partly cut or skipped, with reasons.
+    pub edges: Vec<DeburrEdgeReport>,
     pub clearance_proof: &'static str,
 }
 
@@ -222,6 +238,7 @@ pub struct DeburrLevelReport {
 
 const CONCAVE: &str = "concave edge: the part rises above the face there (nothing to break)";
 const UNPROVEN: &str = "not proven clear of the rest of the part (whole tool assembly)";
+const NO_ENTRY: &str = "no proven straight entry or exit from the feed height";
 const ALREADY_BROKEN: &str =
     "already broken: the face meets a fillet tangentially there (no sharp edge)";
 const DRAFT_STEEP: &str = "the wall below the edge is drafted too steeply for the chamfer mill (at or near its half angle, or the edge is already chamfered or rounded): the cone cannot end the break on it within its radius";
@@ -444,7 +461,7 @@ struct Prover {
     seen: Vec<u32>,
     stamp: u32,
     /// The whole part, to tell concave stretches from unreachable ones.
-    part: Index,
+    part: Option<Index>,
     part_seen: Vec<u32>,
     part_stamp: u32,
     /// Already-broken edges and drafted walls the tool cannot break, in
@@ -476,12 +493,14 @@ impl Prover {
             rise: 0.,
             arc: 0.,
         }];
-        self.part.max_sections(
-            [p[0], p[1]],
-            &probe,
-            &mut self.part_seen,
-            &mut self.part_stamp,
-        ) > z
+        self.part.as_ref().is_some_and(|part| {
+            part.max_sections(
+                [p[0], p[1]],
+                &probe,
+                &mut self.part_seen,
+                &mut self.part_stamp,
+            ) > z
+        })
     }
     fn grown(&self, extra: f64) -> Vec<Section> {
         self.sections
@@ -762,8 +781,10 @@ impl DeburrPlan {
                     format!("surface_error_mm {e} must be within 0..0.1"),
                 ),
                 (
-                    !op.levels.is_empty() && op.levels.iter().all(|l| !l.regions.is_empty()),
-                    "deburr needs at least one level with at least one face".into(),
+                    (!op.levels.is_empty() || !op.edges.is_empty())
+                        && op.levels.iter().all(|l| !l.regions.is_empty()),
+                    "deburr needs at least one level (with at least one face) or listed edge"
+                        .into(),
                 ),
                 (
                     op.levels.iter().all(|l| {
@@ -866,9 +887,15 @@ impl DeburrPlan {
             obstacle_triangles: 0,
             already_broken_length_mm: 0.,
             level_details: vec![],
+            edges: vec![],
             clearance_proof: "exact section contact (cone or corner arc, neck, shank, holder) against the part above the level, below the break and any non-face/non-wall geometry in the break band; sections grown by the surface error, two stock cell diagonals and each arc chord's sagitta",
         };
+        edges::validate(&op.edges)?;
         let mut runs = vec![];
+        // Every level piece as cut (None) or skipped (its reason), and each
+        // level's height, boundary and tolerance, for the edge accounting.
+        let mut record: Vec<(usize, Curve, Option<&'static str>)> = vec![];
+        let mut level_boundaries: Vec<(f64, Vec<Stroke>, f64)> = vec![];
         let min_piece = (op.boundary_tolerance_mm).max(guard);
         for (li, level) in op.levels.iter().enumerate() {
             if cancel.is_cancelled() {
@@ -919,6 +946,7 @@ impl DeburrPlan {
                     .fold(f64::INFINITY, f64::min)
             };
             let on_boundary = |p: Vec3| boundary(p) <= slack;
+            level_boundaries.push((z_e, boundary_strokes.clone(), slack.max(band)));
             // A wall hanging off the boundary below the edge (drafted at
             // beta from vertical: each point s = depth tan(beta) out from
             // the boundary; at a convex corner between drafted walls up to
@@ -1135,7 +1163,7 @@ impl DeburrPlan {
                 seen: vec![0; index.len()],
                 index,
                 part_seen: vec![0; part.len()],
-                part,
+                part: Some(part),
                 part_stamp: 0,
                 sections: sections.clone(),
                 grow,
@@ -1171,10 +1199,137 @@ impl DeburrPlan {
                         min_piece,
                         &mut runs,
                         &mut report,
+                        &mut record,
                         cancel,
                     )?;
                 }
             }
+        }
+        // Every listed convex edge: a horizontal one on a level's boundary
+        // is accounted from that level's pieces; a straight one no level
+        // covers is broken with a ball-end mill; the rest are skipped with a
+        // reason.
+        let ball = match cutter.shape {
+            CutterShape::Ball => Some(cutter.diameter_mm / 2.),
+            _ => None,
+        };
+        let grow = e + 2. * spec.cell_size_mm * std::f64::consts::SQRT_2;
+        for edge in &op.edges {
+            if cancel.is_cancelled() {
+                return Err("deburr planning cancelled".into());
+            }
+            let total = edges::polyline_length(&edge.points);
+            let level = if edge.kind == "horizontal" {
+                level_boundaries.iter().position(|(z, strokes, slack)| {
+                    edge.points.iter().all(|p| {
+                        (p[2] - z).abs() <= *slack
+                            && strokes
+                                .iter()
+                                .map(|s| stroke_distance([p[0], p[1]], s))
+                                .fold(f64::INFINITY, f64::min)
+                                <= slack + edge.error_mm
+                    })
+                })
+            } else {
+                None
+            };
+            let skipped = |reason: &'static str| DeburrEdgeReport {
+                id: edge.id.clone(),
+                kind: edge.kind.clone(),
+                length_mm: total,
+                status: "skipped",
+                cut_length_mm: 0.,
+                reasons: vec![reason],
+            };
+            let entry = if let Some(li) = level {
+                edges::account_level(edge, total, li, &record)
+            } else if edge.kind == "vertical" {
+                skipped(edges::VERTICAL)
+            } else if let Some(r) = ball {
+                match edges::straight_break(
+                    edge,
+                    r,
+                    op.width_mm,
+                    op.break_radius_mm,
+                    op.tip_clearance_mm,
+                    &op.surface.triangles,
+                    e,
+                    grow + band,
+                    band,
+                ) {
+                    Err(reason) => skipped(reason),
+                    Ok(path) => {
+                        let mesh = SurfaceMesh {
+                            version: 1,
+                            units: "mm".into(),
+                            triangles: std::sync::Arc::new(path.obstacles),
+                            surface_error_mm: e,
+                            source: serde_json::json!({ "deburr_edge": edge.id }),
+                        };
+                        let index = Index::new(&mesh, spec.min_mm[2] - 1e3, reach, cancel)?;
+                        report.obstacle_triangles += index.len();
+                        let mut prover = Prover {
+                            seen: vec![0; index.len()],
+                            index,
+                            part: None,
+                            part_seen: vec![],
+                            part_stamp: 0,
+                            sections: sections.clone(),
+                            grow,
+                            lift: e,
+                            sagitta: band,
+                            stamp: 0,
+                            labels: vec![],
+                        };
+                        let first = runs.len();
+                        let skipped_before = report.skipped.len();
+                        Self::plan_edge(
+                            &edge.id,
+                            path.start,
+                            path.end,
+                            heights.feed,
+                            &mut prover,
+                            limits.as_ref(),
+                            min_piece,
+                            &mut runs,
+                            &mut report,
+                            cancel,
+                        )?;
+                        let path_length = length(&Curve::Line {
+                            start: path.start,
+                            end: path.end,
+                        });
+                        let cut: f64 = runs[first..]
+                            .iter()
+                            .flat_map(|r| r.curves.iter())
+                            .map(length)
+                            .sum();
+                        let mut reasons: Vec<&'static str> = vec![];
+                        for s in &report.skipped[skipped_before..] {
+                            if !reasons.contains(&s.reason) {
+                                reasons.push(s.reason);
+                            }
+                        }
+                        // The path is the edge translated: lengths agree.
+                        let cut = (cut / path_length * total).min(total);
+                        DeburrEdgeReport {
+                            id: edge.id.clone(),
+                            kind: edge.kind.clone(),
+                            length_mm: total,
+                            status: edges::status(cut, total, min_piece),
+                            cut_length_mm: cut,
+                            reasons,
+                        }
+                    }
+                }
+            } else {
+                skipped(if edge.straight {
+                    edges::TOOL
+                } else {
+                    edges::CURVED
+                })
+            };
+            report.edges.push(entry);
         }
         report.runs = runs.len();
         report.cut_length_mm = runs
@@ -1232,6 +1387,7 @@ impl DeburrPlan {
         min_piece: f64,
         runs: &mut Vec<Run>,
         report: &mut DeburrReport,
+        record: &mut Vec<(usize, Curve, Option<&'static str>)>,
         cancel: &impl CancelSignal,
     ) -> Result<(), String> {
         let mut pieces: Vec<(Curve, bool)> = vec![];
@@ -1271,9 +1427,10 @@ impl DeburrPlan {
                 } else {
                     prover.reason(mid)
                 };
+                record.push((level, curve.clone(), Some(reason)));
                 match report.skipped.last_mut() {
                     Some(last)
-                        if last.level == level
+                        if last.level == Some(level)
                             && last.to_mm == curve.start()
                             && last.reason == reason =>
                     {
@@ -1281,7 +1438,8 @@ impl DeburrPlan {
                         last.length_mm += length(&curve);
                     }
                     _ => report.skipped.push(SkippedSpan {
-                        level,
+                        level: Some(level),
+                        edge: None,
                         from_mm: curve.start(),
                         to_mm: curve.end(),
                         length_mm: length(&curve),
@@ -1306,28 +1464,128 @@ impl DeburrPlan {
         // Entry and exit: straight down from and up to the feed height,
         // proven too; a run shortens from that end until they are.
         for mut curves in loop_runs {
-            let skip = |curve: &Curve, report: &mut DeburrReport| {
-                report.skipped.push(SkippedSpan {
-                    level,
-                    from_mm: curve.start(),
-                    to_mm: curve.end(),
-                    length_mm: length(curve),
-                    reason: "no proven straight entry or exit from the feed height",
-                })
-            };
+            let skip =
+                |curve: &Curve,
+                 report: &mut DeburrReport,
+                 record: &mut Vec<(usize, Curve, Option<&'static str>)>| {
+                    record.push((level, curve.clone(), Some(NO_ENTRY)));
+                    report.skipped.push(SkippedSpan {
+                        level: Some(level),
+                        edge: None,
+                        from_mm: curve.start(),
+                        to_mm: curve.end(),
+                        length_mm: length(curve),
+                        reason: NO_ENTRY,
+                    })
+                };
             while let Some(first) = curves.first() {
                 let s = first.start();
                 if prover.line([s[0], s[1], feed], s, 0.) {
                     break;
                 }
-                skip(&curves.remove(0), report);
+                skip(&curves.remove(0), report, record);
             }
             while let Some(last) = curves.last() {
                 let e = last.end();
                 if prover.line(e, [e[0], e[1], feed], 0.) {
                     break;
                 }
-                skip(&curves.pop().unwrap(), report);
+                skip(&curves.pop().unwrap(), report, record);
+            }
+            if !curves.is_empty() {
+                record.extend(curves.iter().map(|c| (level, c.clone(), None)));
+                runs.push(Run { curves });
+            }
+        }
+        Ok(())
+    }
+
+    /// Proven pieces of a listed edge's straight path, as runs, with proven
+    /// straight entries and exits.
+    #[allow(clippy::too_many_arguments)]
+    fn plan_edge(
+        edge: &str,
+        start: Vec3,
+        end: Vec3,
+        feed: f64,
+        prover: &mut Prover,
+        limits: Option<&crate::limits::PreparedLimits>,
+        min_piece: f64,
+        runs: &mut Vec<Run>,
+        report: &mut DeburrReport,
+        cancel: &impl CancelSignal,
+    ) -> Result<(), String> {
+        let at = |t: f64| -> Vec3 { std::array::from_fn(|k| start[k] + t * (end[k] - start[k])) };
+        let mut pieces: Vec<(Curve, bool)> = vec![];
+        let mut stack = vec![(0., 1.)];
+        while let Some((t0, t1)) = stack.pop() {
+            if cancel.is_cancelled() {
+                return Err("deburr planning cancelled".into());
+            }
+            let curve = Curve::Line {
+                start: at(t0),
+                end: at(t1),
+            };
+            let ok = prover.line(at(t0), at(t1), 0.)
+                && limits.is_none_or(|l| l.allows_curve(&curve, true).unwrap_or(false));
+            if ok || length(&curve) <= min_piece {
+                pieces.push((curve, ok));
+            } else {
+                let m = (t0 + t1) / 2.;
+                stack.push((m, t1));
+                stack.push((t0, m));
+            }
+        }
+        let skip = |curve: &Curve, reason: &'static str, report: &mut DeburrReport| match report
+            .skipped
+            .last_mut()
+        {
+            Some(last)
+                if last.edge.as_deref() == Some(edge)
+                    && last.to_mm == curve.start()
+                    && last.reason == reason =>
+            {
+                last.to_mm = curve.end();
+                last.length_mm += length(curve);
+            }
+            _ => report.skipped.push(SkippedSpan {
+                level: None,
+                edge: Some(edge.to_string()),
+                from_mm: curve.start(),
+                to_mm: curve.end(),
+                length_mm: length(curve),
+                reason,
+            }),
+        };
+        let mut groups: Vec<Vec<Curve>> = vec![];
+        let mut current: Vec<Curve> = vec![];
+        for (curve, ok) in pieces {
+            if ok {
+                current.push(curve);
+            } else {
+                if !current.is_empty() {
+                    groups.push(std::mem::take(&mut current));
+                }
+                skip(&curve, UNPROVEN, report);
+            }
+        }
+        if !current.is_empty() {
+            groups.push(current);
+        }
+        for mut curves in groups {
+            while let Some(first) = curves.first() {
+                let s = first.start();
+                if prover.line([s[0], s[1], feed], s, 0.) {
+                    break;
+                }
+                skip(&curves.remove(0), NO_ENTRY, report);
+            }
+            while let Some(last) = curves.last() {
+                let e = last.end();
+                if prover.line(e, [e[0], e[1], feed], 0.) {
+                    break;
+                }
+                skip(&curves.pop().unwrap(), NO_ENTRY, report);
             }
             if !curves.is_empty() {
                 runs.push(Run { curves });

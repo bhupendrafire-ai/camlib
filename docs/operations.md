@@ -467,7 +467,9 @@ in the stock first.
 Required: `surface` (the finished part as a `SurfaceMesh`), `levels`, the
 break size, `clearance_z_mm`, and a chamfer mill (`ChamferMill`), ball-end
 mill (`BallEndMill`) or bull-nose mill (`BullEndMill`). Breaks the horizontal
-edges of a finished part: every boundary of every upward-facing planar face.
+edges of a finished part (every boundary of every upward-facing planar face)
+and, given the part's convex `edges`, sloped edges with a ball-end mill,
+accounting for every convex edge.
 `camlib.cadquery.deburr_levels(solid)` makes the levels (the faces at each
 height, exported exactly):
 
@@ -545,8 +547,28 @@ op = Deburr("deburr", c90, export_surface_mesh(part), deburr_levels(part), 0.5, 
   edges the tool cannot reach in `unreachable_length_mm`.
 - The stock must already be machined to the part. A non-center-cutting
   tool enters only where the stock is proven clear under its tip.
-- Not yet: edges that are not horizontal (#94; sloped or vertical edges,
-  some needing a tilted tool, see the multi-axis issues).
+- **Every convex edge** (`edges`, from `camlib.cadquery.deburr_edges`, which
+  lists each convex edge as horizontal, vertical or sloped with its faces'
+  normals; convexity from OpenCascade's `BRepOffset_Analyse`): the report's
+  `edges` accounts for each one as `cut`, `partly cut` or `skipped`, with
+  the reasons for what was not cut. A horizontal edge on a level's boundary
+  takes the level's result.
+- **Sloped edges** (and horizontal edges under a sloped face), when straight
+  between planar faces, are broken with a ball-end mill. The ball's centre
+  runs on the edge moved s out along the outward bisector b of the faces'
+  normals (cos g = b . n), which leaves a cylindrical cove with equal legs
+  L = sqrt(R^2 - s^2 cos^2 g) - s sin g along both faces, whatever the
+  slope. `width_mm` gives L; `break_radius_mm` rho gives s = R + rho -
+  rho / cos g, the cove touching a rho fillet. For a 90 degree edge these
+  are the horizontal formulas. The proof is against the part with the two
+  faces' strips along the edge replaced by the cove itself (radius R plus
+  the proof's margins), so the whole assembly may touch nothing else. That
+  matters for the shank on a steep edge. Near the edge's ends, where the
+  ball would reach the next face, the path stays unproven and is reported.
+- Skipped with a reason: vertical edges (breaking one needs the tool's side
+  run along it), edges with a face facing down (they need a tilted tool,
+  #5/#6), curved edges that are not on a level, and edges off the levels
+  with a chamfer or bull-nose mill.
 
 ## Parallel finishing: `Parallel`
 

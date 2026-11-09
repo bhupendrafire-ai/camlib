@@ -771,6 +771,41 @@ class DeburrBrokenEdge:
 
 
 @dataclass(frozen=True)
+class DeburrEdge:
+    """One convex edge of a part, for ``Deburr(edges=...)``.
+    ``camlib.cadquery.deburr_edges`` lists them from a solid.
+
+    ``kind`` is ``"horizontal"``, ``"vertical"`` or ``"sloped"``; ``points``
+    a polyline along the edge within ``error_mm`` (the ends of a straight
+    edge); ``normals`` its two faces' outward unit normals at its midpoint,
+    and ``planar`` whether each face is planar."""
+
+    id: str
+    kind: str
+    points: tuple
+    error_mm: float
+    straight: bool
+    normals: tuple
+    planar: tuple
+
+    def __post_init__(self):
+        object.__setattr__(self, "points", tuple(tuple(float(v) for v in p) for p in self.points))
+        object.__setattr__(self, "normals", tuple(tuple(float(v) for v in n) for n in self.normals))
+        object.__setattr__(self, "planar", tuple(bool(p) for p in self.planar))
+
+    def to_dict(self):
+        return dict(
+            id=self.id,
+            kind=self.kind,
+            points=[list(p) for p in self.points],
+            error_mm=float(self.error_mm),
+            straight=bool(self.straight),
+            normals=[list(n) for n in self.normals],
+            planar=list(self.planar),
+        )
+
+
+@dataclass(frozen=True)
 class DeburrLevel:
     """The upward-facing planar faces of a part at one height ``z_mm``, as
     planar regions (unioned), and the stretches of their boundaries that are
@@ -796,8 +831,11 @@ class DeburrLevel:
 
 @dataclass(frozen=True)
 class Deburr:
-    """Break the horizontal edges of a finished part with a chamfer mill, a
-    ball-end mill or a bull-nose mill.
+    """Break the edges of a finished part with a chamfer mill, a ball-end
+    mill or a bull-nose mill: the horizontal edges of the ``levels``, and,
+    with ``edges`` (``camlib.cadquery.deburr_edges``), every listed convex
+    edge accounted for in the report, straight sloped edges broken with a
+    ball-end mill.
 
     Each level's face boundaries are broken ``width_mm`` wide on the face. A
     chamfer mill's cone leaves a chamfer (the chamfer depth down a vertical
@@ -824,6 +862,7 @@ class Deburr:
     boundary_tolerance_mm: float = 0.01
     tolerance_mm: float = 1e-5
     break_radius_mm: float | None = None
+    edges: tuple = ()
     feed_mm_min: float = field(kw_only=True)
     plunge_mm_min: float = field(kw_only=True)
     spindle_rpm: float = field(kw_only=True)
@@ -836,6 +875,7 @@ class Deburr:
 
     def __post_init__(self):
         object.__setattr__(self, "levels", tuple(self.levels))
+        object.__setattr__(self, "edges", tuple(self.edges))
 
     def to_dict(self):
         result = {field: getattr(self, field) for field in self.__dataclass_fields__}
@@ -844,7 +884,10 @@ class Deburr:
             tool=getattr(self.tool, "id", self.tool),
             surface=self.surface.to_dict() if hasattr(self.surface, "to_dict") else self.surface,
             levels=[level.to_dict() if hasattr(level, "to_dict") else level for level in self.levels],
+            edges=[edge.to_dict() if hasattr(edge, "to_dict") else edge for edge in self.edges],
         )
+        if not result["edges"]:
+            result.pop("edges")
         for key in ("width_mm", "break_radius_mm", "retract_z_mm", "feed_z_mm"):
             if result[key] is None:
                 result.pop(key)

@@ -1,7 +1,8 @@
-"""Deburr (#11, #92, #93): the top and accessible side edges of a part are
-broken to the requested size with a chamfer, ball-end or bull-nose mill,
-next to vertical or drafted walls; concave, already broken (filleted) and
-unreachable stretches are reported, never silently dropped."""
+"""Deburr (#11, #92, #93, #94): the top and accessible side edges of a part
+are broken to the requested size with a chamfer, ball-end or bull-nose mill,
+next to vertical or drafted walls, and sloped edges with a ball; every convex
+edge is accounted for; concave, already broken (filleted) and unreachable
+stretches are reported, never silently dropped."""
 
 import math
 import unittest
@@ -342,6 +343,105 @@ class DeburrTest(unittest.TestCase):
         # fillet's end (a curved edge, #94) next to each corner are they not.
         self.assertGreater(report["cut_length_mm"], 2 * 18 - 4 * 2)
         self.assertLess(report["unreachable_length_mm"], 4 * 2)
+
+    def test_every_convex_edge_is_accounted_for_and_sloped_edges_are_broken(self):
+        from camlib.cadquery import deburr_edges, deburr_levels, export_inner_patches, export_surface_mesh
+        from camlib.export import material_status
+        from camlib.material import Options, SurfaceTarget, Verifier
+
+        # A block 40 x 20: flat top Z10 for x in 20..40, rising on a slope
+        # to Z16 at x = 0 (a concave edge at x = 20).
+        solid = cq.Workplane("XZ").polyline([(0, 0), (40, 0), (40, 10), (20, 10), (0, 16)]).close().extrude(-20)
+        edges = deburr_edges(solid)
+        # Bottom 4, the flat top's 3 and the slope's top edge: horizontal;
+        # the slope's 2 sides: sloped; the 4 corners: vertical. The valley
+        # at x = 20 is concave: not listed.
+        self.assertEqual(sorted(e.kind for e in edges), ["horizontal"] * 8 + ["sloped"] * 2 + ["vertical"] * 4)
+        levels = deburr_levels(solid)
+        surface = export_surface_mesh(solid, max_error_mm=0.001)
+        # The stock is not machined to the part first: flutes long enough to
+        # reach the lowest edge through it.
+        ball = ToolAssembly(
+            "b3l",
+            BallEndMill("b3l", diameter=3, flute_length=18, overall_length=50),
+            20,
+            60,
+            (HolderSection(20, 60, 8, 16),),
+        )
+        deburr = Deburr(
+            "deburr",
+            ball,
+            surface,
+            levels,
+            None,
+            30,
+            tip_clearance_mm=0.3,
+            break_radius_mm=0.8,
+            edges=edges,
+            feed_mm_min=600,
+            plunge_mm_min=200,
+            spindle_rpm=10000,
+            tool_number=2,
+            length_register=2,
+            coolant="flood",
+        )
+        box = solid.val().BoundingBox()
+        setup = Setup(
+            "top",
+            StockSpec((box.xmin - 4, box.ymin - 4, box.zmin), (box.xmax + 4, box.ymax + 4, box.zmax), 0.1),
+            (ball,),
+            (OperationNode(deburr, sources=()),),
+            (box.xmin - 4, box.ymin - 4, 40),
+        )
+        report = None
+        with Job("deburr", "1", (setup,)).regenerate() as run:
+            for event in run:
+                update = event.update
+                if isinstance(update, OperationUpdate) and update.stage == "end" and update.operation == "deburr":
+                    report = update.report
+            self.assertTrue(run.finished)
+            state = run.states["top"]
+        # Every listed edge is accounted for: cut, or not with a reason.
+        by_id = {e["id"]: e for e in report["edges"]}
+        self.assertEqual(sorted(by_id), sorted(e.id for e in edges))
+        for edge in edges:
+            entry = by_id[edge.id]
+            self.assertEqual(entry["kind"], edge.kind)
+            if entry["status"] != "cut":
+                self.assertTrue(entry["reasons"], entry)
+            if edge.kind == "vertical":
+                self.assertEqual(entry["status"], "skipped")
+                self.assertIn("vertical edge", entry["reasons"][0])
+            elif max(p[2] for p in edge.points) < 1e-9:
+                # The bottom edges: a face next to them faces down.
+                self.assertEqual(entry["status"], "skipped")
+                self.assertIn("faces down", entry["reasons"][0])
+            else:
+                # The top edges, sloped or horizontal, are broken (their
+                # ends, where they meet other edges, may stay unproven).
+                self.assertIn(entry["status"], ("cut", "partly cut"), entry)
+                self.assertGreater(entry["cut_length_mm"], 0.5 * entry["length_mm"], entry)
+        sloped = [by_id[e.id] for e in edges if e.kind == "sloped"]
+        self.assertTrue(all(e["cut_length_mm"] > 0.75 * e["length_mm"] for e in sloped), sloped)
+        # Material: against the part with the broken edges filleted 0.8 by
+        # CadQuery (the fillet the breaks stay inside), no definite gouge;
+        # against the sharp part, a violation.
+        cut_ids = {e.id for e in edges if by_id[e.id]["cut_length_mm"] > 0}
+        cut_edges = [edge for index, edge in enumerate(solid.val().Edges()) if f"edge-{index}" in cut_ids]
+        filleted = cq.Workplane("XY").add(solid.val().fillet(0.8, cut_edges))
+        target = SurfaceTarget(
+            "filleted",
+            "1",
+            export_surface_mesh(filleted, max_error_mm=0.001),
+            0,
+            inner_patches=export_inner_patches(filleted),
+        )
+        material = Verifier(target, Options(max_findings=4096)).check(state)
+        self.assertEqual(material["gouge"]["definite_cells"], 0, material["gouge"])
+        sharp = SurfaceTarget(
+            "sharp", "1", export_surface_mesh(solid, max_error_mm=0.001), 0, inner_patches=export_inner_patches(solid)
+        )
+        self.assertEqual(material_status(Verifier(sharp, Options(max_findings=64)).check(state)), "violation")
 
     def test_needs_a_chamfer_mill(self):
         from camlib.cadquery import deburr_levels, export_surface_mesh

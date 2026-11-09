@@ -1,6 +1,7 @@
-//! Deburr (#11, #92, #93): horizontal edges broken with a chamfer, ball-end
-//! or bull-nose mill, next to vertical or drafted walls, and nothing else
-//! touched. The checks here are independent of the planner: a dense
+//! Deburr (#11, #92, #93, #94): horizontal edges broken with a chamfer,
+//! ball-end or bull-nose mill, next to vertical or drafted walls; sloped
+//! edges with a ball; every listed convex edge accounted for; and nothing
+//! else touched. The checks here are independent of the planner: a dense
 //! penetration oracle built from the tool assembly's own radius profile and
 //! sampled points of the part, and the stock's actual heights.
 use camlib::{
@@ -136,6 +137,7 @@ fn operation(surface: SurfaceMesh, levels: Vec<DeburrLevel>) -> DeburrOperation 
         tool: "c90".into(),
         surface,
         levels,
+        edges: vec![],
         width_mm: Some(0.5),
         break_radius_mm: None,
         tip_clearance_mm: 0.3,
@@ -857,4 +859,176 @@ fn a_declared_broken_edge_is_reported_as_already_broken() {
         report.unreachable_length_mm
     );
     assert!(report.cut_length_mm > 30. + 2. * 19. - 4. - 1.);
+}
+
+/// A prism 40 x 20 whose top slopes from Z `z0` at x = 0 to Z `z1` at x = 40.
+fn sloped_prism(z0: f64, z1: f64) -> Vec<[Vec3; 3]> {
+    let p = |x: f64, y: f64, top: bool| [x, y, if top { z0 + (z1 - z0) * x / 40. } else { 0. }];
+    let quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| vec![[a, b, c], [a, c, d]];
+    [
+        quad(
+            p(0., 0., true),
+            p(40., 0., true),
+            p(40., 20., true),
+            p(0., 20., true),
+        ),
+        quad(
+            p(0., 0., false),
+            p(0., 20., false),
+            p(40., 20., false),
+            p(40., 0., false),
+        ),
+        quad(
+            p(0., 0., false),
+            p(40., 0., false),
+            p(40., 0., true),
+            p(0., 0., true),
+        ),
+        quad(
+            p(0., 20., false),
+            p(0., 20., true),
+            p(40., 20., true),
+            p(40., 20., false),
+        ),
+        quad(
+            p(0., 0., false),
+            p(0., 0., true),
+            p(0., 20., true),
+            p(0., 20., false),
+        ),
+        quad(
+            p(40., 0., false),
+            p(40., 20., false),
+            p(40., 20., true),
+            p(40., 0., true),
+        ),
+    ]
+    .concat()
+}
+
+#[test]
+fn sloped_edges_are_broken_with_a_ball_and_every_listed_edge_is_accounted_for() {
+    use camlib::deburr::DeburrEdge;
+    let (z0, z1) = (16., 6.);
+    let part = sloped_prism(z0, z1);
+    let slope = ((z1 - z0) / 40f64).atan();
+    // The top's outward normal (it falls toward +x), and the side walls'.
+    let top = [-slope.sin(), 0., slope.cos()];
+    let edge = |id: &str, kind: &str, a: Vec3, b: Vec3, normals: [Vec3; 2]| DeburrEdge {
+        id: id.into(),
+        kind: kind.into(),
+        points: vec![a, b],
+        error_mm: 0.,
+        straight: true,
+        normals,
+        planar: [true, true],
+    };
+    let edges = vec![
+        edge(
+            "front",
+            "sloped",
+            [0., 0., z0],
+            [40., 0., z1],
+            [top, [0., -1., 0.]],
+        ),
+        edge(
+            "back",
+            "sloped",
+            [0., 20., z0],
+            [40., 20., z1],
+            [top, [0., 1., 0.]],
+        ),
+        edge(
+            "corner",
+            "vertical",
+            [0., 0., 0.],
+            [0., 0., z0],
+            [[-1., 0., 0.], [0., -1., 0.]],
+        ),
+        edge(
+            "bottom",
+            "horizontal",
+            [0., 0., 0.],
+            [40., 0., 0.],
+            [[0., 0., -1.], [0., -1., 0.]],
+        ),
+    ];
+    // Unmachined stock up to Z16 over the whole prism: flutes long enough
+    // to reach the low end through it.
+    let mut tool = round_end(None);
+    tool.cutter.cutting_length_mm = 18.;
+    let mut op = operation(mesh(part.clone()), vec![]);
+    op.tool = tool.id.clone();
+    op.edges = edges;
+    let spec = StockSpec {
+        version: 1,
+        units: "mm".into(),
+        min_mm: [-4., -4., 0.],
+        max_mm: [44., 24., 16.],
+        cell_size_mm: 0.1,
+        max_cells: 1 << 22,
+    };
+    let cancel = AtomicBool::new(false);
+    let mut plan = DeburrPlan::prepare(op, &tool, &spec, [-4., -4., 70.], 1, &cancel).unwrap();
+    let report = plan.report();
+    let by_id = |id: &str| report.edges.iter().find(|e| e.id == id).unwrap();
+    assert_eq!(report.edges.len(), 4);
+    for id in ["front", "back"] {
+        let e = by_id(id);
+        // Broken but for its ends (where the ball would reach the end walls).
+        assert!(e.cut_length_mm > 0.75 * e.length_mm, "{e:?}");
+        assert_ne!(e.status, "skipped");
+    }
+    assert_eq!(by_id("corner").status, "skipped");
+    assert!(by_id("corner").reasons[0].contains("vertical edge"));
+    assert_eq!(by_id("bottom").status, "skipped");
+    assert!(by_id("bottom").reasons[0].contains("faces down"));
+    let mut stock = Stock::new(spec.clone()).unwrap();
+    let motions = run(&mut plan, &tool, &mut stock);
+    // Independent: the 90 degree edges' ball centre runs s out along the
+    // outward bisector, s = sqrt(R^2 - L^2 / 2) - L / sqrt(2); every part
+    // sample the assembly reaches (its own radius profile) must be within R
+    // of that line (the cove), nothing else.
+    let (r, leg) = (2f64, 0.5f64);
+    let s = (r * r - leg * leg / 2.).sqrt() - leg / 2f64.sqrt();
+    let from_centre_line = |side: f64, q: Vec3| {
+        let wall = [0., side, 0.];
+        let b: Vec3 = std::array::from_fn(|k| (top[k] + wall[k]) / 2f64.sqrt());
+        let a: Vec3 = [0., if side < 0. { 0. } else { 20. }, z0];
+        let a: Vec3 = std::array::from_fn(|k| a[k] + s * b[k]);
+        let v = [40., 0., z1 - z0];
+        let l = (v[0] * v[0] + v[2] * v[2]).sqrt();
+        let v = v.map(|x| x / l);
+        let d: Vec3 = std::array::from_fn(|k| q[k] - a[k]);
+        let t = d[0] * v[0] + d[1] * v[1] + d[2] * v[2];
+        let perp: Vec3 = std::array::from_fn(|k| d[k] - t * v[k]);
+        (perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]).sqrt()
+    };
+    let prepared = tool.prepare().unwrap();
+    let points = samples(&part, 0.2);
+    let mut reached = 0;
+    for m in motions.iter().filter(|m| m.kind != MoveKind::Rapid) {
+        let curve = m.curve.prepare(1e-5).unwrap();
+        let n = (curve.length_mm() / 0.1).ceil().max(1.) as usize;
+        for i in 0..=n {
+            let p = curve.position(i as f64 / n as f64).unwrap();
+            for q in &points {
+                let d = (q[0] - p[0]).hypot(q[1] - p[1]);
+                let Some(h) = tool_height(&prepared, tool.gauge_length_mm, d) else {
+                    continue;
+                };
+                if q[2] - (p[2] + h) <= 1e-6 {
+                    continue;
+                }
+                reached += 1;
+                let side = if q[1] < 10. { -1. } else { 1. };
+                assert!(
+                    from_centre_line(side, *q) <= r + 1e-6,
+                    "{:?} at {p:?} cuts the part at {q:?} outside the break",
+                    m.kind
+                );
+            }
+        }
+    }
+    assert!(reached > 50, "{reached}");
 }
