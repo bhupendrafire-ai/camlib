@@ -165,10 +165,20 @@ class SurfaceTarget:
 
 @dataclass(frozen=True)
 class Options:
+    """Material check options.
+
+    ``max_tile_nodes`` (up to 10 000 000) and ``max_boundary_tests`` (up to
+    1 000 000 000) bound the check's work. Left as ``None`` each grows with the
+    stock grid to the most work the check can need there, up to its allowed
+    maximum. An incomplete report's ``stats["stopped_by"]`` names the budget
+    that stopped it, and gives a value that completes the check when one is
+    known within the allowed maximum.
+    """
+
     geometry_tolerance_mm: float = 1e-5
     comparison_tolerance_mm: float = 0.001
-    max_tile_nodes: int = 1_000_000
-    max_boundary_tests: int = 50_000_000
+    max_tile_nodes: int | None = None
+    max_boundary_tests: int | None = None
     max_classified_cells: int = 0xFFFFFFFF
     max_findings: int = 1024
     residual_tolerance_mm: float | None = None

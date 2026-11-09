@@ -581,8 +581,12 @@ impl CheckpointFields {
         // count and 32 bytes per ring.
         let shape = match &manifest.stock {
             RunStockSpec::Height(_) | RunStockSpec::Mesh(_) => {
+                // A producer checkpoint may end with its proof states.
                 let (nx, ny, _) = manifest.stock.height()?.grid()?;
-                self.count == nx * ny && cell_bytes == self.count * 16
+                self.count == nx * ny
+                    && cell_bytes
+                        .checked_sub(self.count * 16)
+                        .is_some_and(|rest| rest <= max_proof_section(manifest, self.count))
             }
             RunStockSpec::Turn(spec) => {
                 let rest = cell_bytes.checked_sub(self.count * 32 + 4);
@@ -633,6 +637,9 @@ pub struct StreamReceiver {
     last_tool: Option<String>,
     /// Retained cells are not evidence of raw stock, even at cursor zero.
     restored_from_checkpoint: bool,
+    /// The per-move proof states a producer checkpoint kept (#108), until
+    /// a producer restored from it takes them.
+    restored_proofs: Option<Vec<Vec<u8>>>,
 }
 impl StreamProducer {
     pub fn new(manifest: StreamManifest) -> Result<Self, String> {
@@ -681,6 +688,7 @@ impl StreamProducer {
         }
     }
     fn from_state(mut state: StreamReceiver, read_only: bool) -> Result<Self, String> {
+        let proofs = state.restored_proofs.take();
         if !read_only
             && state
                 .manifest
@@ -711,6 +719,7 @@ impl StreamProducer {
                         &state.manifest,
                         state.sequence,
                         state.restored_from_checkpoint,
+                        proofs.as_deref(),
                     )
                 })
                 .transpose()?
@@ -780,8 +789,15 @@ impl StreamProducer {
     pub fn manifest(&self) -> &StreamManifest {
         &self.state.manifest
     }
+    /// The stock checkpoint, plus the material checks' per-move proof
+    /// states at this cursor (#108), so a producer resumed from it keeps
+    /// deciding cells.
     pub fn checkpoint(&self, limit: usize) -> Result<Vec<u8>, String> {
-        self.state.checkpoint(limit)
+        let proofs = self
+            .checks
+            .as_ref()
+            .and_then(crate::stream_verification::Runtime::proof_states);
+        self.state.checkpoint_with(limit, proofs.as_deref())
     }
     /// Synchronize a disposable query cache from an already committed source
     /// chunk. This reuses receiver CRC/identity/sequence/old-value checks and does
@@ -803,8 +819,10 @@ impl StreamProducer {
     pub fn restore_checkpoint(&mut self, bytes: &[u8], limit: usize) -> Result<(), String> {
         let state = StreamReceiver::from_checkpoint(self.state.manifest.clone(), bytes, limit)?;
         // Reuse construction so no proof counters, touched cells, active
-        // stages or history claims survive a stock replacement. Prepare the
-        // whole replacement before committing any part of the restored state.
+        // stages or history claims survive a stock replacement, except the
+        // proof states the checkpoint itself kept (#108). The whole
+        // replacement is prepared (a bad proof state refuses it) before any
+        // part of the restored state is committed.
         *self = Self::from_state(state, self.read_only)?;
         Ok(())
     }
@@ -1194,6 +1212,7 @@ impl StreamReceiver {
             finished: false,
             last_tool: None,
             restored_from_checkpoint: false,
+            restored_proofs: None,
         })
     }
     /// The committed height-field stock (milling and thermal runs).
@@ -1345,6 +1364,9 @@ impl StreamReceiver {
         Ok(chunk.motion)
     }
     pub fn checkpoint(&self, limit: usize) -> Result<Vec<u8>, String> {
+        self.checkpoint_with(limit, None)
+    }
+    fn checkpoint_with(&self, limit: usize, proofs: Option<&[Vec<u8>]>) -> Result<Vec<u8>, String> {
         let mut body = self.identity.clone();
         put_u64(&mut body, self.sequence);
         put_vec3(&mut body, self.position);
@@ -1357,11 +1379,15 @@ impl StreamReceiver {
                 if let Some(controls) = &self.controls {
                     put_control_json(&mut body, controls)?;
                 }
-                check_size(body.len() + stock.cells().len() * 16, limit)?;
-                body.reserve(stock.cells().len() * 16);
+                let section = proofs
+                    .map(|states| proof_section(states, &cells_digest(stock.cells())))
+                    .unwrap_or_default();
+                check_size(body.len() + stock.cells().len() * 16 + section.len(), limit)?;
+                body.reserve(stock.cells().len() * 16 + section.len());
                 for h in stock.cells() {
                     put_height(&mut body, *h);
                 }
+                body.extend_from_slice(&section);
             }
             RunStock::Turn(stock) => {
                 // One stock generation per committed move, as in a height field.
@@ -1405,7 +1431,8 @@ impl StreamReceiver {
         for _ in 0..fields.count {
             cells.push(body.height()?);
         }
-        Self::from_checkpoint_cells(manifest, fields, cells)
+        let proofs = read_proof_section(body.take(body.left())?, &manifest, fields.count)?;
+        Self::from_checkpoint_cells(manifest, fields, cells, proofs)
     }
     fn from_checkpoint_turn(
         manifest: StreamManifest,
@@ -1440,6 +1467,7 @@ impl StreamReceiver {
             controls: fields.controls,
             last_tool: None,
             restored_from_checkpoint: true,
+            restored_proofs: None,
         })
     }
     /// A single retained file, parsed into final cell storage in bounded blocks.
@@ -1498,6 +1526,7 @@ impl StreamReceiver {
         let mut crc = crc32fast::Hasher::new();
         crc.update(&header[..16]);
         crc.update(&prefix);
+        let section = length - prefix.len() - fields.count * 16;
         let mut cells = Vec::with_capacity(fields.count);
         let mut block = [0u8; 65536];
         let mut remaining = fields.count * 16;
@@ -1515,20 +1544,34 @@ impl StreamReceiver {
             }
             remaining -= count;
         }
+        // The proof section is bounded by `validate` (a few bits per cell).
+        let mut proofs = vec![0u8; section];
+        reader
+            .read_exact(&mut proofs)
+            .map_err(|e| format!("truncated checkpoint proof states: {e}"))?;
+        crc.update(&proofs);
         if crc.finalize() != expected {
             return Err("checkpoint file checksum mismatch".into());
         }
         if reader.read(&mut [0u8; 1]).map_err(|e| e.to_string())? != 0 {
             return Err("trailing checkpoint file data".into());
         }
-        Self::from_checkpoint_cells(manifest, fields, cells)
+        let proofs = read_proof_section(&proofs, &manifest, fields.count)?;
+        Self::from_checkpoint_cells(manifest, fields, cells, proofs)
     }
     fn from_checkpoint_cells(
         manifest: StreamManifest,
         fields: CheckpointFields,
         cells: Vec<HeightBounds>,
+        kept: Option<KeptProofs>,
     ) -> Result<Self, String> {
         let identity = identity_bytes(&manifest)?;
+        // Kept proof states describe the stock they were computed with: for
+        // any other cells they are discarded, and the resumed history is
+        // unseen (reported, never decided).
+        let restored_proofs = kept
+            .filter(|(digest, _)| *digest == cells_digest(&cells))
+            .map(|(_, states)| states);
         let mut stock = Stock::from_snapshot(StockSnapshot {
             spec: manifest.stock.height()?.clone(),
             generation: fields.generation,
@@ -1548,6 +1591,7 @@ impl StreamReceiver {
             controls: fields.controls,
             last_tool: None,
             restored_from_checkpoint: true,
+            restored_proofs,
         })
     }
     /// A lathe move's first `fraction` from the stock at its start (the
@@ -2161,6 +2205,86 @@ fn put_string(out: &mut Vec<u8>, v: &str) {
     out.extend_from_slice(&(v.len() as u16).to_le_bytes());
     out.extend_from_slice(v.as_bytes());
 }
+/// A producer checkpoint's trailing section (#108): the material checks'
+/// per-move proof states, one per configured stage (empty for a stage
+/// without a proof). The frame's run identity, cursor and checksum cover it.
+const PROOF_SECTION: &[u8; 8] = b"CAMPRF01";
+/// SHA-256 of a height-field stock's cells as a checkpoint encodes them.
+/// The proof states bind it: a kept proof covers exactly the stock it was
+/// computed with (#108 with #133's raw-stock premise).
+fn cells_digest(cells: &[HeightBounds]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    let mut buffer = Vec::with_capacity(16);
+    for &cell in cells {
+        buffer.clear();
+        put_height(&mut buffer, cell);
+        hasher.update(&buffer);
+    }
+    hasher.finalize().into()
+}
+fn proof_section(states: &[Vec<u8>], cells: &[u8; 32]) -> Vec<u8> {
+    let mut out = PROOF_SECTION.to_vec();
+    out.extend_from_slice(cells);
+    put_u32(&mut out, states.len() as u32);
+    for state in states {
+        put_u64(&mut out, state.len() as u64);
+        out.extend_from_slice(state);
+    }
+    out
+}
+/// The largest proof section a checkpoint of this run may carry.
+fn max_proof_section(manifest: &StreamManifest, cells: usize) -> usize {
+    let stages = manifest
+        .verification
+        .as_ref()
+        .map_or(0, |c| c.material.len());
+    if stages == 0 {
+        return 0;
+    }
+    PROOF_SECTION.len()
+        + 32
+        + 4
+        + stages * (8 + crate::material::SweepProof::max_state_bytes(cells))
+}
+/// The proof states of a checkpoint's trailing section and the digest of
+/// the cells they were computed with (none when absent: a consumer's
+/// checkpoint, or one from a run without material proofs).
+fn read_proof_section(
+    bytes: &[u8],
+    manifest: &StreamManifest,
+    cells: usize,
+) -> Result<Option<KeptProofs>, String> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let bad = || "invalid checkpoint proof section".to_string();
+    let stages = manifest
+        .verification
+        .as_ref()
+        .map_or(0, |c| c.material.len());
+    let mut body = Decoder { bytes, offset: 0 };
+    if body.take(PROOF_SECTION.len()).map_err(|_| bad())? != PROOF_SECTION {
+        return Err(bad());
+    }
+    let digest: [u8; 32] = body.take(32).map_err(|_| bad())?.try_into().unwrap();
+    if body.u32().map_err(|_| bad())? as usize != stages {
+        return Err(bad());
+    }
+    let mut states = Vec::with_capacity(stages);
+    for _ in 0..stages {
+        let length = body.u64().map_err(|_| bad())?;
+        if length > crate::material::SweepProof::max_state_bytes(cells) as u64 {
+            return Err(bad());
+        }
+        states.push(body.take(length as usize).map_err(|_| bad())?.to_vec());
+    }
+    if body.left() != 0 {
+        return Err(bad());
+    }
+    Ok(Some((digest, states)))
+}
+/// A checkpoint's kept proof states and the digest of their stock cells.
+type KeptProofs = ([u8; 32], Vec<Vec<u8>>);
 pub fn identity_bytes(manifest: &StreamManifest) -> Result<Vec<u8>, String> {
     let run = &manifest.run;
     let mut bytes = Vec::new();

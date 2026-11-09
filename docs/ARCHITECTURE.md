@@ -61,7 +61,7 @@ CRC-32), then the payload. Kinds (`src/stream.rs`):
 | Kind | Name | Holds |
 |---|---|---|
 | 1 | Chunk | One milling or thermal move and its height-field cell changes |
-| 2 | Checkpoint | The full committed stock and cursor |
+| 2 | Checkpoint | The full committed stock and cursor; a producer's also ends with its material checks' per-move proof states (`CAMPRF01` section, #108) |
 | 3 | Manifest | The canonical manifest (its SHA-256 binds every later frame) |
 | 4 | End | The run finished; final cursor and position |
 | 5 | Preview | A partial move's stock (not committed) |
@@ -131,6 +131,20 @@ whose old value doesn't match its own stock.
   stock alone; the record's `sweep_proof`, beside it, gives the proven and
   unproven motions and the decided cells. `export.material_status(report,
   sweep_proof)` is clear when the proof decides every possible-only gouge cell.
+  A cell is decided only when every motion since the raw stock was proven:
+  a producer's checkpoint keeps each proof's state (history flag, proven and
+  unproven counts, and the touched cells, one bit per cell, run-length coded
+  when smaller), under the frame's run identity and checksum, so a stream
+  resumed from it (`StreamProducer::from_checkpoint`, `--resume`, or
+  `restore_checkpoint`) decides the same cells as one that never stopped. A
+  checkpoint without it (a consumer's) resumes with `history_complete: false`,
+  and decides nothing. Work budgets: `max_tile_nodes` and `max_boundary_tests`
+  left unset grow with the grid to an upper bound on the work the check can
+  need (the full tile tree; per cell, the target's hierarchy nodes, facets
+  and edge tests, or per tile the region's segments), capped at the allowed
+  maximums. An incomplete report's `stats.stopped_by` names the budget that
+  stopped it and, when that bound is within the maximum, the value that
+  completes it.
   Lathe runs report
   `turning::ops::material_report` after every operation; there, gouges are
   excluded per move by the planner's exact checks.

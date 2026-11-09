@@ -731,6 +731,10 @@ impl PreparedSurface {
     pub fn prism_count(&self) -> usize {
         self.triangles.len()
     }
+    /// The bounding-volume hierarchy's nodes.
+    pub(crate) fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
     /// Exact edge extrema of one convex prism's ball-offset slice. The slice
     /// support lies on a prism-edge cross section or its analytic stationary
     /// height, not on a sampled surface. See docs/waterline-support-plan.md.

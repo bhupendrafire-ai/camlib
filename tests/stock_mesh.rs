@@ -347,6 +347,7 @@ fn open_inside_out_and_misplaced_meshes_are_refused() {
 fn manifest(stock: RunStockSpec) -> StreamManifest {
     StreamManifest {
         tool_change: None,
+        initial_stock: None,
         rapid_retracts: false,
         turning: None,
         version: 1,

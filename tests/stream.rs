@@ -2045,17 +2045,16 @@ fn retained_sweep_proofs_bind_source_budget_replay_history_and_checked_move_tota
             reframe(&bytes, &body)
         };
         let proof = &original["check"]["sweep_proof"];
-        assert_eq!(
-            proof["history_complete"],
-            mode != "initial" && mode != "resumed"
-        );
+        // A resume from the producer's own checkpoint keeps the proof
+        // states and their history (#108); a declared blank never has it.
+        assert_eq!(proof["history_complete"], mode != "initial");
         assert!(
             original["check"]["report"]["gouge"]["possible_only_cells"]
                 .as_u64()
                 .unwrap()
                 > 0
         );
-        if mode == "raw" {
+        if mode == "raw" || mode == "resumed" {
             assert!(proof["decided_cells"].as_u64().unwrap() > 0);
         } else {
             assert_eq!(proof["decided_cells"], 0);
@@ -2064,11 +2063,8 @@ fn retained_sweep_proofs_bind_source_budget_replay_history_and_checked_move_tota
         for (field, value) in [
             ("surface_error_mm", serde_json::json!(0.)),
             ("tolerance_mm", serde_json::json!(0.1)),
-            (
-                "history_complete",
-                serde_json::json!(mode == "initial" || mode == "resumed"),
-            ),
-            ("proven_moves", serde_json::json!(2)),
+            ("history_complete", serde_json::json!(mode == "initial")),
+            ("proven_moves", serde_json::json!(completed + 1)),
             ("unproven_moves", serde_json::json!(u64::MAX)),
         ] {
             let mut changed = original.clone();
@@ -2084,7 +2080,7 @@ fn retained_sweep_proofs_bind_source_budget_replay_history_and_checked_move_tota
                 "{mode}: {field}"
             );
         }
-        if mode == "raw" {
+        if mode == "raw" || mode == "resumed" {
             let mut changed = original.clone();
             changed["check"]["sweep_proof"]["unavailable"] = serde_json::json!("proof unavailable");
             assert!(binding.decode(&encode(&changed), completed, None).is_err());
@@ -2164,8 +2160,13 @@ fn checkpoint_restores_never_promote_bounded_cells_into_raw_stock_proof_history(
     // Keep the zero cursor and all manifest attribution intact, but replace
     // every valid bounded cell with pre-erased material and recompute CRC.
     let mut body = original[20..].to_vec();
-    let cells_start = body.len() - 16 * 16;
-    for cell in body[cells_start..].as_chunks_mut::<16>().0 {
+    // The cells end where the producer's kept proof section (#108) begins.
+    let cells_end = body
+        .windows(8)
+        .rposition(|w| w == b"CAMPRF01")
+        .unwrap_or(body.len());
+    let cells_start = cells_end - 16 * 16;
+    for cell in body[cells_start..cells_end].as_chunks_mut::<16>().0 {
         cell[..8].copy_from_slice(&0.5_f64.to_le_bytes());
         cell[8..].copy_from_slice(&0.5_f64.to_le_bytes());
     }

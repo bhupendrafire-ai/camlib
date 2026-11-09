@@ -681,16 +681,37 @@ impl Binding {
                                     || r.stats.unexamined_cells != 0))
                     })
                     || r.findings.iter().any(|f| f.cell_index as usize >= nx * ny)
-                    // A retained proof must account for exactly the actual
-                    // replay suffix, bind its source error, and cannot decide
-                    // cells without complete available history and analysis.
+                    // The budgets ran with: the configured ones, within the
+                    // allowed maximums, and a stop names one exactly when
+                    // work was exhausted (#108).
+                    || c.options
+                        .max_tile_nodes
+                        .is_some_and(|n| n != r.stats.max_tile_nodes)
+                    || c.options
+                        .max_boundary_tests
+                        .is_some_and(|n| n != r.stats.max_boundary_tests)
+                    || !(1..=material::MAX_TILE_NODES).contains(&r.stats.max_tile_nodes)
+                    || !(1..=material::MAX_BOUNDARY_TESTS).contains(&r.stats.max_boundary_tests)
+                    || r.stats.tile_nodes > r.stats.max_tile_nodes
+                    || r.stats.estimated_boundary_tests > r.stats.max_boundary_tests
+                    || r.stats.work_exhausted != r.stats.stopped_by.is_some()
+                    // A proof decides at most the report's possible-only
+                    // gouge cells, at the configured tolerance.
                     || sweep_proof.as_ref().is_some_and(|p| {
                         p.decided_cells > r.gouge.possible_only_cells
                             || p.tolerance_mm != c.options.gouge_tolerance()
                             || p.surface_error_mm != self.proof_source_error_mm[i]
-                            || (p.history_complete && (!self.raw_stock || record.progress.from_completed != 0))
+                            // Complete history needs the raw stock, and then
+                            // accounts for every motion since it (a resumed
+                            // stream's kept proof state, #108); otherwise
+                            // exactly the motions this stream replayed.
+                            || (p.history_complete && !self.raw_stock)
                             || p.proven_moves.checked_add(p.unproven_moves)
-                                != completed.checked_sub(record.progress.from_completed)
+                                != if p.history_complete {
+                                    Some(completed)
+                                } else {
+                                    completed.checked_sub(record.progress.from_completed)
+                                }
                             || (!proof_available && p.proven_moves != 0)
                             || ((!p.history_complete || !proof_available) && p.unavailable.is_none())
                             || (p.decided_cells != 0
@@ -822,10 +843,16 @@ impl Runtime {
         }
         Ok(())
     }
+    /// `restored`: the stream resumes from a retained checkpoint (never
+    /// evidence of raw stock, even at cursor 0). `states`: the per-move
+    /// proof states that checkpoint kept (#108), one per material stage.
+    /// Without them a resumed stream decides no cell: the motions before it
+    /// are unseen.
     pub fn prepare(
         manifest: &StreamManifest,
         completed: u64,
         restored: bool,
+        states: Option<&[Vec<u8>]>,
     ) -> Result<Self, String> {
         let binding = Arc::new(Binding::new(manifest)?);
         let never = std::sync::atomic::AtomicBool::new(false);
@@ -853,7 +880,7 @@ impl Runtime {
                 .map(Some),
             })
             .collect::<Result<_, String>>()?;
-        Ok(Self {
+        let mut runtime = Self {
             scene: binding
                 .config
                 .scene
@@ -869,7 +896,64 @@ impl Runtime {
             proofs,
             sweep_tolerance_mm: manifest.sweep.tolerance_mm,
             tracker: Tracker::new(binding, completed),
+        };
+        runtime.restore_proofs(completed, states, restored)?;
+        Ok(runtime)
+    }
+    /// The per-move proof states at the current cursor, one per material
+    /// stage, for a checkpoint (#108). None when no stage has a proof.
+    pub fn proof_states(&self) -> Option<Vec<Vec<u8>>> {
+        self.proofs.iter().any(Option::is_some).then(|| {
+            self.proofs
+                .iter()
+                .map(|p| {
+                    p.as_ref()
+                        .map(material::SweepProof::state)
+                        .unwrap_or_default()
+                })
+                .collect()
         })
+    }
+    /// Set the proofs to a checkpoint at `completed`: its kept states, or
+    /// (none kept) a fresh run at 0 and an unseen history after it. All
+    /// states are checked before any proof changes.
+    pub fn restore_proofs(
+        &mut self,
+        completed: u64,
+        states: Option<&[Vec<u8>]>,
+        restored: bool,
+    ) -> Result<(), String> {
+        let raw = self.tracker.binding.raw_stock;
+        let Some(states) = states else {
+            let fresh = raw && !restored && completed == 0;
+            for proof in self.proofs.iter_mut().flatten() {
+                proof.reset(fresh);
+            }
+            return Ok(());
+        };
+        if states.len() != self.proofs.len() {
+            return Err("checkpoint material proof states do not match the run's stages".into());
+        }
+        let mut restored = Vec::with_capacity(states.len());
+        for (proof, state) in self.proofs.iter().zip(states) {
+            restored.push(match proof {
+                Some(_) => Some(state.as_slice()),
+                None if state.is_empty() => None,
+                None => return Err("checkpoint material proof state for an unproven stage".into()),
+            });
+        }
+        // Decode every state first, so a bad one leaves all proofs as they
+        // were.
+        let mut decoded = Vec::with_capacity(restored.len());
+        for (proof, state) in self.proofs.iter().zip(&restored) {
+            if let (Some(proof), Some(state)) = (proof, state) {
+                decoded.push(proof.decode_state(state)?);
+            }
+        }
+        for (proof, state) in self.proofs.iter_mut().flatten().zip(decoded) {
+            proof.apply_state(state, raw);
+        }
+        Ok(())
     }
     pub fn motion(
         &mut self,

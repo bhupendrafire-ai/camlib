@@ -638,6 +638,9 @@ class RecordedRun:
                 residual=None if report is None else report["residual"],
                 gouge=None if report is None else report["gouge"],
             )
+            if report is not None and report["stats"].get("stopped_by") is not None:
+                # The work budget that stopped an incomplete check (#108).
+                result["material"]["stopped_by"] = dict(report["stats"]["stopped_by"])
             if data.get("sweep_proof") is not None:
                 # The per-move gouge proof against the target (decided cells,
                 # proven and unproven moves), recorded beside the report.
