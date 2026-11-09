@@ -121,6 +121,8 @@ use: 2D, holes, 3D), turning and thermal.
 
 ## Any time
 
+- [x] #133 Bounded preparation and declared whole-cell stock/material premises (scoped library APIs)
+
 These can run in parallel with any phase.
 
 - [ ] #20 Validate every controller post on real machines (start with the LinuxCNC simulator in CI)

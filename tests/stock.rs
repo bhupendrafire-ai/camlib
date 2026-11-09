@@ -15,6 +15,76 @@ fn spec(cell: f64) -> StockSpec {
         max_cells: 1_048_576,
     }
 }
+
+#[test]
+fn declared_initial_blank_is_validated_and_volume_starts_at_that_blank() {
+    let spec = spec(1.);
+    let initial = InitialStock {
+        source_id: "measured-blank".into(),
+        revision: "1".into(),
+        source_sha256: "a".repeat(64),
+        source_to_setup: WorkFrame::identity(),
+        uncertainty_mm: 0.,
+        representation: "whole_cell_top_down".into(),
+        bounds: (0..400)
+            .map(|i| {
+                let z = if i % 20 < 10 { 0. } else { 10. };
+                HeightBounds {
+                    lower_mm: z,
+                    upper_mm: z,
+                }
+            })
+            .collect(),
+    };
+    let mut stock = Stock::from_initial(spec.clone(), &initial).unwrap();
+    assert_eq!(stock.volume().remaining_upper_mm3, 2000.);
+    assert_eq!(stock.volume().removed_upper_mm3, 0.);
+    let tool = tool(CutterShape::Flat);
+    let empty = line([3., 5., 6.], [7., 5., 6.]);
+    let delta = preview(&stock, &tool, &empty, 1.);
+    assert!(delta.changes().is_empty());
+    stock.apply_delta(&delta).unwrap();
+    let cut = line([12., 5., 6.], [17., 5., 6.]);
+    stock
+        .apply_delta(&preview(&stock, &tool, &cut, 1.))
+        .unwrap();
+    assert!(stock.volume().removed_lower_mm3 > 0.);
+    assert!(stock.volume().removed_upper_mm3 < 1000.);
+    // A restored snapshot still has no native machining-history certificate.
+    assert!(
+        !Stock::from_snapshot(stock.snapshot())
+            .unwrap()
+            .departs_clear("t1", cut.curve.end())
+    );
+    for invalid in [
+        InitialStock {
+            source_sha256: "invalid".into(),
+            ..initial.clone()
+        },
+        InitialStock {
+            uncertainty_mm: -1.,
+            ..initial.clone()
+        },
+        InitialStock {
+            bounds: vec![],
+            ..initial.clone()
+        },
+        InitialStock {
+            source_to_setup: WorkFrame {
+                x: [2., 0., 0.],
+                ..WorkFrame::identity()
+            },
+            ..initial.clone()
+        },
+        InitialStock {
+            representation: "mesh-with-undercuts".into(),
+            ..initial.clone()
+        },
+    ] {
+        assert!(Stock::from_initial(spec.clone(), &invalid).is_err());
+    }
+}
+
 fn tool(shape: CutterShape) -> PreparedAssembly {
     ToolAssembly {
         id: "t1".into(),

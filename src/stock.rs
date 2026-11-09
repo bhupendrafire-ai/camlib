@@ -72,6 +72,72 @@ pub struct HeightBounds {
     pub upper_mm: f64,
 }
 
+/// Caller-declared whole-cell bounds of a top-down blank in setup coordinates.
+/// Source identity binds the physical premise; this is not a restored snapshot
+/// and does not claim that an imported mesh or a weld was measured by camlib.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitialStock {
+    pub source_id: String,
+    pub revision: String,
+    pub source_sha256: String,
+    /// Recorded placement only: bounds below are already in setup coordinates.
+    pub source_to_setup: crate::motion::WorkFrame,
+    /// Source/placement error already enclosed by every whole-cell bound.
+    pub uncertainty_mm: f64,
+    pub representation: String,
+    pub bounds: Vec<HeightBounds>,
+}
+impl InitialStock {
+    const INVALID: &str = "initial stock needs source identity, whole_cell_top_down representation and one valid lower/upper height pair per cell";
+
+    pub(crate) fn validate_metadata(&self) -> Result<(), String> {
+        self.source_to_setup.validate()?;
+        if !crate::tool::valid_id(&self.source_id)
+            || self.revision.is_empty()
+            || self.revision.len() > 512
+            || self.source_sha256.len() != 64
+            || !self.source_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || !self.uncertainty_mm.is_finite()
+            || !(0. ..=1e6).contains(&self.uncertainty_mm)
+            || self.representation != "whole_cell_top_down"
+        {
+            return Err(Self::INVALID.into());
+        }
+        Ok(())
+    }
+
+    pub fn validate(&self, spec: &StockSpec) -> Result<(), String> {
+        let (nx, ny, _) = spec.grid()?;
+        self.validate_metadata()?;
+        if self.bounds.len() != nx * ny
+            || self
+                .bounds
+                .iter()
+                .any(|&height| !height_valid(height, spec))
+        {
+            return Err(Self::INVALID.into());
+        }
+        Ok(())
+    }
+
+    pub fn volume(&self, spec: &StockSpec) -> Result<[f64; 2], String> {
+        self.validate(spec)?;
+        let (_, _, step) = spec.grid()?;
+        let area = step[0] * step[1];
+        Ok([
+            self.bounds
+                .iter()
+                .map(|h| (h.lower_mm - spec.min_mm[2]) * area)
+                .sum(),
+            self.bounds
+                .iter()
+                .map(|h| (h.upper_mm - spec.min_mm[2]) * area)
+                .sum(),
+        ])
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StockSnapshot {
@@ -508,6 +574,7 @@ pub struct Stock {
     cells: Vec<HeightBounds>,
     contact_index: Option<crate::stock_contact::HeightIndex>,
     initial_full_stock: bool,
+    initial_volume_mm3: Option<[f64; 2]>,
     identity: u64,
     receipt_requested: Arc<AtomicBool>,
     last_receipt: Option<Arc<SweepReceipt>>,
@@ -598,6 +665,7 @@ impl Stock {
             cells,
             contact_index: None,
             initial_full_stock: true,
+            initial_volume_mm3: None,
             identity: new_identity(),
             receipt_requested: Arc::new(AtomicBool::new(false)),
             last_receipt: None,
@@ -610,6 +678,20 @@ impl Stock {
     }
     pub fn spec(&self) -> &StockSpec {
         &self.spec
+    }
+
+    pub fn from_initial(spec: StockSpec, initial: &InitialStock) -> Result<Self, String> {
+        initial.validate(&spec)?;
+        let mut stock = Self::new(spec)?;
+        stock.cells.clone_from(&initial.bounds);
+        stock.initial_full_stock = false;
+        stock.initial_volume_mm3 = Some(initial.volume(&stock.spec)?);
+        Ok(stock)
+    }
+
+    pub(crate) fn initial_volume(&mut self, initial: &InitialStock) -> Result<(), String> {
+        self.initial_volume_mm3 = Some(initial.volume(&self.spec)?);
+        Ok(())
     }
     pub fn dimensions(&self) -> [usize; 2] {
         [self.nx, self.ny]
@@ -942,6 +1024,7 @@ impl Stock {
             cells: snapshot.cells,
             contact_index: None,
             initial_full_stock: false,
+            initial_volume_mm3: None,
             identity: new_identity(),
             receipt_requested: Arc::new(AtomicBool::new(false)),
             last_receipt: None,
@@ -967,11 +1050,12 @@ impl Stock {
             .map(|c| (c.upper_mm - base) * area)
             .sum::<f64>();
         let total = (self.spec.max_mm[2] - base) * area * self.cells.len() as f64;
+        let initial = self.initial_volume_mm3.unwrap_or([total, total]);
         StockVolume {
             remaining_lower_mm3: lower,
             remaining_upper_mm3: upper,
-            removed_lower_mm3: (total - upper).max(0.),
-            removed_upper_mm3: (total - lower).max(0.),
+            removed_lower_mm3: (initial[0] - upper).max(0.),
+            removed_upper_mm3: (initial[1] - lower).max(0.),
         }
     }
 

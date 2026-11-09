@@ -85,6 +85,10 @@ Details and limits: [capabilities](docs/library-capabilities.md). Measured
 toolpath quality and engine performance for every toolpath:
 [benchmarks](docs/benchmarks.md).
 
+Native [bounded preparation](docs/preparation.md) can screen supplied samples
+and calibrated assemblies and enclose a declared top-down blank. These queries
+produce explicit premises and advice; ordinary job verification still decides release.
+
 ## Install
 
 Requires Python 3.12+ and a Rust toolchain (the package compiles the engine):

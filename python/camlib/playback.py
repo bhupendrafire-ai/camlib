@@ -116,6 +116,7 @@ class RecordedRun:
         tool_change=None,
         rapid_retracts=True,
         turning=None,
+        initial_stock=None,
     ):
         if not 1 <= batch_size <= 4096 or checkpoint_every <= 0 or checkpoint_changed_cells <= 0:
             raise ValueError("invalid bounded batching/checkpoint policy")
@@ -163,6 +164,7 @@ class RecordedRun:
             tool_change=tool_change,
             rapid_retracts=rapid_retracts,
             turning=turning,
+            initial_stock=initial_stock,
             _on_spawn=self._spawned,
         )
         self._verification = verification.to_dict() if hasattr(verification, "to_dict") else verification
