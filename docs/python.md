@@ -18,7 +18,7 @@ level `Setup` is the job setup (`camlib.jobs.Setup`).
 | `camlib.simulation` | `StockSpec(min, max, cell_size, max_cells=)`, `SweepOptions` (chord error, tip step and work budgets of the stock sweep), `Simulation`, `ToolChangePosition`, `ToolChangeTable`, `SimulationError`, `CamWarning`, low-level streaming |
 | `camlib.verification` | `StreamChecks(scene=, options=, material=, stock_contact=)`, `StockContactOptions` (resolution, work and finding limits), `Scene(id, revision, bodies, machine, work_to_machine)`, `Prism` (fixture or protected part; `z_error_mm`, `representation`), `MachineLimits` (tip travel, feed, acceleration, axis feeds), `MaterialCheck(target, after_operation=)` |
 | `camlib.playback` | `Player`, `Cursor` (operation, motion and `fraction` along it), `RecordedRun` (replay, seek, save) |
-| `camlib.post` | `Machine`, `ToolSetting`, `GCodeDialect`, `GCodePost`, `NativeGCodeDecoder`, `LoweringOptions`, `post_program`, `post_events` (post an event list you built) |
+| `camlib.post` | `Machine`, `ToolSetting`, `GCodeDialect`, `GCodePost`, `NativeGCodeDecoder`, `LoweringOptions`, `post_program`, `post_events` (post an event list you built), `post_job_input`/`post_job` (the Rust default post, see [posts](posts.md#posting-without-python-rust-webassembly)) |
 | `camlib.posted` | `PostedRun`: replays a posted program from its decoded G-code (what the controller will do), with stock and checks |
 | `camlib.dynamics` | `MotionPolicy` (acceleration, rapid feed, junction mode) and feed scheduling / time estimates |
 | `camlib.motion` | Typed motion and events (`Motion`, `Line`, `Arc`, `Helix`, `Dwell`, `Cycle`, `SpindleOrient`, `CutterCompensation`, `Beam`, `HeightControl`, `SurfaceSpeed`, `FeedPerRev`, ...), `WorkFrame(origin_mm, x, y, z)` |
