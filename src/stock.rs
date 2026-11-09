@@ -608,6 +608,23 @@ impl Stock {
             bore: None,
         })
     }
+    /// A run's starting stock given cell by cell (a mesh stock converted to
+    /// the height field, `crate::stock_mesh`): the run's initial state, with
+    /// its history (none) known, unlike a snapshot.
+    pub(crate) fn from_initial_cells(
+        spec: StockSpec,
+        cells: Vec<HeightBounds>,
+    ) -> Result<Self, String> {
+        let mut stock = Self::new(spec)?;
+        if cells.len() != stock.cells.len() || cells.iter().any(|&h| !height_valid(h, &stock.spec))
+        {
+            return Err("initial stock has invalid height bounds or grid length".into());
+        }
+        let top = stock.spec.max_mm[2];
+        stock.initial_full_stock = cells.iter().all(|h| h.lower_mm == top);
+        stock.cells = cells;
+        Ok(stock)
+    }
     pub fn spec(&self) -> &StockSpec {
         &self.spec
     }

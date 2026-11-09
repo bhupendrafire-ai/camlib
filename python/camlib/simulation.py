@@ -57,17 +57,232 @@ class SimulationError(RuntimeError):
     pass
 
 
+class StockMesh:
+    """A stock solid as a closed triangle mesh, in millimetres, in the frame of
+    the job it is given to (castings, pre-machined or sawn blanks, or an
+    earlier setup's finished stock moved into this setup's frame).
+
+    ``vertices`` are (x, y, z) points and ``indices`` (a, b, c) triangles,
+    counter-clockwise seen from outside. The mesh must be a closed,
+    consistently oriented surface: every edge is matched by an edge running
+    the other way (vertices are matched by exact coordinates) and the enclosed
+    volume is positive. It is checked by the native engine when made.
+
+    ``approximation`` is None for a mesh that is the stock as given, and says
+    how the mesh differs from the stock otherwise (``StockState.stock_mesh``).
+    ``vertices`` and ``indices`` read as flat, read-only buffers
+    (``numpy.frombuffer(mesh.vertices).reshape(-1, 3)``).
+    """
+
+    __slots__ = ("_vertices", "_indices", "_bounds", "_volume", "_approximation")
+
+    def __init__(self, vertices, indices, *, approximation=None):
+        flat = array("d")
+        for point in vertices:
+            point = tuple(itertools.islice(iter(point), 4))
+            if len(point) != 3:
+                raise ValueError("stock mesh vertex needs exactly three coordinates")
+            flat.extend(float(c) for c in point)
+            if len(flat) % (3 << 16) == 0:
+                _resources.check_memory(len(flat) * 16, "stock mesh vertices", ValueError)
+        triangles = array("I")
+        if triangles.itemsize != 4:
+            triangles = array("L")
+        for triangle in indices:
+            triangle = tuple(itertools.islice(iter(triangle), 4))
+            if len(triangle) != 3 or not all(type(i) is int and 0 <= i <= 0xFFFFFFFF for i in triangle):
+                raise ValueError("stock mesh triangle needs exactly three vertex indices")
+            triangles.extend(triangle)
+        self._set(flat, triangles, approximation, None)
+
+    def _set(self, vertices, indices, approximation, checked):
+        if approximation is not None and not isinstance(approximation, str):
+            raise TypeError("approximation is None (exact) or a description of how the mesh differs")
+        if checked is None:
+            lo, hi, volume = _native_buffers.stock_mesh_check(_le_bytes(vertices), _le_bytes(indices))
+        else:
+            lo, hi, volume = checked
+        self._vertices, self._indices = vertices, indices
+        self._bounds, self._volume = (tuple(lo), tuple(hi)), volume
+        self._approximation = approximation
+
+    @classmethod
+    def from_triangles(cls, triangles, *, approximation=None):
+        """A mesh from separate triangles of three (x, y, z) points; equal
+        points become one vertex."""
+        lookup, vertices, indices = {}, [], []
+        for triangle in triangles:
+            points = tuple(itertools.islice(iter(triangle), 4))
+            if len(points) != 3:
+                raise ValueError("triangle needs exactly three points")
+            row = []
+            for point in points:
+                point = tuple(float(c) for c in itertools.islice(iter(point), 4))
+                if len(point) != 3:
+                    raise ValueError("stock mesh point needs exactly three coordinates")
+                key = struct.pack("<3d", *point)
+                if key not in lookup:
+                    lookup[key] = len(vertices)
+                    vertices.append(point)
+                row.append(lookup[key])
+            indices.append(row)
+        return cls(vertices, indices, approximation=approximation)
+
+    @classmethod
+    def _checked(cls, vertex_bytes, index_bytes, lo, hi, volume, approximation):
+        mesh = object.__new__(cls)
+        vertices, indices = array("d"), array("I" if array("I").itemsize == 4 else "L")
+        vertices.frombytes(vertex_bytes)
+        indices.frombytes(index_bytes)
+        if sys.byteorder != "little":
+            vertices.byteswap()
+            indices.byteswap()
+        mesh._set(vertices, indices, approximation, (lo, hi, volume))
+        return mesh
+
+    @property
+    def vertices(self):
+        return memoryview(self._vertices).toreadonly()
+
+    @property
+    def indices(self):
+        return memoryview(self._indices).toreadonly()
+
+    @property
+    def vertex_count(self):
+        return len(self._vertices) // 3
+
+    @property
+    def triangle_count(self):
+        return len(self._indices) // 3
+
+    @property
+    def bounds(self):
+        """Smallest and largest vertex coordinates: ((x, y, z), (x, y, z))."""
+        return self._bounds
+
+    @property
+    def volume_mm3(self):
+        return self._volume
+
+    @property
+    def approximation(self):
+        return self._approximation
+
+    def triangles(self):
+        """The triangles, each three (x, y, z) points."""
+        v, t = self._vertices, self._indices
+        for k in range(0, len(t), 3):
+            yield tuple((v[3 * i], v[3 * i + 1], v[3 * i + 2]) for i in t[k : k + 3])
+
+    def transformed(self, rotation=((1, 0, 0), (0, 1, 0), (0, 0, 1)), translation_mm=(0, 0, 0)):
+        """The mesh moved rigidly: each point p becomes rotation @ p +
+        translation_mm (rotation given by rows). Use it to move one setup's
+        finished stock into the next setup's frame. The rotation must be
+        proper (orthonormal, determinant +1): a mirror would turn the mesh
+        inside out. Its approximation, if any, is kept."""
+        r = [tuple(float(c) for c in row) for row in rotation]
+        t = tuple(float(c) for c in translation_mm)
+        if len(r) != 3 or any(len(row) != 3 for row in r) or len(t) != 3:
+            raise ValueError("rotation needs 3 rows of 3 and translation_mm 3 values")
+        if not all(math.isfinite(c) for row in r for c in row) or not all(map(math.isfinite, t)):
+            raise ValueError("rotation and translation_mm must be finite")
+        for a in range(3):
+            for b in range(3):
+                if abs(sum(r[a][k] * r[b][k] for k in range(3)) - (a == b)) > 1e-9:
+                    raise ValueError("rotation must be orthonormal (a rigid turn, no scaling or shear)")
+        det = (
+            r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
+            - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+            + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0])
+        )
+        if det < 0:
+            raise ValueError("rotation is a mirror (determinant -1); a stock can only be turned, not mirrored")
+        v = self._vertices
+        moved = array("d")
+        for k in range(0, len(v), 3):
+            p = (v[k], v[k + 1], v[k + 2])
+            moved.extend(sum(row[m] * p[m] for m in range(3)) + t[n] for n, row in enumerate(r))
+        mesh = object.__new__(StockMesh)
+        mesh._set(moved, array(self._indices.typecode, self._indices), self._approximation, None)
+        return mesh
+
+    def to_dict(self):
+        v, t = self._vertices, self._indices
+        return {
+            "vertices": [[v[k], v[k + 1], v[k + 2]] for k in range(0, len(v), 3)],
+            "indices": [[t[k], t[k + 1], t[k + 2]] for k in range(0, len(t), 3)],
+        }
+
+    def __repr__(self):
+        return (
+            f"StockMesh({self.vertex_count} vertices, {self.triangle_count} triangles, "
+            f"bounds={self._bounds}, approximate={self._approximation is not None})"
+        )
+
+
+def _le_bytes(values):
+    if sys.byteorder == "little":
+        return values.tobytes()
+    swapped = array(values.typecode, values)
+    swapped.byteswap()
+    return swapped.tobytes()
+
+
 @dataclass(frozen=True)
 class StockSpec:
+    """A milling or thermal job's stock: a height-field grid over the box
+    ``min_mm``..``max_mm`` with ``cell_size_mm`` cells. Without ``mesh`` the
+    stock is the whole box. With ``mesh`` (a ``StockMesh`` inside the box,
+    see ``StockSpec.from_mesh``) the job starts from that solid, converted to
+    the height field conservatively: each cell may hold material up to the
+    highest point of the mesh above it, and is certain only where the whole
+    column is solid from the box's bottom up. Undercuts and voids are counted
+    as possibly material, never dropped."""
+
     min_mm: tuple
     max_mm: tuple
     cell_size_mm: float = 0.1
     # Optional per-job budget; default is the format invariant (u32 cell
     # indices). Memory: 16 bytes per cell in the engine plus a Python copy.
     max_cells: int = 0xFFFFFFFF
+    mesh: StockMesh | None = None
+
+    def __post_init__(self):
+        if self.mesh is not None:
+            if not isinstance(self.mesh, StockMesh):
+                raise TypeError("StockSpec mesh must be a StockMesh")
+            lo, hi = self.mesh.bounds
+            if any(lo[k] < self.min_mm[k] or hi[k] > self.max_mm[k] for k in range(3)):
+                raise ValueError(
+                    f"stock mesh (from {lo} to {hi}) extends outside the stock box (from "
+                    f"{tuple(self.min_mm)} to {tuple(self.max_mm)}); use StockSpec.from_mesh"
+                )
+
+    @classmethod
+    def from_mesh(cls, mesh, cell_size_mm, max_cells=0xFFFFFFFF):
+        """Stock given as a closed mesh, on a grid over the mesh's bounds."""
+        if not isinstance(mesh, StockMesh):
+            raise TypeError("StockSpec.from_mesh needs a StockMesh")
+        lo, hi = mesh.bounds
+        return cls(tuple(lo), tuple(hi), cell_size_mm, max_cells, mesh)
+
+    def grid_dict(self):
+        """The height-field grid alone (what stock reports refer to)."""
+        return {
+            "version": 1,
+            "units": "mm",
+            "min_mm": tuple(self.min_mm),
+            "max_mm": tuple(self.max_mm),
+            "cell_size_mm": self.cell_size_mm,
+            "max_cells": self.max_cells,
+        }
 
     def to_dict(self):
-        return {"version": 1, "units": "mm", **asdict(self)}
+        result = self.grid_dict()
+        if self.mesh is not None:
+            result["mesh"] = self.mesh.to_dict()
+        return result
 
 
 @dataclass(frozen=True)
@@ -587,7 +802,14 @@ class StockState:
             except (ValueError, TypeError, UnicodeError) as error:
                 raise ProtocolError(str(error)) from error
         self._heights = _height_storage(count * 2)
-        _native_buffers.initialise_heights(self._heights, self.min_mm[2], self.max_mm[2])
+        if "mesh" in spec:
+            # The run starts from the mesh, converted as the engine does.
+            try:
+                _native_buffers.initialise_stock(self._heights, json.dumps(spec, allow_nan=False))
+            except ValueError as error:
+                raise ProtocolError(str(error)) from error
+        else:
+            _native_buffers.initialise_heights(self._heights, self.min_mm[2], self.max_mm[2])
         self.completed, self.fraction, self.finished = 0, 0.0, False
         self.position = tuple(m["initial_position_mm"])
         self.last_motion_id = None
@@ -632,6 +854,20 @@ class StockState:
     @property
     def heights(self):
         return memoryview(self._heights).toreadonly()
+
+    def stock_mesh(self):
+        """The stock as a closed ``StockMesh``, in this run's frame.
+
+        Approximate (``mesh.approximation`` says how): the height-field stock
+        returns each cell as a solid column from the stock's bottom up to the
+        highest material that may remain over it. The mesh contains all the
+        material that may remain, but also everything below it in each column
+        and up to one cell of removed material beside walls. It is
+        conservative stock for a later setup (``StockSpec.from_mesh`` after
+        ``StockMesh.transformed``), not a measured or verified part. Refused
+        when no material is left."""
+        grid = {k: v for k, v in self._manifest["stock"].items() if k != "mesh"}
+        return StockMesh._checked(*_native_buffers.stock_mesh(self._heights, json.dumps(grid, allow_nan=False)))
 
     @property
     def checkpoint_bytes(self):

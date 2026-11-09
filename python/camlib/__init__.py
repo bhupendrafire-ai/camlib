@@ -87,6 +87,7 @@ _EXPORTS = {
         (
             "Simulation",
             "StockSpec",
+            "StockMesh",
             "SweepOptions",
             "SimulationError",
             "CamWarning",

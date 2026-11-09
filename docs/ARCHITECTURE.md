@@ -19,8 +19,8 @@ while the Rust side does the planning and the checking.
 ## One run, end to end
 
 1. **Declare.** A `camlib.jobs.Job(id, revision, setups)` holds `Setup`s. A
-   setup has stock (`StockSpec` for milling and thermal, `TurnStockSpec` for a
-   lathe), tools, operations in order and a start position. A lathe setup also
+   setup has stock (`StockSpec` for milling and thermal, a box or a closed mesh
+   given with `StockSpec.from_mesh`; `TurnStockSpec` for a lathe), tools, operations in order and a start position. A lathe setup also
    has `turning=TurningSetup(...)` (the part profile, chuck and tolerances).
 2. **Compile.** `Job.compile()` validates the job and turns each setup into a
    manifest (JSON). The job revision binds a digest of the whole content, so any
@@ -82,7 +82,17 @@ can say clear, violation or uncertain honestly.
 - **Height field** (`src/stock.rs`, `Stock`): an XY grid of `HeightBounds`
   (lower: material certainly up to here; upper: no material above here). Used by
   milling and thermal runs. Moves are swept with the full tool assembly
-  (cutter and holder).
+  (cutter and holder). A run starts from the whole box, or from a closed mesh
+  (`src/stock_mesh.rs`, manifest `stock` with a `mesh`; always build a run's
+  starting stock with `RunStockSpec::initial_stock`, since the grid alone is
+  the box). The mesh is converted conservatively: a cell's upper bound is the
+  highest point of the mesh over the cell's open footprint (facets lying only
+  on a cell side belong to the neighbour), and its lower bound is claimed only
+  where no other surface lies between the grid's bottom plane and that height
+  and facets on that plane close the column from below. Undercuts and voids
+  become possible material. `Stock::finished_mesh` returns the closed mesh of
+  each cell's upper bound, without T-junctions, which reads back on the same
+  grid as the same bounds; it is approximate (`HEIGHT_FIELD_APPROXIMATION`).
 - **Turning** (`src/turning/stock.rs`, `TurnStock`): per z bin, bounds of the
   outer radius and of the bore radius, plus rings certainly removed inside the
   material (face grooves). Lathe moves carry their changes computed by the
