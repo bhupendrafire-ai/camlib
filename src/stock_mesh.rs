@@ -124,7 +124,7 @@ impl StockMesh {
             })
             .sum::<f64>()
             / 6.;
-        if !(volume_mm3 > 0.) {
+        if volume_mm3.is_nan() || volume_mm3 <= 0. {
             return Err(format!(
                 "stock mesh encloses no positive volume ({volume_mm3} mm³): it is inside out \
                  (triangles facing inward) or flat; give triangles counter-clockwise seen from \
@@ -678,18 +678,22 @@ pub fn buffer_mesh(
 /// and u32 triangle indices (three per triangle), checked by
 /// [`StockMesh::new`].
 pub fn mesh_from_bytes(vertices: &[u8], indices: &[u8]) -> Result<StockMesh, String> {
-    if vertices.len() % 24 != 0 || indices.len() % 12 != 0 {
+    if !vertices.len().is_multiple_of(24) || !indices.len().is_multiple_of(12) {
         return Err("stock mesh buffers need 3 f64 per vertex and 3 u32 per triangle".into());
     }
     let f = |b: &[u8]| f64::from_le_bytes(b.try_into().unwrap());
     let u = |b: &[u8]| u32::from_le_bytes(b.try_into().unwrap());
     StockMesh::new(
         vertices
-            .chunks_exact(24)
+            .as_chunks::<24>()
+            .0
+            .iter()
             .map(|v| [f(&v[..8]), f(&v[8..16]), f(&v[16..])])
             .collect(),
         indices
-            .chunks_exact(12)
+            .as_chunks::<12>()
+            .0
+            .iter()
             .map(|t| [u(&t[..4]), u(&t[4..8]), u(&t[8..])])
             .collect(),
     )
