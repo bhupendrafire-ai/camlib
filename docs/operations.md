@@ -137,11 +137,26 @@ materials and high-speed toolpaths. `retract_z_mm`/`feed_z_mm` work as for
 - `path_strategy="stock_front"` selects a newer strategy still under
   qualification; it stops with an error where its coverage is unresolved.
 
+## Surface mesh inputs
+
+Every operation taking a `SurfaceMesh` (roughing, deburr, flat, parallel,
+waterline, steep-and-shallow and the other surface finishing strategies)
+requires version 1, millimetres, at least one nondegenerate triangle, and a
+finite `surface_error_mm` in **0–0.1 mm, inclusive**. This is the caller's
+asserted bound on the mesh's error from the intended surface; 0 means the
+facets themselves are authoritative. If the bound exceeds 0.1 mm, supply a
+finer mesh with a justified bound; do not reduce the stated error without
+improving the mesh. Python checks this range at construction, and the engine
+checks it for every mesh input. Preparation errors name the failed check.
+
 ## 3D roughing: `Roughing`, `RestRoughing`
 
 Required: `target` (a `SurfaceMesh` of the part, or use
 `Roughing.from_solid(...)` with CadQuery), `top_z_mm`, `floor_z_mm`,
 `stepdown_mm`, `clearance_z_mm`, `clearing`.
+
+The target follows the [surface mesh input limits](#surface-mesh-inputs),
+including the inclusive 0.1 mm `surface_error_mm` maximum.
 
 Clears stock in Z layers while staying above the part surface plus
 `radial_allowance_mm`/`bottom_allowance_mm`. Each layer protects the part's
