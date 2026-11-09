@@ -151,7 +151,9 @@ obstruction's) and `z_mm` (the lowest tip Z needed); `depth_needed_mm =
 top_z_mm - z_mm`. Pocket, adaptive pocket, slot, contour, drilling, bore,
 facing, chamfer, waterline, trace, parallel finishing and roughing layers
 refuse their cutting-length depth this way, and pockets their neck, shank and
-holder sections. In Rust, `camlib::reach::ReachRefusal::parse` reads it from
+holder sections. Parallel finishing and waterline, when the remaining stock
+stands taller than the flutes, refuse a feed move whose neck, shank or holder
+section would meet that stock the same way (`z_mm` is the move's lowest tip). In Rust, `camlib::reach::ReachRefusal::parse` reads it from
 the error text.
 
 ## Adaptive pocket: `AdaptivePocket`
@@ -549,8 +551,12 @@ cutting length, every pass is within the flutes. Where it stands higher (a
 part taller than the flutes, after roughing), each feed move is checked
 instead: the neck, shank and holder sections stay above the committed stock
 under them, so only a pass that really cuts deeper than the flutes is refused
-(the message names where). `steep_and_shallow` can then take the part's
-lowest point as its floor.
+with a typed reach refusal naming the section, the obstruction's top and the
+tip Z (the message also names where). The check is conservative to whole
+stock cells: a cell counts when it stands above a section's bottom (at the
+move's lowest tip) and any point of it may lie within the section's radius of
+the tool axis anywhere on the move. `steep_and_shallow` can then take the
+part's lowest point as its floor. Waterline is admitted the same way.
 
 Flat and bull-nose end mills work too (raster and the spiral, radial and
 project patterns). Their contact with each triangle is exact (facet, edge and
@@ -799,7 +805,20 @@ at most a few hundredths of the corner radius farther out.
 `ramp=True` (ramp finishing) cuts each level as one continuous descent along
 its contour from the level above, instead of a flat lap and a step down; the
 lowest level is then cut once more flat. Each ramp follows a contour proven
-clear at its own level and stays above that level, so it cannot gouge. `contour_error_mm` (0.01) bounds the contour
+clear at its own level and stays above that level, so it cannot gouge.
+
+Depth: when the remaining stock stands no higher above `bottom_z_mm` than the
+cutting length, every level is within the flutes. Where it stands higher (a
+part taller than the flutes, finished from roughed stock, e.g. a mesh stock
+from `StockSpec.from_mesh`), each feed move is checked instead, as for
+`Parallel`: the levels run top-down, so the levels above have already left
+the finished wall (plus stock to leave) beside the tool, and the neck, shank
+and holder sections must stay above the committed stock under them. A part
+that narrows upward (drafted walls, a cone or dome) is then finished to its
+foot with a short tool; beside an undrafted wall taller than the flutes, or
+from unroughed stock, the shank or holder would rub, and the first such move
+is refused with a typed reach refusal naming the section and the level's Z.
+The report's `reach_proof` says when this check is in force. `contour_error_mm` (0.01) bounds the contour
 approximation as a *normal* (3D) distance to the surface. Z levels are computed
 in parallel. `contour_method="quad_tree"` (default) scales to dense meshes;
 `"support"` builds exact per-facet polygons and suits small or convex meshes.

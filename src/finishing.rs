@@ -519,10 +519,10 @@ pub struct ParallelPlan {
     stock_ceiling: Option<StockCeiling>,
     /// When the remaining stock stands higher above the floor than the
     /// cutting length: the tool parts above the flutes (neck, shank, holder
-    /// sections) as (lowest height above the tip, largest radius), each
-    /// checked against the stock under it on every feed move (the depth the
-    /// pass actually cuts, not the stock top over the floor).
-    depth_parts: Option<Vec<(f64, f64)>>,
+    /// sections), each checked against the stock under it on every feed
+    /// move (the depth the pass actually cuts, not the stock top over the
+    /// floor; issues #88, #161).
+    move_depth: Option<crate::reach::MoveDepth>,
 }
 impl ParallelPlan {
     pub fn prepare_with_stock(
@@ -562,19 +562,16 @@ impl ParallelPlan {
             cancel,
         )?;
         if per_move {
-            let prepared = tool.prepare()?;
-            plan.depth_parts = Some(
-                crate::verification::parts(&prepared)?
-                    .into_iter()
-                    .filter(|p| p.kind != crate::verification::ToolPart::Cutter)
-                    .map(|p| (p.min, p.radius.at(p.min).max(p.radius.at(p.max))))
-                    .collect(),
-            );
+            plan.move_depth = Some(crate::reach::MoveDepth::new(
+                &plan.op.id,
+                tool,
+                plan.op.tolerance_mm,
+            )?);
         }
         plan.spec = stock.spec().clone();
         plan.expected_generation = Some(stock.generation());
         plan.report.stock_top = Some(ceiling.report.clone());
-        plan.report.clearance_proof = if plan.depth_parts.is_some() {
+        plan.report.clearance_proof = if plan.move_depth.is_some() {
             "continuous segment clearance against downward-extruded triangles and base with the declared cutter profile; neck/shank/holder above the committed stock under them on every feed move"
         } else {
             "continuous segment clearance against downward-extruded triangles and base with the declared cutter profile; shank/holder above admitted committed stock ceiling"
@@ -604,7 +601,7 @@ impl ParallelPlan {
         Self::prepare_inner_depth(op, tool, spec, stock, initial, first_id, false, cancel)
     }
     /// `per_move_depth`: the depth below the stock top is checked on every
-    /// move against the committed stock (`depth_parts`), not here.
+    /// move against the committed stock (`move_depth`), not here.
     #[allow(clippy::too_many_arguments)]
     fn prepare_inner_depth(
         op: ParallelOperation,
@@ -1156,7 +1153,7 @@ impl ParallelPlan {
             surface,
             report,
             stock_ceiling: None,
-            depth_parts: None,
+            move_depth: None,
         })
     }
     pub fn report(&self) -> &ParallelReport {
@@ -1901,30 +1898,10 @@ impl ParallelPlan {
                     return Ok(None);
                 }
             };
-            if let (Some(motion), Some(parts)) = (&result, &self.depth_parts)
-                && motion.kind != MoveKind::Rapid
-            {
+            if let (Some(motion), Some(depth)) = (&result, &self.move_depth) {
                 // The parts above the flutes stay above the committed stock
                 // under them: the pass cuts no deeper than the flutes reach.
-                let bounds = motion.curve.prepare(self.op.tolerance_mm)?.bounds();
-                let tip = bounds.min[2];
-                let guard = 16. * self.op.tolerance_mm;
-                let mut work = u64::MAX;
-                for &(height, radius) in parts {
-                    let pad = radius + guard;
-                    let rect = [
-                        [bounds.min[0] - pad, bounds.min[1] - pad],
-                        [bounds.max[0] + pad, bounds.max[1] + pad],
-                    ];
-                    if !stock.bounds_clear(rect, tip + height - guard, &mut work, cancel)? {
-                        let at = motion.curve.end();
-                        let flutes = parts.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
-                        return Err(format!(
-                            "{}: the pass at X{:.3} Y{:.3} Z{:.3} cuts deeper than the cutting length {flutes}: stock stands above the tool's non-cutting part {height:.3} mm above the tip; remove that stock first (roughing) or use a tool with longer flutes",
-                            self.op.id, at[0], at[1], at[2]
-                        ));
-                    }
-                }
+                depth.check(motion, stock, cancel)?;
             }
             if result.is_some() {
                 self.expected_generation = Some(stock.generation() + 1);

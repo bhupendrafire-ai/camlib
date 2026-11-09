@@ -48,11 +48,13 @@ fn short_ball_finishing_uses_remaining_stock_and_preserves_complete_paths() {
             )
         };
         // Stock standing higher above the floor than the flutes reach.
-        // Waterline refuses it while preparing. Parallel checks the depth it
-        // actually cuts, move by move against the stock (issue #88): the
+        // Both check the depth they actually cut, move by move against the
+        // stock (parallel since issue #88, waterline since #161). Parallel's
         // roof keeps its tip at Z4 or above, 8 mm under the 12 mm stock top
         // and within the 10 mm flutes, so it is accepted; with 7 mm flutes
-        // the same passes really cut deeper and are refused.
+        // the same passes really cut deeper and are refused. Waterline's
+        // levels go down to Z2.5, so its shank (8 mm above the tip) meets
+        // the box: prepared, then refused at the first such move.
         let refused = |tool: &camlib::tool::ToolAssembly, stock: &Stock| {
             let prepared = tool.prepare().unwrap();
             match OperationPlan::prepare_with_stock(
@@ -84,7 +86,8 @@ fn short_ball_finishing_uses_remaining_stock_and_preserves_complete_paths() {
         let mut seven = m.tools[0].clone();
         seven.cutter.cutting_length_mm = 7.;
         if waterline {
-            assert!(prepare(&original, &|| false).is_err());
+            assert!(prepare(&original, &|| false).is_ok());
+            assert!(refused(&m.tools[0], &original));
         } else {
             assert!(!refused(&m.tools[0], &original));
             assert!(refused(&seven, &original));
@@ -105,7 +108,10 @@ fn short_ball_finishing_uses_remaining_stock_and_preserves_complete_paths() {
         snapshot.cells.last_mut().unwrap().upper_mm = 12.;
         let unknown = Stock::from_snapshot(snapshot).unwrap();
         if waterline {
-            assert!(prepare(&unknown, &|| false).is_err());
+            // Judged by the depth each move cuts (#161), a column in the
+            // stock's corner, beyond every level's shank, refuses nothing;
+            // it still invalidates a plan prepared from other stock (below).
+            assert!(!refused(&m.tools[0], &unknown));
         } else {
             assert!(refused(&seven, &unknown));
         }

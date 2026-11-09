@@ -679,6 +679,11 @@ pub struct WaterlineReport {
     pub level_reports: Vec<LevelReport>,
     pub contour_proof: &'static str,
     pub surface_completion: &'static str,
+    /// How the depth below the remaining stock was admitted when that stock
+    /// stands higher above `bottom_z_mm` than the cutting length (absent
+    /// otherwise: every level is then within the flutes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reach_proof: Option<&'static str>,
 }
 pub struct WaterlinePlan {
     /// Flat or bull-nose end mill: its levels are offsets of the part's
@@ -701,6 +706,10 @@ pub struct WaterlinePlan {
     drained: bool,
     report: WaterlineReport,
     stock_ceiling: Option<StockCeiling>,
+    /// When the remaining stock stands higher above `bottom_z_mm` than the
+    /// cutting length: every feed move is checked against the committed
+    /// stock under the neck, shank and holder sections (issue #161).
+    move_depth: Option<crate::reach::MoveDepth>,
     /// Contours of upcoming levels, computed in parallel ahead of use.
     /// Levels depend only on the surface and their Z, never on stock.
     prefetched: std::collections::VecDeque<WaterlineContours>,
@@ -723,7 +732,23 @@ impl WaterlinePlan {
             return Self::prepare(op, tool, stock.spec(), initial, first_id, cancel);
         }
         let (envelope, ceiling) = StockCeiling::prepare(stock, cancel)?;
-        let mut plan = Self::prepare(op, tool, &envelope, initial, first_id, cancel)?;
+        // Stock standing higher above the lowest level than the cutting
+        // length need not be cut that deep: levels run top-down, so the
+        // levels above leave the finished wall beside the tool. Check the
+        // depth each feed move actually cuts instead (as parallel, #88).
+        let per_move = envelope.max_mm[2] - op.bottom_z_mm
+            >= tool.cutter.cutting_length_mm - 16. * op.tolerance_mm;
+        let move_depth = per_move
+            .then(|| crate::reach::MoveDepth::new(&op.id, tool, op.tolerance_mm))
+            .transpose()?;
+        let mut plan =
+            Self::prepare_depth(op, tool, &envelope, initial, first_id, per_move, cancel)?;
+        if move_depth.is_some() {
+            plan.report.reach_proof = Some(
+                "neck/shank/holder above the committed stock under them on every feed move, at the move's lowest tip",
+            );
+        }
+        plan.move_depth = move_depth;
         plan.spec = stock.spec().clone();
         plan.expected_generation = Some(stock.generation());
         plan.report.stock_top = Some(ceiling.report.clone());
@@ -736,6 +761,19 @@ impl WaterlinePlan {
         spec: &StockSpec,
         initial: Vec3,
         first_id: u64,
+        cancel: &impl CancelSignal,
+    ) -> Result<Self, String> {
+        Self::prepare_depth(op, tool, spec, initial, first_id, false, cancel)
+    }
+    /// `per_move_depth`: the depth below the stock top is checked on every
+    /// feed move against the committed stock (`move_depth`), not here.
+    fn prepare_depth(
+        op: WaterlineOperation,
+        tool: &ToolAssembly,
+        spec: &StockSpec,
+        initial: Vec3,
+        first_id: u64,
+        per_move_depth: bool,
         cancel: &impl CancelSignal,
     ) -> Result<Self, String> {
         cancelled(cancel)?;
@@ -865,7 +903,8 @@ impl WaterlinePlan {
                     ),
                 ),
                 (
-                    spec.max_mm[2] - op.bottom_z_mm < cutter.cutting_length_mm - guard,
+                    per_move_depth
+                        || spec.max_mm[2] - op.bottom_z_mm < cutter.cutting_length_mm - guard,
                     crate::reach::ReachRefusal::cutting_length(&op.id, &op.tool, spec.max_mm[2], op.bottom_z_mm, cutter.cutting_length_mm).error(format_args!(
                         "depth {} below the stock top exceeds the cutting length {}",
                         spec.max_mm[2] - op.bottom_z_mm,
@@ -957,6 +996,7 @@ impl WaterlinePlan {
                 }
             },
             surface_completion: "not_certified; waterline bands do not clear shallow/unreachable regions; independent remaining-stock checks required",
+            reach_proof: None,
         };
         Ok(Self {
             op,
@@ -975,6 +1015,7 @@ impl WaterlinePlan {
             drained: false,
             report,
             stock_ceiling: None,
+            move_depth: None,
             prefetched: std::collections::VecDeque::new(),
             limits,
             region_limits,
@@ -1083,6 +1124,9 @@ impl WaterlinePlan {
             }
             if let Some(profile) = &mut self.profile {
                 if let Some(motion) = profile.next(stock, cancel)? {
+                    if let Some(depth) = &self.move_depth {
+                        depth.check(&motion, stock, cancel)?;
+                    }
                     self.position = motion.curve.end();
                     self.next_id = motion.id + 1;
                     self.expected_generation = Some(stock.generation() + 1);

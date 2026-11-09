@@ -11,7 +11,7 @@ from camlib import Engine
 from camlib.cadquery import export_surface_mesh
 from camlib.operations import Facing
 from camlib.playback import Cursor, Player, RecordedRun
-from camlib.simulation import OperationUpdate, Simulation, SimulationError
+from camlib.simulation import OperationUpdate, ReachRefused, Simulation, SimulationError
 from camlib.surface import SurfaceMesh
 from camlib.tools import EndMill, ToolAssembly, HolderSection
 
@@ -238,5 +238,12 @@ class ActualDepthTest(unittest.TestCase):
         self.assertGreater(self.run_ops((rough, self.finish())), 100)
 
     def test_a_pass_really_deeper_than_the_flutes_is_refused(self):
-        with self.assertRaisesRegex(Exception, "cuts deeper than the cutting length 18"):
+        with self.assertRaisesRegex(ReachRefused, "cuts deeper than the cutting length 18") as caught:
             self.run_ops((self.finish(),))
+        # Typed (#161): the shank, 18 mm above the tip, meets the unroughed
+        # stock; the obstruction is the stock top, the tip the pass's.
+        r = caught.exception.refusal
+        self.assertEqual((r.operation, r.tool, r.limit, r.holder_section), ("finish", "b6", "shank", None))
+        self.assertEqual((r.top_z_mm, r.depth_available_mm), (20.5, 18))
+        self.assertAlmostEqual(r.depth_needed_mm, r.top_z_mm - r.z_mm)
+        self.assertLess(r.z_mm, 20.5 - 18)
