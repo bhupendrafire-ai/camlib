@@ -21,6 +21,7 @@ version is [`examples/standalone_job.py`](../examples/standalone_job.py).
 ```python
 import math
 
+from camlib.export import ExportRefused
 from camlib.jobs import Job, Setup
 from camlib.operations import Facing, Pocket
 from camlib.planar import Boundary, Component, PlanarRegion
@@ -83,7 +84,13 @@ with job.post("top", machine=machine, lowering=arcs) as run:
         lines.extend(line["text"] for line in page)
         start = page[-1]["number"] + 1
 
-print(f"{len(lines)} lines of G-code")
+    print(f"{len(lines)} lines of G-code")
+    try:
+        exported = run.export("top.nc")
+    except ExportRefused as error:
+        print(f"{error}\nNo NC file was written or replaced.")
+    else:
+        print(f"Saved {exported['path']}")
 ```
 
 `job.post(...)` plans each operation in the Rust engine, sweeps the tool
@@ -92,17 +99,22 @@ postprocessor, and then *decodes the emitted text again* to confirm it
 describes the planned motion. A planning, posting or decoding failure stops
 the run with an error, so you never get a silently wrong file. Check *findings*
 (below) are reported per move while the run continues; exporting the program
-refuses it while any violation or uncertain result remains:
+refuses it while any violation or uncertain result remains. Read and export
+inside the `with` block: closing the run removes its temporary journals. To keep
+a completed run for later use, [save and reopen it](persistence.md).
 
-```python
-exported = run.export("top.nc")  # raises camlib.export.ExportRefused on findings
-```
+The example declares controller settings and tool poses, but no physical machine
+crash model. It therefore prints the decoded G-code count and an explained
+`unchecked_machine` export refusal. Supply your machine's measured bodies,
+calibration and complete routes as `Machine.crash_model` before releasing NC;
+see [Machine checking](machine.md). A refusal never writes or replaces `top.nc`.
 
 Accept a kind only on purpose, after looking at it: `run.export("top.nc",
 accept={"uncertain"})`. The result also names the checks you did not configure
 (nothing was checked there).
 
-To write NC text or a file directly, use `job.post_nc`. It runs the same
+With that physical model configured, write NC text or a file directly using
+`job.post_nc`. It runs the same
 actual decoded-output stock replay and machine export gate as `job.post`, then
 discards its temporary journal:
 

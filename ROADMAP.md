@@ -35,6 +35,8 @@ is ordered by real dependency, not by size:
 
 ## Phase 1: Correctness
 
+- [x] #132 macOS extension linking, portable wheel loading and actionable first-use refusals
+
 - [x] #116 Machine crash detection: check the posted program against a declared machine model (safety)
 
 ## Phase 2: Complete milling
