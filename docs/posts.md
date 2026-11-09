@@ -116,10 +116,75 @@ Key settings:
 | `feed_per_rev` | Feed per revolution (`FeedPerRev` events): `G95 F<mm/rev>` (Centroid/FANUC lathes `G99`, with `feed_per_minute="G98"` and `cycle_return_initial=None`), back to `G94` at 0. The written F must keep the feed within `feed_tolerance_mm_min` at `max_spindle_rpm`, otherwise the post refuses (e.g. a metric feed in inch output) |
 | `beam_s_max`, `beam_effect` | Plasma/laser: S at full power and the spindle code that fires the beam (`spindle_cw` M3, `spindle_ccw` M4); M5 turns it off. None refuses beam tools |
 | `height_control_word` | Word after the `height_control_on`/`off` codes (e.g. `P2` for QtPlasmaC `M63 P2`/`M62 P2`) |
+| `probing` | Probing back end: `None` (probing cycles are refused), `"g38"` (LinuxCNC G38.x) or `"inspection_plus"` (Renishaw Inspection Plus macros); see [Probing](#probing) |
+| `probe_fast_feed_mm_min`, `probe_switching` | Inspection Plus: the installed fast feed #119, and whether each cycle switches the probe on and off (`G65 P9832`/`P9833`) |
 
 `LoweringOptions(native_arcs=..., chord_tolerance_mm=0.0025,
 max_segments_per_source=..., max_total_segments=...)` bounds the curve-to-line
 conversion.
+
+## Probing
+
+A probing cycle (`camlib.motion.Probe`, from the [probing
+operations](operations.md#probing-and-tool-setting)) covers its moves. The
+post writes the whole cycle as the dialect's probing blocks; the decoder reads
+every move back from those blocks alone (only the feature description and the
+attribution come from the source), then each decoded move is compared with the
+plan, and the program validator checks them against the cycle's layout.
+
+**LinuxCNC (`probing="g38"`)**, from the LinuxCNC 2.9 G-code reference
+(`docs/src/gcode/g-code.adoc`, `overview.adoc`):
+
+```
+G38.3 Z5 F1000                         ; protected move: stops on a trip...
+O100 IF [#5070 NE 0]                   ; ...#5070 = 1 when the probe tripped
+(ABORT, camlib: protected probe move obstructed)
+O100 ENDIF
+G38.2 Y0 F100                          ; measure: errors if nothing is touched
+#<probe1> = [#5062 + 2]                ; error against the expected tip Y (-2)
+G1 Y-7 F1000                           ; back
+...
+G10 L2 P1 X[#5221 + #<probe2>] Y[#5222 + #<probe1>]   ; G54 += error
+```
+
+`G38.2` ends `search_mm` beyond the expected contact; `#5061`-`#5063` hold
+the trip point "in the current work coordinate system", so each error is
+offset-independent. A feature measured from both sides averages its two
+errors (the centre). `(ABORT,)` stops the program with an error
+(`interp_convert.cc`). Tool length: `G10 L10 P<H> Z[#5422 - #<probe1>]`
+then `G43 H<H>` (the register then makes the current Z what it truly is);
+tool radius: `G10 L1 P<entry> R[<declared radius> + [#<probe1> -
+#<probe2>] / 2]`. Premises: a probe input wired to `motion.probe-input`, no
+G5x rotation, and a probe (or tool setter) that is the active input when the
+cycle runs.
+
+**Renishaw Inspection Plus (`probing="inspection_plus"`)**, from the
+*Inspection Plus software programming manual* H-2000-6031 and H-2000-6222
+(chapters 5 and 7), for FANUC-style custom macro controls:
+
+| Cycle | Calls |
+| --- | --- |
+| Protected positioning | `G65 P9810 X Y Z F` |
+| Surface | `G65 P9811 X|Y|Z<surface> S<n>. Q<search>.` |
+| Outside corner | Two `O9811` calls: the Y face, then the X face |
+| Inside corner | `G65 P9815 X<corner> Y<corner> S Q` (no I/J: parallel to the axes) |
+| Bore | `G65 P9814 D<diameter> S Q` |
+| Pocket | `G65 P9812 X|Y<width> S Q` |
+
+`S1`..`S6` correct G54..G59 ("New work offset = active work offset + error");
+`Q` is the overtravel, the search beyond the expected position. The decoder
+expands each call into the moves the manual describes: O9811 measures from its
+start toward the surface along its axis and returns; O9814 measures +X, -X,
++Y, -Y from the centre; O9812 + and - from the centre; O9815 the Y wall, then
+the X wall, and returns. The measuring move runs at 0.6 x the installed fast
+feed #119 and the move back at #119 (0.6 x #119 in Z) (chapter 9,
+"Feedrates"): the plan must use those feeds, or the post refuses. The gauging
+touch at 30 mm/min after the back-off `#506` lies on the same line. A boss or
+web (`O9814`/`O9812` with Z and R) and tool setting are refused: their macro
+moves are not taken from a source here; post them with `probing="g38"`.
+Premises: the macros installed (some controls embed them behind an M code),
+the probe calibrated with `O9801`-`O9804`, and the macros restoring the modal
+state they change.
 
 ## Arcs that cannot be written exactly
 
@@ -219,10 +284,10 @@ them against your machine before use:
 
 | File | Controller | Notes |
 | --- | --- | --- |
-| `GCodeDialect.linuxcnc()` | LinuxCNC 2.9 | `GCodeDialect.linuxcnc(beam_s_max=...)` writes a beam as `M3 S`/`M5` |
+| `GCodeDialect.linuxcnc()` | LinuxCNC 2.9 | `GCodeDialect.linuxcnc(beam_s_max=...)` writes a beam as `M3 S`/`M5`; `probing="g38"` writes probing cycles |
 | `grbl_post.py` | GRBL 1.1h | Lines only (arcs as checked segments), one preloaded tool, checked with GRBL's own binary32 arithmetic; vertical moves are written with Z only. `define_machine(..., beam_s_max=1000)` (= `$30`) writes a laser as `M4 S` (laser mode `$32=1`). `grbl_linear.py` is a complete example |
 | `haas_ngc_post.py` | Haas NGC (2020 manual) | [setup notes](haas-ngc-post.md) |
-| `fanuc_0imb_post.py` | FANUC 0i-MB | [setup notes](fanuc-0imb-post.md) |
+| `fanuc_0imb_post.py` | FANUC 0i-MB | [setup notes](fanuc-0imb-post.md); `inspection_plus_fast_feed_mm_min=` posts probing as Renishaw Inspection Plus macros |
 | `siemens808d_post.py` | SINUMERIK 808D native | [setup notes](siemens808d-post.md) |
 | `siemens808d_iso_post.py` | SINUMERIK 808D ISO mode | [setup notes](siemens808d-iso-post.md) |
 | `centroid_post.py` | Centroid CNC12 mill (Acorn, Oak, ...) | [setup notes](centroid-post.md) |

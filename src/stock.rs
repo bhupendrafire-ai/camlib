@@ -199,7 +199,7 @@ impl AxialColumn {
         let Curve::Line { start, end } = motion.curve else {
             return None;
         };
-        (!motion.kind.is_rapid()
+        (motion.kind.cuts()
             && start[0] == end[0]
             && start[1] == end[1]
             && end[2] < start[2]
@@ -1099,7 +1099,7 @@ impl Stock {
         let mut stats = ReplayClearanceStats::default();
         let mut column = None;
         let mut undercut = false;
-        if !motion.kind.is_rapid()
+        if motion.kind.cuts()
             && matches!(tool.cutter().definition().shape, CutterShape::Flat)
             && motion.curve.start()[2] == motion.curve.end()[2]
             && matches!(
@@ -1230,8 +1230,8 @@ impl Stock {
         delta.native_identity = Some(self.identity);
         delta.cleared_column = column;
         delta.axial_column = AxialColumn::from_motion(tool, motion, self.spec.max_mm[2]);
-        delta.departure = (!motion.kind.is_rapid() && !undercut)
-            .then(|| (motion.tool.clone(), motion.curve.end()));
+        delta.departure =
+            (motion.kind.cuts() && !undercut).then(|| (motion.tool.clone(), motion.curve.end()));
         delta.shift = motion.kind == MoveKind::Shift;
         delta.receipt = None;
         Ok(stats)
@@ -1284,7 +1284,8 @@ impl Stock {
                 })
             }),
         };
-        if fraction == 0. || motion.kind.is_rapid() {
+        // Rapids, oriented shifts and probing moves never remove stock.
+        if fraction == 0. || !motion.kind.cuts() {
             return Ok(delta);
         }
         if matches!(tool.cutter().definition().shape, CutterShape::Beam) {

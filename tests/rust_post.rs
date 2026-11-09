@@ -81,6 +81,44 @@ fn the_machine_json_states_every_field_and_is_checked() {
 }
 
 #[test]
+fn a_declared_probing_back_end_is_validated_and_changes_no_other_output() {
+    // The dialect states its probing back end (#7); a job without probing
+    // posts the same program whatever is declared.
+    let mut input = fixture();
+    input["machine"]["dialect"]["probing"] = "g38".into();
+    let report = post(&input).unwrap();
+    assert_eq!(report["program"].as_str().unwrap(), PROGRAM);
+    for (probing, feed, switching, message) in [
+        ("renishaw", Value::Null, false, "probing must be None"),
+        (
+            "inspection_plus",
+            Value::Null,
+            false,
+            "probe_fast_feed_mm_min",
+        ),
+        ("g38", Value::Null, true, "probe_switching exactly"),
+        ("inspection_plus", (-1.).into(), false, "positive feed"),
+    ] {
+        let mut input = fixture();
+        let d = &mut input["machine"]["dialect"];
+        d["probing"] = probing.into();
+        d["probe_fast_feed_mm_min"] = feed;
+        d["probe_switching"] = switching.into();
+        assert!(post(&input).unwrap_err().contains(message), "{probing}");
+    }
+    let mut input = fixture();
+    input["machine"]["dialect"]
+        .as_object_mut()
+        .unwrap()
+        .remove("probing");
+    assert!(
+        post(&input)
+            .unwrap_err()
+            .contains("missing field `probing`")
+    );
+}
+
+#[test]
 fn the_decoder_reads_only_declared_words() {
     let machine = Machine::from_json(fixture()["machine"].clone()).unwrap();
     let mut decoder = Decoder::new(&machine, [0., 0., 8.], Default::default()).unwrap();

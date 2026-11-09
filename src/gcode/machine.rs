@@ -65,6 +65,14 @@ pub struct Dialect {
     pub height_control_word: Option<String>,
     #[serde(deserialize_with = "present")]
     pub css_limit_word: Option<String>,
+    /// The probing back end (`'g38'`, `'inspection_plus'`) or none. This post
+    /// writes no probing cycles (they are Python posts); a declared back end
+    /// is validated and recorded, and a probing cycle is refused.
+    #[serde(deserialize_with = "present")]
+    pub probing: Option<String>,
+    #[serde(deserialize_with = "present")]
+    pub probe_fast_feed_mm_min: Option<f64>,
+    pub probe_switching: bool,
 }
 
 /// One entry of the machine tool table (`camlib.post.ToolSetting`).
@@ -401,6 +409,25 @@ impl Dialect {
             if !self.declares("rpm_mode") || self.fixed("rpm_mode") {
                 return Err("constant surface speed needs the rpm mode (G97) to cancel it".into());
             }
+        }
+        // `GCodeDialect.__post_init__`'s probing rules.
+        if !matches!(
+            self.probing.as_deref(),
+            None | Some("g38") | Some("inspection_plus")
+        ) {
+            return Err(
+                "probing must be None, 'g38' (LinuxCNC) or 'inspection_plus' (Renishaw macros)"
+                    .into(),
+            );
+        }
+        let macros = self.probing.as_deref() == Some("inspection_plus");
+        if macros != self.probe_fast_feed_mm_min.is_some() || (self.probe_switching && !macros) {
+            return Err("declare probe_fast_feed_mm_min (#119) and probe_switching exactly with inspection_plus probing".into());
+        }
+        if let Some(f) = self.probe_fast_feed_mm_min
+            && !(f.is_finite() && 0. < f && f <= 1e5)
+        {
+            return Err("probe_fast_feed_mm_min must be a positive feed".into());
         }
         if let Some(w) = &self.css_limit_word
             && (!letter(w) || taken(w, &["G", "M", "N"]))

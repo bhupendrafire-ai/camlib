@@ -51,6 +51,7 @@ pub enum Operation<G = crate::surface::SurfaceMesh> {
     Flat(crate::flat::FlatOperation<G>),
     VCarve(crate::vcarve::VCarveOperation),
     ThermalCut(crate::thermal::ThermalCutOperation),
+    Probe(crate::probe::ProbeOperation),
 }
 impl<G> Operation<G> {
     /// Hole operations whose retract feed is a declared process parameter
@@ -59,7 +60,11 @@ impl<G> Operation<G> {
     pub fn declares_retract_feed(&self) -> bool {
         matches!(
             self,
-            Self::Drilling(_) | Self::Bore(_) | Self::Reaming(_) | Self::Tapping(_)
+            Self::Drilling(_)
+                | Self::Bore(_)
+                | Self::Reaming(_)
+                | Self::Tapping(_)
+                | Self::Probe(_)
         )
     }
     pub(crate) fn map_geometry<H, E>(
@@ -86,6 +91,7 @@ impl<G> Operation<G> {
             Self::Flat(op) => Operation::Flat(op.map_geometry(f)?),
             Self::VCarve(op) => Operation::VCarve(op),
             Self::ThermalCut(op) => Operation::ThermalCut(op),
+            Self::Probe(op) => Operation::Probe(op),
         })
     }
 }
@@ -112,6 +118,7 @@ impl Operation {
             Self::Flat(p) => &p.id,
             Self::VCarve(p) => &p.id,
             Self::ThermalCut(p) => &p.id,
+            Self::Probe(p) => &p.id,
         }
     }
     pub fn tool(&self) -> &str {
@@ -135,6 +142,7 @@ impl Operation {
             Self::Flat(p) => &p.tool,
             Self::VCarve(p) => &p.tool,
             Self::ThermalCut(p) => &p.tool,
+            Self::Probe(p) => &p.tool,
         }
     }
     /// The operation's machining limits, if any.
@@ -159,6 +167,7 @@ impl Operation {
             Self::Flat(p) => p.limits.as_ref(),
             Self::VCarve(p) => p.limits.as_ref(),
             Self::ThermalCut(p) => p.limits.as_ref(),
+            Self::Probe(p) => p.limits.as_ref(),
         }
         .filter(|l| !l.is_empty())
     }
@@ -183,6 +192,7 @@ impl Operation {
             Self::Flat(p) => p.work_offset,
             Self::VCarve(p) => p.work_offset,
             Self::ThermalCut(p) => p.work_offset,
+            Self::Probe(p) => p.work_offset,
         }
     }
 }

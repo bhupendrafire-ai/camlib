@@ -140,7 +140,7 @@ fn decode_committed_chunk<'py>(
     let (feed_flag, feed) = (d.u8()?, d.f64()?);
     let curve_kind = d.u8()?;
     let (a, b) = (d.point()?, d.point()?);
-    if kind > 8 || curve_kind > 2 || feed_flag > 1 || (feed_flag == 0 && feed != 0.) {
+    if kind > 12 || curve_kind > 2 || feed_flag > 1 || (feed_flag == 0 && feed != 0.) {
         return Err(PyValueError::new_err(
             "invalid motion/curve/feed discriminator",
         ));
@@ -198,7 +198,19 @@ fn decode_committed_chunk<'py>(
     motion.set_item(
         "kind",
         [
-            "rapid", "cut", "plunge", "lead", "link", "retract", "tap", "shift", "thread",
+            "rapid",
+            "cut",
+            "plunge",
+            "lead",
+            "link",
+            "retract",
+            "tap",
+            "shift",
+            "thread",
+            "probe_position",
+            "probe_measure",
+            "probe_touch",
+            "probe_return",
         ][kind as usize],
     )?;
     motion.set_item("feed_mm_min", (feed_flag == 1).then_some(feed))?;
@@ -1686,6 +1698,40 @@ fn css_rpm_bound(curve_json: &str, m_min: f64, max_rpm: f64) -> PyResult<f64> {
     Ok(camlib::motion::css_rpm_bound(&curve, m_min, max_rpm))
 }
 
+/// The moves of a probing cycle (`camlib::probe::ProbeCycle::legs`) from
+/// its start, for posts that write the cycle as controller blocks: (kind,
+/// end, feed or None). `radius_mm` is the stylus ball radius, or the
+/// measured cutter's for tool setting. Decoders must not use this: they read
+/// the moves back from the written blocks.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn probe_legs(
+    cycle_json: &str,
+    radius_mm: f64,
+) -> PyResult<((f64, f64, f64), Vec<(String, (f64, f64, f64), Option<f64>)>)> {
+    if cycle_json.len() > 16384 {
+        return Err(PyValueError::new_err(
+            "probe cycle input exceeds 16384 bytes",
+        ));
+    }
+    let cycle: camlib::probe::ProbeCycle =
+        serde_json::from_str(cycle_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let start = cycle.start(radius_mm).map_err(PyValueError::new_err)?;
+    let legs = cycle.legs(radius_mm).map_err(PyValueError::new_err)?;
+    Ok((
+        (start[0], start[1], start[2]),
+        legs.into_iter()
+            .map(|l| {
+                let kind = serde_json::to_value(l.kind)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                (kind, (l.end[0], l.end[1], l.end[2]), l.feed_mm_min)
+            })
+            .collect(),
+    ))
+}
+
 #[pyfunction]
 #[pyo3(signature = (curve_json, start, unit, decimals, geometry_tolerance, output_tolerance, radius_tolerance, radius_relative_tolerance=0.0))]
 #[allow(clippy::too_many_arguments)]
@@ -2274,6 +2320,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(css_rpm_bound, module)?)?;
     module.add_function(wrap_pyfunction!(post_job, module)?)?;
     module.add_function(wrap_pyfunction!(post_program, module)?)?;
+    module.add_function(wrap_pyfunction!(probe_legs, module)?)?;
     module.add_class::<PostCancellation>()?;
     module.add_class::<StreamVerification>()?;
     module.add_class::<StreamControlContext>()?;

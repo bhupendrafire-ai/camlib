@@ -9,6 +9,12 @@ use crate::motion::{
 };
 use std::collections::BTreeMap;
 
+/// Probing cycles are written only by Python posts with a declared probing
+/// back end (`GCodeDialect.probing`); this port of the default post has none.
+const PROBING_REFUSED: &str = "the Rust post writes no probing cycles: post a job with probing \
+     operations from Python (Job.post_nc) with a dialect that declares probing ('g38' or \
+     'inspection_plus')";
+
 /// What a hook is called with.
 pub enum Hook<'a> {
     /// `on_begin`: the program header (its geometry tolerance).
@@ -210,6 +216,11 @@ impl DefaultPost {
                 Event::SurfaceSpeed { .. } => "on_surface_speed",
                 Event::FeedPerRev { .. } => "on_feed_per_rev",
                 Event::CutterCompensation { .. } => "on_cutter_compensation",
+                // The Rust post ports the Python default post, which writes
+                // no probing cycles; probing back ends are Python posts.
+                Event::Probe { .. } => {
+                    return Err(PROBING_REFUSED.into());
+                }
             },
         };
         if self.covered > 0 {
@@ -336,6 +347,7 @@ impl DefaultPost {
                 self.emit(&[d.code(if *optional { "optional_stop" } else { "stop" })?])
             }
             Event::CutterCompensation { side, .. } => self.on_cutter_compensation(*side),
+            Event::Probe { .. } => Err(PROBING_REFUSED.into()),
             Event::Beam { power_percent } => {
                 let s_max = d.beam_s_max.ok_or(
                     "this dialect declares no beam (beam_s_max): it cannot post plasma or laser cutting",
@@ -682,6 +694,9 @@ impl DefaultPost {
     }
 
     fn on_motion(&mut self, motion: &Motion) -> Result<(), String> {
+        if motion.kind.is_probe() {
+            return Err(PROBING_REFUSED.into());
+        }
         let d = self.machine.dialect.clone();
         let c = &motion.curve;
         if motion.kind == MoveKind::Tap {

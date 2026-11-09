@@ -92,6 +92,7 @@ pub mod post_lowering;
 pub mod post_rounding;
 mod post_scheduling;
 pub mod preparation;
+pub mod probe;
 mod profiles;
 pub mod reach;
 pub mod regeneration;

@@ -41,6 +41,24 @@ _PAIR = struct.Struct("<dd")
 _ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
 
+# Move kinds in their wire order (src/stream.rs).
+_MOVE_KINDS = (
+    "rapid",
+    "cut",
+    "plunge",
+    "lead",
+    "link",
+    "retract",
+    "tap",
+    "shift",
+    "thread",
+    "probe_position",
+    "probe_measure",
+    "probe_touch",
+    "probe_return",
+)
+
+
 class ProtocolError(ValueError):
     pass
 
@@ -355,7 +373,7 @@ class _Decoder:
         feed_flag, feed = self.unpack("<Bd")
         curve_kind = self.number("<B")
         start, end = self.unpack("<3d"), self.unpack("<3d")
-        if kind > 8 or curve_kind > 2 or feed_flag > 1 or (not feed_flag and feed != 0):
+        if kind >= len(_MOVE_KINDS) or curve_kind > 2 or feed_flag > 1 or (not feed_flag and feed != 0):
             raise ProtocolError("invalid motion/curve/feed discriminator")
         curve = {"kind": ("line", "arc", "helix")[curve_kind], "start": start, "end": end}
         if curve_kind:
@@ -368,7 +386,7 @@ class _Decoder:
             "id": identifier,
             "operation": operation,
             "tool": tool,
-            "kind": ("rapid", "cut", "plunge", "lead", "link", "retract", "tap", "shift", "thread")[kind],
+            "kind": _MOVE_KINDS[kind],
             "feed_mm_min": feed if feed_flag else None,
             "curve": curve,
         }
@@ -806,7 +824,10 @@ class StockState:
                 raise ProtocolError("programmed feed must be positive and finite")
         if self._control_context is not None:
             try:
-                self._control_context.check_tool(motion['tool'], motion['kind'] in ('rapid', 'shift'))
+                # Rapids, oriented shifts and probing moves need no running spindle.
+                self._control_context.check_tool(
+                    motion['tool'], motion['kind'] in ('rapid', 'shift') or motion['kind'].startswith('probe_')
+                )
             except ValueError as error:
                 raise ProtocolError(str(error)) from error
 
@@ -1712,7 +1733,10 @@ class Simulation:
                         or data["report"].get("geometric_residual_status") not in ("estimated", "unknown")
                     ):
                         raise ProtocolError("operation end order mismatch")
-                    if active_cuts == 0:
+                    if definitions[completed_operations].get("kind") == "probe":
+                        # Probing and tool setting never cut, by design.
+                        pass
+                    elif active_cuts == 0:
                         warnings.warn(
                             f"operation {active!r} produced no cutting motion (region smaller "
                             "than the tool, outside the stock, or already cleared)",

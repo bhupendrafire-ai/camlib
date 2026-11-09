@@ -36,6 +36,7 @@ from .motion import (
     HeightControl,
     SurfaceSpeed,
     FeedPerRev,
+    Probe,
     WorkFrame,
 )
 
@@ -307,6 +308,27 @@ class GCodeDialect:
     # S<speed>); None when the dialect declares css_limit (G50 S<max> in its
     # own block) or no constant surface speed.
     css_limit_word: str | None = None
+    # Probing back end (camlib.probe cycles), or None: probing is refused.
+    # 'g38': LinuxCNC straight probes (docs/src/gcode/g-code.adoc, 2.9):
+    # protected moves G38.3 then "O<n> IF [#5070 NE 0]" (ABORT,) - #5070 is 1
+    # when the probe tripped, (ABORT,) stops the program with an error
+    # (interp_convert.cc convert_comment) - measuring moves G38.2 (error if
+    # nothing is touched), results from #5061-#5063 ("in the current work
+    # coordinate system") into G10 L2 / G10 L10 / G10 L1. Needs a G38 probe
+    # input wired to motion.probe-input, and no G5x rotation (R) in effect.
+    # 'inspection_plus': Renishaw Inspection Plus macros called with G65
+    # (H-2000-6031, H-2000-6222): O9810 protected positioning, O9811 single
+    # surface, O9812 pocket, O9814 bore, O9815 inside corner, with S (the work
+    # offset to correct, S1..S6 = G54..G59) and Q (the overtravel). Their
+    # feeds follow the installed fast feed #119: probe_fast_feed_mm_min.
+    probing: str | None = None
+    # Inspection Plus: the installed fast feed #119 (settings macro O9724).
+    # The macros approach a surface at 0.6 x #119 and position at #119 in XY
+    # and 0.6 x #119 in Z (H-2000-6031 chapter 9, "Feedrates").
+    probe_fast_feed_mm_min: float | None = None
+    # Inspection Plus: whether each cycle is wrapped in the probe on/off
+    # macros O9832/O9833 (installations that switch the probe on).
+    probe_switching: bool = False
 
     def __post_init__(self):
         for key in ('commands', 'work_offsets', 'axes', 'centers', 'fixed_modes'):
@@ -391,6 +413,18 @@ class GCodeDialect:
                 )
             if 'rpm_mode' not in declared or 'rpm_mode' in self.fixed_modes:
                 raise ValueError('constant surface speed needs the rpm mode (G97) to cancel it')
+        if self.probing not in (None, 'g38', 'inspection_plus'):
+            raise ValueError("probing must be None, 'g38' (LinuxCNC) or 'inspection_plus' (Renishaw macros)")
+        if (self.probing == 'inspection_plus') != (self.probe_fast_feed_mm_min is not None) or (
+            self.probe_switching and self.probing != 'inspection_plus'
+        ):
+            raise ValueError(
+                'declare probe_fast_feed_mm_min (#119) and probe_switching exactly with inspection_plus probing'
+            )
+        if self.probe_fast_feed_mm_min is not None and not (
+            math.isfinite(self.probe_fast_feed_mm_min) and 0 < self.probe_fast_feed_mm_min <= 1e5
+        ):
+            raise ValueError('probe_fast_feed_mm_min must be a positive feed')
         if self.css_limit_word is not None and (
             not re.fullmatch('[A-Z]', self.css_limit_word) or self.css_limit_word in (*letters, 'G', 'M', 'N')
         ):
@@ -647,6 +681,24 @@ class Machine:
         )
 
 
+def _tool_radii(tools):
+    """Each tool assembly's cutter radius (a probe's stylus ball), by id."""
+    radii = {}
+    for t in tools:
+        cutter = t['cutter'] if isinstance(t, dict) else t.cutter
+        diameter = cutter['diameter_mm'] if isinstance(cutter, dict) else cutter.diameter_mm
+        radii[t['id'] if isinstance(t, dict) else t.id] = diameter / 2
+    return radii
+
+
+def _plain_value(value):
+    if hasattr(value, 'items'):
+        return {k: _plain_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_value(v) for v in value]
+    return value
+
+
 def _typed(data):
     if data['kind'] == 'motion':
         m = dict(data['motion'])
@@ -674,6 +726,7 @@ def _typed(data):
         'height_control': HeightControl,
         'surface_speed': SurfaceSpeed,
         'feed_per_rev': FeedPerRev,
+        'probe': Probe,
     }[kind](**value)
 
 
@@ -823,6 +876,9 @@ class PostProcessor(_TransactionCopy):
     def on_feed_per_rev(self, event):
         raise NotImplementedError
 
+    def on_probe(self, event):
+        raise ValueError('this post writes no probing cycles')
+
     def on_motion(self, motion):
         raise NotImplementedError
 
@@ -833,6 +889,16 @@ class PostProcessor(_TransactionCopy):
         self._lines = []
         self._limit = limit
         covered = getattr(self, '_covered', 0)
+        if covered and getattr(self, '_covered_probe', False):
+            # A written probing cycle carries all its moves.
+            if name != 'on_motion':
+                raise ValueError('a probing cycle covers only its own moves')
+            self._covered = covered - 1
+            if not self._covered:
+                self._covered_probe = False
+            return []
+        if name == 'on_probe':
+            self._limit = limit = 1024
         if covered:
             # A written canned cycle carries the moves and dwell of its hole.
             if name not in ('on_motion', 'on_dwell', 'on_spindle', 'on_spindle_orient'):
@@ -912,9 +978,202 @@ class GCodePost(PostProcessor):
         # startup mode. Tracked so later output omits only provably redundant codes.
         self._spindle_on = False
         self._coolant_mode = 'off'
+        # Cutter radii (a probe's stylus ball): probing cycles are laid out from them.
+        self._radii = _tool_radii(program.tools)
 
     def on_work_offset(self, event):
+        self._work_offset = event.number
         self.emit(self.machine.dialect.work_offsets[event.number - 1])
+
+    def on_probe(self, event):
+        """A probing cycle as the dialect's probing blocks: LinuxCNC G38.x
+        ('g38') or Renishaw Inspection Plus macro calls ('inspection_plus').
+        The blocks carry every move the cycle covers."""
+        back_end = self.machine.dialect.probing
+        if back_end is None:
+            raise ValueError(
+                "this machine's dialect declares no probing back end: GCodeDialect(probing='g38') for "
+                "LinuxCNC G38.x or probing='inspection_plus' for Renishaw Inspection Plus macros"
+            )
+        setting = getattr(self, '_tool_setting', None)
+        if setting is None or not hasattr(self, '_radii'):
+            raise ValueError('a probing cycle needs an active tool from the machine table')
+        cycle = _plain_value(event.cycle)
+        radius = self._radii[setting.tool]
+        start, legs = native.probe_legs(_json(cycle), radius)
+        position = getattr(self, 'position_mm', None)
+        if position is None or max(abs(a - b) for a, b in zip(position, start)) > self.machine.tolerance_mm:
+            raise ValueError(f'a probing cycle starts at {tuple(start)}, not at {position}')
+        writer = self._probe_g38 if back_end == 'g38' else self._probe_inspection_plus
+        lines = writer(cycle, legs, radius, tuple(position))
+        self._covered = event.covers
+        self._covered_probe = True
+        return lines
+
+    def _changed(self, position, end):
+        d = self.machine.dialect
+        axes = [i for i in range(3) if end[i] != position[i]]
+        if not axes:
+            raise ValueError('a probing move has zero length')
+        return self.words([d.axes[i] for i in axes], [end[i] for i in axes])
+
+    def _probe_g38(self, cycle, legs, radius, position):
+        """LinuxCNC 2.9 (docs/src/gcode/g-code.adoc G38.n, G10 L1/L2/L10;
+        overview.adoc numbered parameters). Protected moves: G38.3, then
+        abort if #5070 = 1 (tripped). Measuring moves: G38.2 to search_mm
+        beyond the expected contact, which errors if nothing is touched; the
+        error of each touch is #506x minus the expected tip coordinate."""
+        d = self.machine.dialect
+        out = []
+        search = cycle['search_mm']
+        touches = []
+        pos = position
+        i = 0
+        while i < len(legs):
+            kind, end, feed = legs[i]
+            if kind == 'probe_position':
+                label = getattr(self, '_probe_label', 100)
+                self._probe_label = label + 1
+                out += [
+                    ' '.join(['G38.3', *self._changed(pos, end), *self.words([d.feed_word], [feed])]),
+                    f'O{label} IF [#5070 NE 0]',
+                    '(ABORT, camlib: protected probe move obstructed)',
+                    f'O{label} ENDIF',
+                ]
+            elif kind == 'probe_measure':
+                touch_kind, contact, touch_feed = legs[i + 1]
+                if touch_kind != 'probe_touch' or touch_feed != feed:
+                    raise ValueError('a measuring move continues into its touch')
+                axis = next(k for k in range(3) if contact[k] != pos[k])
+                direction = 1 if contact[axis] > pos[axis] else -1
+                target = contact[axis] + direction * search
+                touches.append(axis)
+                out += [
+                    ' '.join(['G38.2', *self.words([d.axes[axis]], [target]), *self.words([d.feed_word], [feed])]),
+                    f'#<probe{len(touches)}> = [#{5061 + axis} {"+" if contact[axis] < 0 else "-"} '
+                    f'{self.number(abs(contact[axis]))}]',
+                ]
+                end = contact
+                i += 1
+            elif kind == 'probe_return':
+                out.append(' '.join(['G1', *self._changed(pos, end), *self.words([d.feed_word], [feed])]))
+            elif kind == 'rapid':
+                out.append(' '.join(['G0', *self._changed(pos, end)]))
+            else:
+                raise ValueError(f'unexpected probing move {kind}')
+            pos = end
+            i += 1
+        result = cycle['result']
+        if result['kind'] == 'work_offset':
+            active = getattr(self, '_work_offset', None)
+            if active is None:
+                raise ValueError('probing a work offset needs the active work offset selected first')
+            words = []
+            for axis in range(3):
+                used = [k + 1 for k, a in enumerate(touches) if a == axis]
+                if not used:
+                    continue
+                if len(used) == 1:
+                    error = f'#<probe{used[0]}>'
+                elif len(used) == 2:
+                    error = f'[#<probe{used[0]}> + #<probe{used[1]}>] / 2'
+                else:
+                    raise ValueError('at most two touches along one axis')
+                words.append(f'{d.axes[axis]}[#{5201 + 20 * active + axis} + {error}]')
+            out.append(' '.join(['G10 L2', f'P{result["number"]}', *words]))
+        elif result['kind'] == 'tool_length':
+            register = result['register']
+            out += [
+                f'G10 L10 P{register} {d.axes[2]}[#5422 - #<probe1>]',
+                f'{d.code("length_on")} {d.length_word}{register}',
+            ]
+        else:
+            out.append(f'G10 L1 P{result["register"]} R[{self.number(radius)} + [#<probe1> - #<probe2>] / 2]')
+        return out
+
+    def _macro(self, value):
+        """A G65 argument with its decimal point, as the Inspection Plus
+        examples write them (H-2000-6031: "G65P9814D50.Z-10.S2.R10.")."""
+        text = self.number(value)
+        return text if '.' in text else text + '.'
+
+    def _probe_inspection_plus(self, cycle, legs, radius, position):
+        """Renishaw Inspection Plus (H-2000-6031 chapters 5 and 7). O9810
+        protected positioning (X Y Z F), O9811 single surface (X, Y or Z: the
+        surface position), O9812 pocket (X or Y: its width), O9814 bore (D),
+        O9815 inside corner (X Y: the corner), each with S (work offset
+        S1..S6 = G54..G59; "New work offset = active work offset + error")
+        and Q (overtravel: the search beyond the expected position)."""
+        d = self.machine.dialect
+        feature = cycle['feature']
+        name = feature['kind']
+        calls = {'surface': 1, 'outside_corner': 1, 'inside_corner': 2, 'bore': 4, 'pocket': 2}
+        if name not in calls:
+            raise ValueError(
+                f'{name} probing is not modelled for the Inspection Plus macros: their moves around a boss or web '
+                '(O9814/O9812 with Z and R) and their tool setting cycles are not taken from a source here; '
+                'post it with probing="g38" or split it into single surfaces'
+            )
+        number = cycle['result']['number']
+        if not 1 <= number <= 6:
+            raise ValueError('Inspection Plus S1..S6 correct G54..G59; this cycle corrects another work offset')
+        fast = d.probe_fast_feed_mm_min
+        z_surface = name == 'surface' and feature['axis'] == 'z'
+        measure, back = 0.6 * fast, (0.6 if z_surface else 1) * fast
+        tolerance = self.machine.feed_tolerance_mm_min
+        if (
+            abs(cycle['measure_feed_mm_min'] - measure) > tolerance
+            or abs(cycle['return_feed_mm_min'] - back) > tolerance
+        ):
+            raise ValueError(
+                f'Inspection Plus measures at 0.6 x the fast feed #119 ({measure:g} mm/min) and moves back at '
+                f'{back:g} mm/min (#119{" x 0.6 in Z" if z_surface else " in XY"}): set measure_feed_mm_min and '
+                'return_feed_mm_min to those'
+            )
+        tail = f'S{number}. Q{self._macro(cycle["search_mm"])}'
+        out = ['G65 P9832'] if d.probe_switching else []
+        pos = position
+        i = 0
+        while i < len(legs):
+            kind, end, feed = legs[i]
+            if kind == 'probe_position':
+                out.append(
+                    ' '.join(
+                        [
+                            'G65 P9810',
+                            *(d.axes[k] + self._macro(end[k]) for k in range(3) if end[k] != pos[k]),
+                            d.feed_word + self._macro(feed),
+                        ]
+                    )
+                )
+                pos = end
+                i += 1
+                continue
+            if kind != 'probe_measure':
+                raise ValueError(f'unexpected probing move {kind}')
+            count = calls[name]
+            group = legs[i : i + 3 * count]
+            if [g[0] for g in group] != ['probe_measure', 'probe_touch', 'probe_return'] * count:
+                raise ValueError('an Inspection Plus call covers whole touches')
+            axis = next(k for k in range(3) if group[1][1][k] != pos[k])
+            if name == 'surface':
+                call = f'G65 P9811 {d.axes[axis]}{self._macro(feature["surface_mm"])}'
+            elif name == 'outside_corner':
+                call = f'G65 P9811 {d.axes[axis]}{self._macro(feature["corner_mm"][axis])}'
+            elif name == 'inside_corner':
+                x, y = feature['corner_mm']
+                call = f'G65 P9815 {d.axes[0]}{self._macro(x)} {d.axes[1]}{self._macro(y)}'
+            elif name == 'bore':
+                call = f'G65 P9814 D{self._macro(feature["diameter_mm"])}'
+            else:
+                a = {'x': 0, 'y': 1}[feature['axis']]
+                call = f'G65 P9812 {d.axes[a]}{self._macro(feature["width_mm"])}'
+            out.append(f'{call} {tail}')
+            pos = group[-1][1]
+            i += 3 * count
+        if d.probe_switching:
+            out.append('G65 P9833')
+        return out
 
     def on_tool_change(self, event):
         d = self.machine.dialect
@@ -1359,6 +1618,13 @@ class GCodeDecoder(_TransactionCopy):
             return s.get('kind')
 
         self.beams = frozenset((t['id'] if isinstance(t, dict) else t.id) for t in program.tools if shape(t) == 'beam')
+        # Probing cycles: the declared stylus ball (or cutter) radii, and
+        # the O-word labels already used in this program.
+        self.probes = frozenset(
+            (t['id'] if isinstance(t, dict) else t.id) for t in program.tools if shape(t) == 'probe'
+        )
+        self.tool_radii = tuple(_tool_radii(program.tools).items())
+        self.probe_labels = frozenset()
         rules = {}
         for c in machine.dialect.commands:
             key = (c.code[0], float(c.code[1:])) if c.code[1:2].isdigit() else c.code
@@ -1375,6 +1641,10 @@ class GCodeDecoder(_TransactionCopy):
             raise ValueError('incomplete explicit decoder modal initialization: ' + str(sorted(required - self.ready)))
 
     def read(self, lines, context=None):
+        if context is not None and 'probe' in context:
+            if self.cycle_queue or self.cycle_active or self.tap_return is not None:
+                raise ValueError('a probing cycle cannot start inside another cycle')
+            return self._probe_block(lines, context['probe'])
         if not lines and self.cycle_queue:
             return [self._cycle_effect(context)]
         if self.cycle_queue:
@@ -1880,6 +2150,13 @@ class GCodeDecoder(_TransactionCopy):
 
     def _cycle_effect(self, context):
         item = self.cycle_queue.pop(0)
+        if item[0] == 'probe':
+            if context is None or 'probe' in context:
+                raise ValueError('probing cycle move expected')
+            _, kind, end, feed = item
+            motion = Motion(context['id'], context['operation'], self.active.tool, Line(self.position, end), feed, kind)
+            self.position = end
+            return motion
         if item[0] in ('dwell', 'spindle', 'orient'):
             if context is not None:
                 raise ValueError('canned cycle control effect expected, not a move')
@@ -2005,6 +2282,341 @@ class GCodeDecoder(_TransactionCopy):
             'thread',
         )
 
+    # Probing cycles. The moves come from the written blocks alone; only
+    # attribution and the feature description come from the source event,
+    # and every block must match one form below exactly.
+
+    _PROBE_NUMBER = r'([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))'
+
+    def _probe_block(self, lines, event):
+        self.validate_initialized()
+        if self.active is None or self.length is None or self.offset is None or self.tool_pending:
+            raise ValueError('NC probing with unknown tool/length/offset')
+        cycle = _plain_value(event['cycle'])
+        covers = int(event['covers'])
+        back_end = self.machine.dialect.probing
+        if back_end is None:
+            raise ValueError('this dialect declares no probing back end')
+        tool = self.active.tool
+        radius = dict(self.tool_radii)[tool]
+        if (tool in self.probes) != (cycle['feature']['kind'] not in ('tool_length', 'tool_diameter')):
+            raise ValueError('probing needs the probe active; tool setting a cutting tool')
+        body = [line.strip().upper() for line in lines]
+        if any(len(line) > 1024 or _INVALID_BLOCK.search(line) for line in body):
+            raise ValueError('invalid NC physical block')
+        reader = self._probe_g38_read if back_end == 'g38' else self._probe_inspection_plus_read
+        moves, decoded = reader(body, cycle, radius)
+        if len(moves) != covers:
+            raise ValueError(f'the probing blocks decode to {len(moves)} moves, the cycle covers {covers}')
+        self.cycle_queue = [('probe', kind, end, feed) for kind, end, feed in moves]
+        return [Probe(decoded, covers)]
+
+    @staticmethod
+    def _probe_axes(feature):
+        kind = feature['kind']
+        if kind in ('surface', 'pocket', 'web'):
+            return ({'x': 0, 'y': 1, 'z': 2}[feature['axis']],)
+        if kind in ('outside_corner', 'inside_corner', 'bore', 'boss'):
+            return (0, 1)
+        return ()
+
+    def _probe_g38_read(self, body, cycle, radius):
+        """LinuxCNC G38.x probing blocks (see GCodePost._probe_g38)."""
+        d = self.machine.dialect
+        n = self._PROBE_NUMBER
+        axis_of = {a: k for k, a in enumerate(d.axes)}
+        unit = self.units
+        letters = ''.join(d.axes)
+
+        def coordinates(text, pos):
+            words = re.findall(rf' ([{letters}]){n}', text)
+            if ''.join(f' {a}{v}' for a, v in words) != text or len({a for a, _ in words}) != len(words) or not words:
+                raise ValueError('invalid probing axis words')
+            end = list(pos)
+            for a, v in words:
+                end[axis_of[a]] = float(v) * unit
+            if tuple(end) == tuple(pos):
+                raise ValueError('a probing move has zero length')
+            return tuple(end)
+
+        moves, touches, feeds = [], [], {'position': set(), 'measure': set(), 'return': set()}
+        search = set()
+        pos = tuple(self.position)
+        labels = set(self.probe_labels)
+        result = None
+        i = 0
+        while i < len(body):
+            line = body[i]
+            if result is not None:
+                raise ValueError('nothing follows the stored probing result')
+            m = re.fullmatch(rf'G38\.3((?: [{letters}]{n})+) {d.feed_word}{n}', line)
+            if m:
+                end = coordinates(m[1], pos)
+                label = re.fullmatch(r'O([0-9]+) IF \[#5070 NE 0\]', body[i + 1] if i + 1 < len(body) else '')
+                if (
+                    label is None
+                    or body[i + 2 : i + 4] != ['(ABORT, CAMLIB: PROTECTED PROBE MOVE OBSTRUCTED)', f'O{label[1]} ENDIF']
+                    or label[1] in labels
+                ):
+                    raise ValueError('a protected probe move (G38.3) must stop the program when the probe trips')
+                labels.add(label[1])
+                feed = float(m[3]) * unit
+                feeds['position'].add(feed)
+                moves.append(('probe_position', end, feed))
+                pos = end
+                i += 4
+                continue
+            m = re.fullmatch(rf'G38\.2 ([{letters}]){n} {d.feed_word}{n}', line)
+            if m:
+                axis = axis_of[m[1]]
+                target = float(m[2]) * unit
+                err = re.fullmatch(
+                    r'#<PROBE([0-9]+)> = \[#506([123]) ([+-]) ([0-9]+(?:\.[0-9]*)?|\.[0-9]+)\]',
+                    body[i + 1] if i + 1 < len(body) else '',
+                )
+                if err is None or int(err[1]) != len(touches) + 1 or int(err[2]) != axis + 1:
+                    raise ValueError('a measuring move (G38.2) is followed by its error against the expected contact')
+                contact = (-1 if err[3] == '+' else 1) * float(err[4]) * unit
+                direction = 1 if target > contact else -1
+                reach = direction * (target - contact)
+                if reach <= 0 or direction * (contact - pos[axis]) <= reach:
+                    raise ValueError('the measuring move must start farther from the contact than its search')
+                search.add(reach)
+                feed = float(m[3]) * unit
+                feeds['measure'].add(feed)
+                near, end = list(pos), list(pos)
+                near[axis] = contact - direction * reach
+                end[axis] = contact
+                moves += [('probe_measure', tuple(near), feed), ('probe_touch', tuple(end), feed)]
+                touches.append((axis, direction))
+                pos = tuple(end)
+                i += 2
+                continue
+            m = re.fullmatch(rf'G1((?: [{letters}]{n})+) {d.feed_word}{n}', line)
+            if m:
+                end = coordinates(m[1], pos)
+                feed = float(m[3]) * unit
+                feeds['return'].add(feed)
+                moves.append(('probe_return', end, feed))
+                pos = end
+                i += 1
+                continue
+            m = re.fullmatch(rf'G0((?: [{letters}]{n})+)', line)
+            if m:
+                moves.append(('rapid', coordinates(m[1], pos), None))
+                pos = moves[-1][1]
+                i += 1
+                continue
+            m = re.fullmatch(r'G10 L2 P([1-9])( .+)', line)
+            if m:
+                result = {'kind': 'work_offset', 'number': int(m[1])}
+                used, axes = [], []
+                base = 5201 + 20 * self.offset
+                parts = re.findall(
+                    r' ([A-Z])\[#([0-9]+) \+ (#<PROBE[0-9]+>|\[#<PROBE[0-9]+> \+ #<PROBE[0-9]+>\] / 2)\]', m[2]
+                )
+                if ''.join(f' {a}[#{p} + {e}]' for a, p, e in parts) != m[2]:
+                    raise ValueError('unsupported work offset correction')
+                for a, param, error in parts:
+                    if a not in axis_of or int(param) != base + axis_of[a] or axis_of[a] in axes:
+                        raise ValueError('a work offset correction adds each axis error to the active offset')
+                    axis = axis_of[a]
+                    refs = [int(r) for r in re.findall(r'#<PROBE([0-9]+)>', error)]
+                    if any(r < 1 or r > len(touches) or touches[r - 1][0] != axis for r in refs):
+                        raise ValueError('a work offset axis averages the touches along that axis')
+                    if len(refs) == 2 and touches[refs[0] - 1][1] == touches[refs[1] - 1][1]:
+                        raise ValueError('two touches averaged on one axis must face each other')
+                    axes.append(axis)
+                    used += refs
+                if sorted(used) != list(range(1, len(touches) + 1)) or tuple(sorted(axes)) != self._probe_axes(
+                    cycle['feature']
+                ):
+                    raise ValueError(f"the correction does not use every touch of the {cycle['feature']['kind']}")
+                if any(
+                    sum(1 for t in touches if t[0] == a)
+                    != (2 if cycle['feature']['kind'] in ('bore', 'boss', 'pocket', 'web') else 1)
+                    for a in axes
+                ):
+                    raise ValueError('wrong number of touches for the probed feature')
+                i += 1
+                continue
+            m = re.fullmatch(rf'G10 L10 P([0-9]+) {d.axes[2]}\[#5422 - #<PROBE1>\]', line)
+            if m:
+                register = int(m[1])
+                if (
+                    touches != [(2, -1)]
+                    or register != self.length
+                    or body[i + 1 : i + 2] != [f'{d.code("length_on")} {d.length_word}{register}']
+                ):
+                    raise ValueError('a tool length is measured down onto the setter and reloaded (G43 H) at once')
+                result = {'kind': 'tool_length', 'register': register}
+                i += 2
+                continue
+            m = re.fullmatch(rf'G10 L1 P([0-9]+) R\[{n} \+ \[#<PROBE1> - #<PROBE2>\] / 2\]', line)
+            if m:
+                register = int(m[1])
+                if touches != [(0, -1), (0, 1)] or register != self.length:
+                    raise ValueError('a tool radius is measured from +X, then from -X, into the tool entry')
+                if abs(float(m[2]) * unit - radius) > 0.5 * 10**-self.machine.decimals * unit + 1e-9:
+                    raise ValueError("the stored tool radius starts from the tool's declared radius")
+                result = {'kind': 'tool_radius', 'register': register}
+                i += 1
+                continue
+            raise ValueError(f'unsupported block in a probing cycle: {line!r}')
+        if result is None:
+            raise ValueError('a probing cycle stores its result')
+        self.probe_labels = frozenset(labels)
+        return moves, self._probe_decoded(cycle, search, feeds, result)
+
+    def _probe_decoded(self, cycle, search, feeds, result):
+        def one(values, what):
+            if len(values) > 1:
+                raise ValueError(f'one {what} per probing cycle')
+            return next(iter(values), None)
+
+        decoded = dict(cycle)
+        decoded['search_mm'] = one(search, 'search distance')
+        decoded['result'] = result
+        decoded['measure_feed_mm_min'] = one(feeds['measure'], 'measuring feed')
+        decoded['return_feed_mm_min'] = one(feeds['return'], 'return feed')
+        position = one(feeds['position'], 'protected positioning feed')
+        if position is None:
+            decoded.pop('position_feed_mm_min', None)
+        else:
+            decoded['position_feed_mm_min'] = position
+        if (
+            decoded['search_mm'] is None
+            or decoded['measure_feed_mm_min'] is None
+            or decoded['return_feed_mm_min'] is None
+        ):
+            raise ValueError('a probing cycle measures at least once and returns')
+        return decoded
+
+    def _probe_inspection_plus_read(self, body, cycle, radius):
+        """Renishaw Inspection Plus macro calls (H-2000-6031), read from
+        their words with the macros' documented motion: O9811 measures from
+        its start along the axis of its X, Y or Z word toward that surface
+        position and returns there; O9814 measures +X, -X, +Y, -Y from the
+        bore centre; O9812 + and - along its axis from the centre; O9815 the
+        Y wall, then the X wall, from its start, and returns there."""
+        d = self.machine.dialect
+        unit = self.units
+        fast = d.probe_fast_feed_mm_min
+        if d.probe_switching:
+            if body[:1] != ['G65 P9832'] or body[-1:] != ['G65 P9833']:
+                raise ValueError('this installation switches the probe on (O9832) and off (O9833) around a cycle')
+            body = body[1:-1]
+        moves, calls, feeds = [], [], {'position': set(), 'measure': set(), 'return': set()}
+        search, offsets = set(), set()
+        pos = tuple(self.position)
+        position_feed = None
+
+        def words(text, allowed, decimal):
+            values = {}
+            for word in text.split(' '):
+                m = re.fullmatch(r'([A-Z])' + self._PROBE_NUMBER, word)
+                if m is None or m[1] not in allowed or m[1] in values:
+                    raise ValueError(f'unsupported Inspection Plus word {word!r}')
+                if m[1] in decimal and '.' not in m[2]:
+                    raise ValueError('Inspection Plus dimensional arguments need their decimal point')
+                values[m[1]] = float(m[2])
+            return values
+
+        def touch(axis, contact, direction, s):
+            nonlocal pos
+            if direction * (contact - pos[axis]) <= s:
+                raise ValueError('the measuring move must start farther from the surface than the overtravel')
+            near, end = list(pos), list(pos)
+            near[axis] = contact - direction * s
+            end[axis] = contact
+            measure = 0.6 * fast
+            back = (0.6 if axis == 2 else 1) * fast
+            feeds['measure'].add(measure)
+            feeds['return'].add(back)
+            moves.extend(
+                [
+                    ('probe_measure', tuple(near), measure),
+                    ('probe_touch', tuple(end), measure),
+                    ('probe_return', pos, back),
+                ]
+            )
+
+        for line in body:
+            m = re.fullmatch(r'G65 P(98[0-9][0-9])((?: \S+)*)', line)
+            if m is None:
+                raise ValueError(f'unsupported block in a probing cycle: {line!r}')
+            macro, text = m[1], m[2].strip()
+            if macro == '9810':
+                values = words(text, set(d.axes) | {d.feed_word}, set(d.axes) | {d.feed_word})
+                if d.feed_word in values:
+                    position_feed = values.pop(d.feed_word) * unit
+                if position_feed is None or not values:
+                    raise ValueError('O9810 needs a target and its feed')
+                end = list(pos)
+                for a, v in values.items():
+                    end[d.axes.index(a)] = v * unit
+                if tuple(end) == pos:
+                    raise ValueError('a probing move has zero length')
+                feeds['position'].add(position_feed)
+                moves.append(('probe_position', tuple(end), position_feed))
+                pos = tuple(end)
+                continue
+            values = words(text, set(d.axes) | {'D', 'S', 'Q'}, set(d.axes) | {'D', 'Q'})
+            if 'S' not in values or 'Q' not in values or values['S'] != int(values['S']) or not 1 <= values['S'] <= 6:
+                raise ValueError(
+                    'camlib Inspection Plus calls correct work offset S1..S6 with an explicit overtravel Q'
+                )
+            offsets.add(int(values.pop('S')))
+            s = values.pop('Q') * unit
+            if not s > 0:
+                raise ValueError('the overtravel Q must be positive')
+            search.add(s)
+            start = pos
+            axes = {d.axes.index(a): v * unit for a, v in values.items() if a in d.axes}
+            if macro == '9811' and len(axes) == 1 and 'D' not in values:
+                ((axis, surface),) = axes.items()
+                if axis == 2:
+                    if surface >= pos[2]:
+                        raise ValueError('O9811 Z measures down onto a surface below the probe')
+                    touch(2, surface, -1, s)
+                else:
+                    direction = 1 if surface > pos[axis] else -1
+                    touch(axis, surface - direction * radius, direction, s)
+                calls.append(('9811', axis))
+            elif macro == '9814' and set(values) == {'D'}:
+                reach = values['D'] * unit / 2 - radius
+                for axis, direction in ((0, 1), (0, -1), (1, 1), (1, -1)):
+                    touch(axis, start[axis] + direction * reach, direction, s)
+                calls.append(('9814', None))
+            elif macro == '9812' and len(axes) == 1 and 'D' not in values and 2 not in axes:
+                ((axis, width),) = axes.items()
+                for direction in (1, -1):
+                    touch(axis, start[axis] + direction * (width / 2 - radius), direction, s)
+                calls.append(('9812', axis))
+            elif macro == '9815' and set(axes) == {0, 1} and 'D' not in values:
+                for axis in (1, 0):
+                    direction = 1 if axes[axis] > start[axis] else -1
+                    touch(axis, axes[axis] - direction * radius, direction, s)
+                calls.append(('9815', None))
+            else:
+                raise ValueError(f'G65 P{macro} {text} is not an Inspection Plus call camlib models')
+        feature = cycle['feature']
+        kind = feature['kind']
+        axis = {'x': 0, 'y': 1, 'z': 2}.get(feature.get('axis'))
+        expected = {
+            'surface': [('9811', axis)],
+            'outside_corner': [('9811', 1), ('9811', 0)],
+            'inside_corner': [('9815', None)],
+            'bore': [('9814', None)],
+            'pocket': [('9812', axis)],
+        }.get(kind)
+        if calls != expected:
+            raise ValueError(f'these Inspection Plus calls do not measure a {kind}')
+        if len(offsets) != 1:
+            raise ValueError('one work offset per probing cycle')
+        result = {'kind': 'work_offset', 'number': offsets.pop()}
+        return moves, self._probe_decoded(cycle, search, feeds, result)
+
     def _activate(self, number):
         if self.rpm != 0:
             raise ValueError('stop spindle before selecting tool')
@@ -2116,11 +2728,22 @@ def _is_closed_curve(event):
 
 
 def _cycle_covers(event):
-    """How many following events a canned cycle event covers (None: not a
-    cycle)."""
+    """How many following events a canned cycle or probing cycle event
+    covers (None: not a cycle)."""
     data = _event_data(event)
-    if isinstance(data, dict) and data.get('kind') == 'cycle':
+    if isinstance(data, dict) and data.get('kind') in ('cycle', 'probe'):
         return int(data['covers'])
+    return None
+
+
+def _context(event):
+    """What a decoder may read from the source event: a motion's
+    attribution, or a probing cycle's description (the moves come from the
+    written blocks)."""
+    if event['kind'] == 'motion':
+        return {k: event['motion'][k] for k in ('id', 'operation', 'kind')}
+    if event['kind'] == 'probe':
+        return {'probe': event}
     return None
 
 
@@ -2314,7 +2937,7 @@ class PostEngine:
             block = post._call('on_' + ('motion' if kind == 'motion' else kind), typed)
             if post.machine is not self.machine:
                 raise ValueError('hook changed the machine definition')
-            context = None if kind != 'motion' else {k: event['motion'][k] for k in ('id', 'operation', 'kind')}
+            context = _context(event)
             decoded = decoder.read(block, context)
             if decoder.ended or decoder.tool_pending:
                 raise ValueError('event ended program or left a partial tool transition')
@@ -2401,7 +3024,7 @@ class PostEngine:
             block = post._call('on_' + ('motion' if kind == 'motion' else kind), typed)
             if post.machine is not self.machine:
                 raise ValueError('hook changed the machine definition')
-            context = None if kind != 'motion' else {k: event['motion'][k] for k in ('id', 'operation', 'kind')}
+            context = _context(event)
             decoded = decoder.read(block, context)
             if decoder.ended or decoder.tool_pending:
                 raise ValueError('event ended program or left a partial tool transition')
@@ -2475,6 +3098,7 @@ class PostEngine:
                     HeightControl,
                     SurfaceSpeed,
                     FeedPerRev,
+                    Probe,
                 ),
             )
             else _typed(d)

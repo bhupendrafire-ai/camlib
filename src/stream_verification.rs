@@ -418,12 +418,7 @@ impl Binding {
             || r.motion_id != m.id
             || r.operation != m.operation
             || r.tool != m.tool
-            || r.scope
-                != match m.kind {
-                    crate::motion::MoveKind::Rapid => "rapid_assembly",
-                    crate::motion::MoveKind::Shift => "oriented_shift",
-                    _ => "fed_noncutting",
-                }
+            || r.scope != crate::stock_contact::scope(m.kind)
             || r.findings.len() > options.max_findings
             || r.stats.nodes > options.max_nodes
             || r.stats.cell_reads > options.max_cell_reads
@@ -443,6 +438,7 @@ impl Binding {
                     || f.possible_upper_mm > self.stock.max_mm[2]
                     || f.solid_lower_mm > f.possible_upper_mm
                     || (m.kind != crate::motion::MoveKind::Rapid
+                        && !(m.kind.is_probe() && !m.kind.expects_contact())
                         && f.finding.part == Some(ToolPart::Cutter))
                     || (f.finding.status == Status::Violation
                         && (f.finding.witness.is_none() || f.contact_point_mm.is_none()))

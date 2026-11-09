@@ -287,7 +287,7 @@ fn profile_height(shape: &CutterShape, d: f64) -> f64 {
     }
     match *shape {
         CutterShape::Flat | CutterShape::Beam => 0.,
-        CutterShape::Ball => 2. - (4. - d * d).max(0.).sqrt(),
+        CutterShape::Ball | CutterShape::Probe => 2. - (4. - d * d).max(0.).sqrt(),
         CutterShape::Bull {
             corner_radius_mm: c,
         } => c - (c * c - (d - 2. + c).max(0.).powi(2)).max(0.).sqrt(),

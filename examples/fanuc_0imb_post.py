@@ -20,6 +20,8 @@ def _dialect(
     fine_bore_edge_deg=None,
     rigid_tapping=False,
     rigid_tapping_m29=False,
+    inspection_plus_fast_feed_mm_min=None,
+    inspection_plus_switching=False,
 ):
     if set(m_codes) != _OEM or len(set(m_codes.values())) != len(_OEM):
         raise ValueError('bind distinct OEM tool/spindle/flood/off M functions')
@@ -75,6 +77,11 @@ def _dialect(
         chip_break_lift_mm=chip_break_return_mm,
         oriented_edge_deg=fine_bore_edge_deg,
         compensation_with_move=True,
+        # Renishaw Inspection Plus macros (G65 P98xx, custom macro B), only
+        # where installed: their fast feed #119 and probe switching.
+        probing=None if inspection_plus_fast_feed_mm_min is None else 'inspection_plus',
+        probe_fast_feed_mm_min=inspection_plus_fast_feed_mm_min,
+        probe_switching=inspection_plus_switching,
     )
 
 
@@ -98,6 +105,11 @@ class ReferenceMachine(Machine):
     # Parameter No. 5200#0 (G84) = 0: rigid mode is selected by M29 S in the
     # block before G84/G74 (§13.2.1/13.2.2).
     rigid_tapping_m29: bool = False
+    # Renishaw Inspection Plus installed (H-2000-6031): its fast feed #119
+    # (settings macro O9724), and whether cycles switch the probe on/off
+    # with O9832/O9833. None: no probing.
+    inspection_plus_fast_feed_mm_min: float | None = None
+    inspection_plus_switching: bool = False
     reference: str = 'FANUC 0i-MB;B-63844EN/02 February2003;length-offset-A'
 
     def __post_init__(self):
@@ -142,6 +154,8 @@ class ReferenceMachine(Machine):
                 self.fine_bore_edge_deg,
                 self.rigid_tapping,
                 self.rigid_tapping_m29,
+                self.inspection_plus_fast_feed_mm_min,
+                self.inspection_plus_switching,
             )
             or self.mist
         ):
@@ -177,6 +191,8 @@ def define_machine(
     fine_bore_edge_deg=None,
     rigid_tapping=False,
     rigid_tapping_m29=False,
+    inspection_plus_fast_feed_mm_min=None,
+    inspection_plus_switching=False,
     **settings,
 ):
     """Define the installed machine in ordinary Python; no controller writes.
@@ -191,10 +207,19 @@ def define_machine(
         name,
         tools,
         dialect=_dialect(
-            m_codes, peck_return_mm, chip_break_return_mm, fine_bore_edge_deg, rigid_tapping, rigid_tapping_m29
+            m_codes,
+            peck_return_mm,
+            chip_break_return_mm,
+            fine_bore_edge_deg,
+            rigid_tapping=rigid_tapping,
+            rigid_tapping_m29=rigid_tapping_m29,
+            inspection_plus_fast_feed_mm_min=inspection_plus_fast_feed_mm_min,
+            inspection_plus_switching=inspection_plus_switching,
         ),
         rigid_tapping=rigid_tapping,
         rigid_tapping_m29=rigid_tapping_m29,
+        inspection_plus_fast_feed_mm_min=inspection_plus_fast_feed_mm_min,
+        inspection_plus_switching=inspection_plus_switching,
         planes=('xy',),
         peck_return_mm=peck_return_mm,
         chip_break_return_mm=chip_break_return_mm,

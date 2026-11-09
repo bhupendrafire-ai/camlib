@@ -272,6 +272,18 @@ class RustPostTest(unittest.TestCase):
             post_job(post_job_input(job, "top", machine=moved))
         self.assertIn("ToolChangeTable.from_machine", str(error.exception))
 
+    def test_probing_is_refused_not_posted_as_plain_moves(self):
+        # Probing cycles (#7) are written by the Python posts' declared back
+        # ends; this port of the default post has none yet, so a probing job
+        # is refused with the reason instead of reaching G-code.
+        import test_probing as probing
+
+        j = probing.job(probing.corner())
+        machine = probing.g38(j)
+        with self.assertRaises(ValueError) as error:
+            post_job(post_job_input(j, "top", machine=machine, accept=("unchecked_machine",)))
+        self.assertIn("the Rust post writes no probing cycles", str(error.exception))
+
     @unittest.skipUnless((ROOT / "target/release/cam-post").is_file(), "needs the cam-post build")
     def test_cam_post_command(self):
         ex = example("standalone_job")

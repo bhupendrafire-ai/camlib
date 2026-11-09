@@ -141,6 +141,22 @@ incorrect compensation endpoint, a bare moving G43/G49, or the wrong H entry.
 Subsequent motion/stock checks operate on the unchanged physical tip position.
 The declared ATC route itself is still an external machine premise.
 
+## Probing with Renishaw Inspection Plus
+
+Probing is not a FANUC function: it runs through Renishaw's Inspection Plus
+macros (custom macro B, `G65`), where they are installed. Declare them with
+`define_machine(..., inspection_plus_fast_feed_mm_min=<#119>,
+inspection_plus_switching=<bool>)`: the fast feed #119 from the settings macro
+O9724, and whether each cycle switches the probe on and off with
+`G65 P9832`/`P9833`. Without them, probing cycles are refused. The calls,
+their decoding and their premises are in
+[Postprocessors: Probing](posts.md#probing) (Renishaw H-2000-6031 chapters 5,
+7 and 9): surfaces, outside and inside corners, bores and pockets correcting
+G54..G59 (`S1`..`S6`); bosses, webs and tool setting are refused here.
+Arguments are written with their decimal point (`G65 P9814 D12. S1. Q2.`), as
+the manual's examples are, so no argument depends on the least input
+increment.
+
 ## Local conformance
 
 `python/tests/test_fanuc_0imb_post.py`, its literal `fanuc_0imb_oracle.py`, and
