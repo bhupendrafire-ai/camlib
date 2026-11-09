@@ -335,7 +335,8 @@ is tapped from the R plane (`feed_z_mm`, default the retract height) to
   declare neither refuse tapping.
 - Left-hand taps: `G33.1` under `M4` (LinuxCNC reverses whatever direction
   is running), or `G74 X… Y… Z… R… F…` and `G80` on machines that declare
-  `tap_cycle_left` (the FANUC 0i-MB example with `rigid_tapping=True`).
+  `tap_cycle_left` (the FANUC 0i-MB example with `rigid_tapping=True`, or
+  `rigid_tapping_m29=True`, which writes `M29 S…` before each cycle).
   Machines with neither refuse a left-hand tap. The decoder reads the hand
   back: `G84` needs the spindle clockwise, `G74` counterclockwise, and the
   decoded spindle direction must match the plan.
