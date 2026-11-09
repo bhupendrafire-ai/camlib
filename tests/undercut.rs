@@ -224,6 +224,7 @@ fn height_field_refuses_narrowing_cutters() {
             .unwrap_err();
         assert!(e.contains("tri-dexel"), "{e}");
         let manifest = StreamManifest {
+            initial_stock: None,
             version: 1,
             run: RunIdentity {
                 id: "r".into(),

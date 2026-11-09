@@ -6,6 +6,7 @@ use std::{io::Cursor, sync::atomic::AtomicBool};
 fn manifest() -> StreamManifest {
     StreamManifest {
         tool_change: None,
+        initial_stock: None,
         rapid_retracts: false,
         turning: None,
         version: 1,

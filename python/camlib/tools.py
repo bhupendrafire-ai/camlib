@@ -301,6 +301,37 @@ def LaserHead(id, *, kerf_width, nozzle_diameter=3, nozzle_length=15, body_diame
     return _beam(id, kerf_width, nozzle_diameter, nozzle_length, body_diameter, body_length, name)
 
 
+def ProbeTool(id, *, ball_diameter, stem_diameter, stylus_length, body_diameter, body_length, name=None):
+    """A touch probe as a tool assembly: the stylus ball (``ball_diameter``,
+    the calibrated effective diameter the controller's probe calibration
+    holds), its stem (``stem_diameter``, thinner than the ball) reaching
+    ``stylus_length`` from the ball's bottom (the controlled point) to the
+    probe body, and the body (``body_diameter``) up ``body_length`` to the
+    gauge line. Stylus, stem and body are checked against stock and fixtures
+    on every probing move. A probe never cuts: only the probing operations
+    (ProbeSurface, ProbeBore, ...) use it. Every dimension is the caller's:
+    there are no defaults."""
+    if not 0 < stem_diameter < ball_diameter < stylus_length:
+        raise ValueError("a probe needs 0 < stem_diameter < ball_diameter < stylus_length")
+    if not (body_diameter >= stem_diameter and body_length > 0):
+        raise ValueError("the probe body must be at least as wide as the stem, with a positive length")
+    gauge = stylus_length + body_length
+    cutter = _cutter(
+        id,
+        {"kind": "probe"},
+        diameter=ball_diameter,
+        flute_length=ball_diameter,
+        overall_length=gauge,
+        shank_diameter=stem_diameter,
+        flutes=1,
+        center_cutting=False,
+        material="",
+        name=name,
+    )
+    holder = (HolderSection(stylus_length, gauge, body_diameter / 2, body_diameter / 2),)
+    return ToolAssembly(id, cutter, stylus_length, gauge, holder)
+
+
 def Tap(id, *, drill_diameter, thread_length, overall_length, shank_diameter, flutes=3, material="hss", name=None):
     """Tap modeled by its drill (minor) diameter: a flat, non-center-cutting
     cutter whose cutting length is the thread length. The stock then keeps

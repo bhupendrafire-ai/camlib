@@ -46,6 +46,7 @@ pub enum OperationReport<'a> {
     Flat(&'a FlatReport),
     VCarve(&'a crate::vcarve::VCarveReport),
     ThermalCut(&'a crate::thermal::ThermalCutReport),
+    Probe(&'a crate::probe::ProbeReport),
 }
 pub enum OperationPlan {
     Roughing(Box<RoughingPlan>),
@@ -68,6 +69,7 @@ pub enum OperationPlan {
     Flat(Box<FlatPlan>),
     VCarve(Box<crate::vcarve::VCarvePlan>),
     ThermalCut(Box<crate::thermal::ThermalCutPlan>),
+    Probe(Box<crate::probe::ProbePlan>),
 }
 /// Facing with limits clears the stock rectangle (grown so the tool still runs
 /// past the edges) as a raster pocket restricted by the limits, entering from
@@ -224,6 +226,19 @@ fn hole_limits(op: Operation, tool: &ToolAssembly) -> Result<Operation, String> 
         other => other,
     })
 }
+/// A probe never cuts: only probing operations use it.
+fn probe_only_probes(op: &Operation, tool: &ToolAssembly) -> Result<(), String> {
+    if matches!(tool.cutter.shape, crate::tool::CutterShape::Probe)
+        && !matches!(op, Operation::Probe(_))
+    {
+        return Err(format!(
+            "operation {}: tool {} is a probe, which never cuts; only probing operations use it",
+            op.id(),
+            tool.id
+        ));
+    }
+    Ok(())
+}
 impl OperationPlan {
     pub fn prepare_with_stock(
         op: Operation,
@@ -234,6 +249,7 @@ impl OperationPlan {
         cancel: &impl CancelSignal,
     ) -> Result<Self, String> {
         let op = facing_limits(op, tool, stock.spec())?;
+        probe_only_probes(&op, tool)?;
         match op {
             Operation::Parallel(p) => Ok(Self::Parallel(Box::new(
                 ParallelPlan::prepare_with_stock(p, tool, stock, initial, first_id, cancel)?,
@@ -262,7 +278,11 @@ impl OperationPlan {
         cancel: &impl CancelSignal,
     ) -> Result<Self, String> {
         let op = facing_limits(hole_limits(op, tool)?, tool, stock)?;
+        probe_only_probes(&op, tool)?;
         match op {
+            Operation::Probe(p) => Ok(Self::Probe(Box::new(crate::probe::ProbePlan::prepare(
+                p, tool, stock, initial, first_id, cancel,
+            )?))),
             Operation::Roughing(p) => Ok(Self::Roughing(Box::new(RoughingPlan::prepare(
                 p, tool, stock, initial, first_id, cancel,
             )?))),
@@ -347,6 +367,7 @@ impl OperationPlan {
             Self::Flat(p) => OperationReport::Flat(p.report()),
             Self::VCarve(p) => OperationReport::VCarve(p.report()),
             Self::ThermalCut(p) => OperationReport::ThermalCut(p.report()),
+            Self::Probe(p) => OperationReport::Probe(p.report()),
         }
     }
     pub fn prefix_events(&self) -> Vec<Event> {
@@ -371,6 +392,7 @@ impl OperationPlan {
             Self::Flat(p) => p.prefix_events(),
             Self::VCarve(p) => p.prefix_events(),
             Self::ThermalCut(p) => p.prefix_events(),
+            Self::Probe(p) => p.prefix_events(),
         }
     }
     pub fn suffix_events(&self) -> Vec<Event> {
@@ -395,6 +417,7 @@ impl OperationPlan {
             Self::Flat(p) => p.suffix_events(),
             Self::VCarve(p) => p.suffix_events(),
             Self::ThermalCut(p) => p.suffix_events(),
+            Self::Probe(p) => p.suffix_events(),
         }
     }
     pub fn next_motion_with_stock(
@@ -423,6 +446,7 @@ impl OperationPlan {
             Self::Flat(p) => p.next_motion_with_stock(stock, cancel),
             Self::VCarve(p) => p.next_motion_with_stock(stock, cancel),
             Self::ThermalCut(p) => p.next_motion_with_stock(stock, cancel),
+            Self::Probe(p) => p.next_motion_with_stock(stock, cancel),
         }
     }
     /// Events due after the motion just handed out (e.g. a dwell at the
@@ -433,6 +457,7 @@ impl OperationPlan {
             Self::Reaming(p) => p.take_events(),
             Self::Contour(p) => p.take_events(),
             Self::ThermalCut(p) => p.take_events(),
+            Self::Probe(p) => p.take_events(),
             _ => vec![],
         }
     }
@@ -461,6 +486,7 @@ impl OperationPlan {
             Self::Flat(p) => p.finish_report(cancel),
             Self::VCarve(p) => p.finish_report(cancel),
             Self::ThermalCut(p) => p.finish_report(cancel),
+            Self::Probe(p) => p.finish_report(cancel),
         }
     }
 }

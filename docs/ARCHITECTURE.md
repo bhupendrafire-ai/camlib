@@ -10,6 +10,7 @@ behind the design are in [DECISIONS.md](DECISIONS.md).
 |---|---|---|
 | Rust engine | `src/` (crate `camlib`) | Geometry, toolpath planning, stock, verification, posting checks |
 | Stream process | `src/bin/sim_stream.rs` (`cam-sim-stream`) | Runs a setup and streams binary frames on stdout |
+| Rust post | `src/gcode/`, `src/post_job.rs`, `src/bin/post_job.rs` (`cam-post`) | The default post, its decoder and the export gate without Python (JSON in, JSON out; issue #120) |
 | Python extension | `bindings/python/` (`camlib._native`) | Buffer kernels, posting intent and decoding, region engine, native receivers |
 | Python API | `python/camlib/` | Jobs and setups, operations, tools, machines and posts, runs, playback, export |
 
@@ -19,8 +20,8 @@ while the Rust side does the planning and the checking.
 ## One run, end to end
 
 1. **Declare.** A `camlib.jobs.Job(id, revision, setups)` holds `Setup`s. A
-   setup has stock (`StockSpec` for milling and thermal, `TurnStockSpec` for a
-   lathe), tools, operations in order and a start position. A lathe setup also
+   setup has stock (`StockSpec` for milling and thermal, a box or a closed mesh
+   given with `StockSpec.from_mesh`; `TurnStockSpec` for a lathe), tools, operations in order and a start position. A lathe setup also
    has `turning=TurningSetup(...)` (the part profile, chuck and tolerances).
 2. **Compile.** `Job.compile()` validates the job and turns each setup into a
    manifest (JSON). The job revision binds a digest of the whole content, so any
@@ -61,7 +62,7 @@ CRC-32), then the payload. Kinds (`src/stream.rs`):
 | Kind | Name | Holds |
 |---|---|---|
 | 1 | Chunk | One milling or thermal move and its height-field cell changes |
-| 2 | Checkpoint | The full committed stock and cursor |
+| 2 | Checkpoint | The full committed stock and cursor; a producer's also ends with its material checks' per-move proof states (`CAMPRF01` section, #108) |
 | 3 | Manifest | The canonical manifest (its SHA-256 binds every later frame) |
 | 4 | End | The run finished; final cursor and position |
 | 5 | Preview | A partial move's stock (not committed) |
@@ -84,7 +85,17 @@ can say clear, violation or uncertain honestly.
 - **Height field** (`src/stock.rs`, `Stock`): an XY grid of `HeightBounds`
   (lower: material certainly up to here; upper: no material above here). Used by
   milling and thermal runs. Moves are swept with the full tool assembly
-  (cutter and holder).
+  (cutter and holder). A run starts from the whole box, or from a closed mesh
+  (`src/stock_mesh.rs`, manifest `stock` with a `mesh`; always build a run's
+  starting stock with `RunStockSpec::initial_stock`, since the grid alone is
+  the box). The mesh is converted conservatively: a cell's upper bound is the
+  highest point of the mesh over the cell's open footprint (facets lying only
+  on a cell side belong to the neighbour), and its lower bound is claimed only
+  where no other surface lies between the grid's bottom plane and that height
+  and facets on that plane close the column from below. Undercuts and voids
+  become possible material. `Stock::finished_mesh` returns the closed mesh of
+  each cell's upper bound, without T-junctions, which reads back on the same
+  grid as the same bounds; it is approximate (`HEIGHT_FIELD_APPROXIMATION`).
 - **Turning** (`src/turning/stock.rs`, `TurnStock`): per z bin, bounds of the
   outer radius and of the bore radius, plus rings certainly removed inside the
   material (face grooves). Lathe moves carry their changes computed by the
@@ -148,7 +159,12 @@ whose old value doesn't match its own stock.
   also proves every motion against the target (`src/material/sweep_proof.rs`,
   issues #72 and #106). The tool is eroded by the comparison tolerance less the
   target's declared error. Against a `SurfaceTarget` mesh, the exact section
-  contact of `flat::Index::sections_chord_clear` proves it clear. Against a
+  contact of `flat::Index::sections_chord_clear` proves it clear. A ball or
+  bull-nose end is proven with its real shape (#107): eroded, it is a smaller
+  bull lifted by the erosion, and `flat::Index::bull_chord_bound_clear` bounds
+  its contact (concave along each edge and chord, so no Lipschitz bound is
+  needed at the corner's vertical rim); a corner smaller than the erosion
+  falls back to the enclosing flat end, which is sound but conservative. Against a
   prismatic `Target`, the floor is checked exactly and the walls by the region's
   1-Lipschitz signed clearance on bisected chords; the boundary error and floor
   error are the declared error. A possible
@@ -158,6 +174,20 @@ whose old value doesn't match its own stock.
   stock alone; the record's `sweep_proof`, beside it, gives the proven and
   unproven motions and the decided cells. `export.material_status(report,
   sweep_proof)` is clear when the proof decides every possible-only gouge cell.
+  A cell is decided only when every motion since the raw stock was proven:
+  a producer's checkpoint keeps each proof's state (history flag, proven and
+  unproven counts, and the touched cells, one bit per cell, run-length coded
+  when smaller), under the frame's run identity and checksum, so a stream
+  resumed from it (`StreamProducer::from_checkpoint`, `--resume`, or
+  `restore_checkpoint`) decides the same cells as one that never stopped. A
+  checkpoint without it (a consumer's) resumes with `history_complete: false`,
+  and decides nothing. Work budgets: `max_tile_nodes` and `max_boundary_tests`
+  left unset grow with the grid to an upper bound on the work the check can
+  need (the full tile tree; per cell, the target's hierarchy nodes, facets
+  and edge tests, or per tile the region's segments), capped at the allowed
+  maximums. An incomplete report's `stats.stopped_by` names the budget that
+  stopped it and, when that bound is within the maximum, the value that
+  completes it.
   Lathe runs report
   `turning::ops::material_report` after every operation; there, gouges are
   excluded per move by the planner's exact checks.
@@ -183,7 +213,12 @@ whose old value doesn't match its own stock.
    controller decoder) reads the written blocks back into motion, which is
    compared with the source move within the machine's tolerance. A mismatch
    fails the post. The decoder never trusts the post that produced the output.
-5. Arcs that can't be written exactly at the machine's precision are refused,
+5. Without Python, `src/gcode/` holds a port of the default post and decoder
+   (`GCodePost`, `NativeGCodeDecoder`) driven by the same intent checker, and
+   `src/post_job.rs` the whole `Job.post_nc` run (stock replay, machine model,
+   export gate). Their output must stay byte-identical to the Python default
+   post's (`python/tests/test_rust_post.py`); change both together.
+6. Arcs that can't be written exactly at the machine's precision are refused,
    or become checked segments with `LoweringOptions(native_arcs=True)`.
    `camlib.dynamics.schedule` gives acceleration-aware timing and optional feed
    scheduling.
@@ -205,7 +240,10 @@ whose old value doesn't match its own stock.
   the plan (decoded); finishing chords between samples (certified, not just
   sampled endpoints).
 - **Not proven:** posts have not been run on real machines (issue #20); camlib
-  cannot know the real work offsets, tool lengths or clamps. Display data (stock
+  cannot know the real work offsets, tool lengths or clamps. A probing cycle
+  (`src/probe.rs`) records what it stores on the controller (a work offset, a
+  tool length or radius) as a premise; the program after it is checked with
+  the declared values, not the measured ones. Display data (stock
   meshes, previews) is approximate. "Possible" material bounds include the stock
   grid's and the target mesh's resolution.
 
@@ -256,6 +294,8 @@ whose old value doesn't match its own stock.
 | Certain / possible | Lower and upper bounds of stock or of a check result |
 | Certified chord | A straight move between two samples proven within tolerance of the surface along its whole length |
 | Air cut | A feed move that removes no stock |
+| Protected move | A probe move that stops the machine if the stylus triggers (LinuxCNC G38.3 with a trip check, Renishaw O9810) |
+| Touch zone | The last `search_mm` of a probing measuring move, where the stylus is expected to touch; only there is the ball exempt from contact checks |
 | Rest machining | Cutting only material left by earlier operations, read from the stock |
 | R plane | The retract height of a drilling cycle |
 | Lowering | Rewriting moves a controller can't take exactly (for example arcs) as checked segments |

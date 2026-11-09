@@ -389,6 +389,10 @@ pub(crate) fn motion_identity(m: &crate::motion::Motion) -> String {
         MoveKind::Tap => 6,
         MoveKind::Shift => 7,
         MoveKind::Thread => 8,
+        MoveKind::ProbePosition => 9,
+        MoveKind::ProbeMeasure => 10,
+        MoveKind::ProbeTouch => 11,
+        MoveKind::ProbeReturn => 12,
     }]);
     match m.feed_mm_min {
         Some(f) => {
@@ -811,7 +815,7 @@ pub(crate) fn parts(tool: &PreparedAssembly) -> Result<Vec<Part>, String> {
     let r = c.diameter_mm / 2.;
     let radius = match c.shape {
         CutterShape::Flat | CutterShape::Beam => Radius::Constant(r),
-        CutterShape::Ball => Radius::Ball(r),
+        CutterShape::Ball | CutterShape::Probe => Radius::Ball(r),
         CutterShape::Lollipop => Radius::Sphere(r),
         CutterShape::Dovetail { flank_angle_rad } => Radius::Linear {
             z: 0.,
@@ -955,6 +959,7 @@ fn check_body<C: CancelSignal>(
     let top = if b.role == BodyRole::ProtectedTarget
         && part.kind == ToolPart::Cutter
         && motion.kind != crate::motion::MoveKind::Rapid
+        && !motion.kind.is_probe()
     {
         b.z_max_mm - work.options.target_floor_tolerance_mm.unwrap_or(0.)
     } else {
@@ -1194,7 +1199,13 @@ impl PreparedScene {
         }
         let path = motion.curve.prepare(self.options.tolerance_mm)?;
         let error = path_error(motion, self.options.tolerance_mm);
-        let parts = parts(tool)?;
+        // Where a probing move expects its contact, the stylus (or the
+        // measured cutter) may touch whatever it measures; the other parts
+        // stay checked.
+        let parts = parts(tool)?
+            .into_iter()
+            .filter(|p| p.kind != ToolPart::Cutter || !motion.kind.expects_contact())
+            .collect::<Vec<_>>();
         let mut work = Work {
             stats: Stats::default(),
             options: self.options,

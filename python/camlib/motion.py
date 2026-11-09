@@ -46,7 +46,9 @@ class Motion:
     """Machining role and typed motion; all values are mm, mm/min, radians.
 
     ``kind='rapid'`` always requires whole-assembly stock clearance and removes
-    no stock. A positive feed makes it a feed-controlled line traverse; None
+    no stock. Probing moves (``probe_position``, ``probe_measure``,
+    ``probe_touch``, ``probe_return``) remove no stock either and belong to a
+    :class:`Probe` cycle. A positive feed makes it a feed-controlled line traverse; None
     selects unprogrammed rapid speed. ``kind='shift'`` is a rapid line with the
     spindle stopped at its oriented angle (fine boring, after
     :class:`SpindleOrient`). Other roles require a positive feed.
@@ -213,6 +215,66 @@ class Cycle:
             if data[key] is None:
                 del data[key]
         return data
+
+
+class _FrozenDict(dict):
+    """A mapping that cannot change (copies and pickles as itself)."""
+
+    def _refuse(self, *args, **kwargs):
+        raise TypeError("probe cycle descriptions are immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _refuse
+    __ior__ = _refuse
+
+    def __reduce__(self):
+        return (_FrozenDict, (dict(self),))
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __hash__(self):
+        return hash(tuple(sorted(self.items())))
+
+
+def _frozen(value):
+    """A JSON-like value as nested tuples/mappings that cannot change."""
+    if isinstance(value, dict) or hasattr(value, "items"):
+        return _FrozenDict({k: _frozen(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen(v) for v in value)
+    return value
+
+
+def _plain(value):
+    if hasattr(value, "items"):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
+
+
+@dataclass(frozen=True)
+class Probe:
+    """The next ``covers`` motions are one probing cycle (``camlib.probe``
+    in the engine): protected positioning (``probe_position``), guarded
+    measuring moves split at ``search_mm`` before the expected contact
+    (``probe_measure``, then ``probe_touch``) and the moves back
+    (``probe_return``). ``cycle`` holds the feature, the stored ``result``
+    (a premise for what follows), ``search_mm``, ``retract_z_mm`` and the
+    feeds. A post writes the cycle as the controller's probing blocks; the
+    decoder reads the moves back from them."""
+
+    cycle: object
+    covers: int
+
+    def __post_init__(self):
+        object.__setattr__(self, "cycle", _frozen(dict(self.cycle)))
+
+    def to_dict(self):
+        return {"kind": "probe", "cycle": _plain(self.cycle), "covers": self.covers}
 
 
 @dataclass(frozen=True)

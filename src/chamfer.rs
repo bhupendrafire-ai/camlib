@@ -292,10 +292,17 @@ impl ChamferPlan {
                 ),
                 (
                     spec.max_mm[2] - tip <= cutter.cutting_length_mm - guard,
-                    format!(
+                    crate::reach::ReachRefusal::cutting_length(
+                        &op.id,
+                        &op.tool,
+                        spec.max_mm[2],
+                        tip,
+                        cutter.cutting_length_mm,
+                    )
+                    .error(format_args!(
                         "tool tip Z{tip} is deeper below the stock top than the cutting length {}",
                         cutter.cutting_length_mm
-                    ),
+                    )),
                 ),
                 (
                     op.clearance_z_mm > spec.max_mm[2] + guard && op.clearance_z_mm.abs() <= 1e6,

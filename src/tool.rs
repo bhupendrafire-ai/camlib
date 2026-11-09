@@ -33,6 +33,14 @@ pub enum CutterShape {
     /// through the whole sheet below the nozzle (the tip) wherever it moves
     /// while on; it never cuts above the tip.
     Beam,
+    /// A touch probe: the diameter is the stylus ball's (its calibrated
+    /// effective size), the shank is the stylus stem and the holder sections
+    /// are the probe body. Its controlled point is the bottom of the ball.
+    /// It never cuts: only probing operations use it, and its moves never
+    /// change the stock. The cutting length is the whole ball (the envelope
+    /// is the ball's lower half and a cylinder of its radius above), and
+    /// the stem must be thinner than the ball.
+    Probe,
     /// A lollipop (ball-shank undercut) cutter: a sphere of `diameter_mm` on
     /// a neck. The cutting length is the sphere's height from its tip to
     /// where it meets the neck (between its radius and its diameter).
@@ -142,6 +150,17 @@ impl Cutter {
             }
             Ok((angle / 2.).tan())
         };
+        if self.shape == CutterShape::Probe
+            && (self.neck.is_some()
+                || self.center_cutting
+                || self.shank_diameter_mm >= self.diameter_mm
+                || self.cutting_length_mm != self.diameter_mm)
+        {
+            return Err(format!(
+                "probe {}: the stylus is a ball (cutting length = ball diameter) on a stem (shank) thinner than the ball, with no neck, not center cutting",
+                self.id
+            ));
+        }
         let (tip_height, slope) = match self.shape {
             CutterShape::Flat | CutterShape::Beam => (0., 0.),
             CutterShape::Lollipop => {
@@ -175,7 +194,7 @@ impl Cutter {
                 }
                 (0., slope)
             }
-            CutterShape::Ball => (radius, 0.),
+            CutterShape::Ball | CutterShape::Probe => (radius, 0.),
             CutterShape::Bull { corner_radius_mm } => {
                 if !positive(corner_radius_mm) || corner_radius_mm > radius {
                     return Err(
@@ -226,7 +245,7 @@ impl PreparedCutter {
         }
         Some(match self.definition.shape {
             CutterShape::Flat | CutterShape::Beam | CutterShape::Dovetail { .. } => 0.,
-            CutterShape::Ball | CutterShape::Lollipop => {
+            CutterShape::Ball | CutterShape::Probe | CutterShape::Lollipop => {
                 self.radius
                     - ((self.radius - radius_mm) * (self.radius + radius_mm))
                         .max(0.)
@@ -282,7 +301,9 @@ impl PreparedCutter {
                     | CutterShape::Beam
                     | CutterShape::Lollipop
                     | CutterShape::Dovetail { .. } => self.radius,
-                    CutterShape::Ball => (z_mm * (2. * self.radius - z_mm)).max(0.).sqrt(),
+                    CutterShape::Ball | CutterShape::Probe => {
+                        (z_mm * (2. * self.radius - z_mm)).max(0.).sqrt()
+                    }
                     CutterShape::Bull {
                         corner_radius_mm: c,
                     } => self.radius - c + (z_mm * (2. * c - z_mm)).max(0.).sqrt(),
