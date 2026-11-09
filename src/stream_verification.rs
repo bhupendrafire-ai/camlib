@@ -422,6 +422,13 @@ impl Binding {
                     })
                     || f.contact_point_mm
                         .is_some_and(|p| p[2] <= self.stock.min_mm[2] || p[2] >= f.solid_lower_mm)
+                    || f.obstruction_top_mm
+                        .is_some_and(|z| !(z > self.stock.min_mm[2] && z <= self.stock.max_mm[2]))
+                    || f.lowest_tip_z_mm.is_some_and(|z| !z.is_finite())
+                    || f.max_clear_radius_mm
+                        .is_some_and(|r| !(r.is_finite() && r >= 0.))
+                    || ((f.obstruction_top_mm.is_some() || f.max_clear_radius_mm.is_some())
+                        && f.lowest_tip_z_mm.is_none())
             })
             || (r.status == Status::Clear && (!r.findings.is_empty() || !r.fully_examined))
             || (r.status == Status::Violation

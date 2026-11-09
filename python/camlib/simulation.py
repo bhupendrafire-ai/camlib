@@ -57,6 +57,56 @@ class SimulationError(RuntimeError):
     pass
 
 
+_REACH_MARKER = "camlib-reach-refusal: "
+
+
+@dataclass(frozen=True)
+class ReachRefusal:
+    """Why a tool assembly cannot reach the depth an operation needs.
+
+    ``limit`` is ``"cutting_length"``, ``"neck"``, ``"shank"`` or ``"holder"``
+    (``holder_section`` gives which). Depths are measured down from
+    ``top_z_mm`` (the operation's top for the cutting length, the
+    obstruction's top for a neck, shank or holder section) to ``z_mm``, the
+    lowest tip Z the operation needs: ``depth_needed_mm = top_z_mm - z_mm``.
+    ``depth_available_mm`` is how far below that top the tip can go before the
+    limiting part meets it (the cutting length, or the part's bottom height
+    above the tip)."""
+
+    operation: str
+    tool: str
+    limit: str
+    holder_section: int | None
+    depth_needed_mm: float
+    depth_available_mm: float
+    top_z_mm: float
+    z_mm: float
+
+
+class ReachRefused(SimulationError):
+    """A planning refusal because the tool assembly cannot reach: the
+    message is the engine's, and ``refusal`` holds the typed reason."""
+
+    def __init__(self, message, refusal):
+        super().__init__(message)
+        self.refusal = refusal
+
+
+def _stream_error(diagnostic):
+    """The error for a native stream's diagnostic: ``ReachRefused`` when the
+    engine refused for reach (its marker line is removed from the message),
+    otherwise ``SimulationError``."""
+    at = diagnostic.rfind(_REACH_MARKER)
+    if at < 0:
+        return SimulationError(diagnostic)
+    try:
+        data, _ = json.JSONDecoder().raw_decode(diagnostic, at + len(_REACH_MARKER))
+        refusal = ReachRefusal(**data)
+    except (ValueError, TypeError):
+        return SimulationError(diagnostic)
+    return ReachRefused(diagnostic[:at].rstrip("\n"), refusal)
+
+
 @dataclass(frozen=True)
 class StockSpec:
     min_mm: tuple
@@ -461,6 +511,9 @@ class VerificationUpdate:
                     source="stock",
                     cell_range=finding["cell_range"],
                     contact_point_mm=finding["contact_point_mm"],
+                    obstruction_top_mm=finding.get("obstruction_top_mm"),
+                    lowest_tip_z_mm=finding.get("lowest_tip_z_mm"),
+                    max_clear_radius_mm=finding.get("max_clear_radius_mm"),
                 )
 
 
@@ -1258,7 +1311,7 @@ class Simulation:
             self._process.stdin.write(raw)
             self._process.stdin.flush()
         except (OSError, ValueError) as error:
-            raise SimulationError(self._diagnostic()) from error
+            raise _stream_error(self._diagnostic()) from error
 
     def _diagnostic(self):
         if self.cancelled:
@@ -1288,7 +1341,7 @@ class Simulation:
         if not self._fill(20):
             if len(self._buffer) > self._at:
                 raise ProtocolError("truncated simulation stream")
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         magic, version, kind, length, _ = _HEADER.unpack_from(self._buffer, self._at)
         if magic != b"CAMLSTRM" or version != 1 or kind not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
             raise ProtocolError("unsupported stream header")
@@ -1305,7 +1358,7 @@ class Simulation:
         committed-motion frames already buffered (at least one, reading if
         needed); None when the next frame is another kind."""
         if not self._fill(20):
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         kind = _HEADER.unpack_from(self._buffer, self._at)[2]
         if kind not in (1, 10) and not (kind == 8 and checks and self._last_motion_frame is not None):
             return None
@@ -1609,7 +1662,7 @@ class Simulation:
                 if self._verification is not None:
                     self._verification.finish(self.state.completed)
                 if self._process.wait(timeout=5) != 0:
-                    raise SimulationError(self._diagnostic())
+                    raise _stream_error(self._diagnostic())
                 self._pending, self.end_frame = 0, frame
                 return
             else:
@@ -1633,7 +1686,7 @@ class Simulation:
         if not self.state.finished:
             raise ProtocolError("native simulation did not send explicit finish")
         if self._process.wait(timeout=5) != 0:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         self.end_frame = frame
         if self._verification is not None:
             self._verification.finish(self.state.completed)
@@ -1707,21 +1760,21 @@ class PrefixSession:
 
     def _next(self):
         if self._closed:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         frame = Frame.read(self._process.stdout)
         if frame is None:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         return frame
 
     def _send(self, command):
         if self._closed:
-            raise SimulationError(self._diagnostic())
+            raise _stream_error(self._diagnostic())
         raw = json.dumps(command, allow_nan=False, separators=(",", ":")).encode() + b"\n"
         try:
             self._process.stdin.write(raw)
             self._process.stdin.flush()
         except (OSError, ValueError) as error:
-            raise SimulationError(self._diagnostic()) from error
+            raise _stream_error(self._diagnostic()) from error
 
     def _matching_state(self, state):
         if state.fraction or state.finished or state._digest != self._digest:

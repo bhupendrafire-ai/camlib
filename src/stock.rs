@@ -320,6 +320,18 @@ impl Undercut {
     }
 }
 const REACH: &str = "cutting length cannot span committed stock upper bound at lowest tip; unsupported non-heightfield removal/reach";
+/// Whether every point of the cell centred at `center` lies farther than
+/// `touch` from the move's axis (distance is 1-Lipschitz; `error` covers the
+/// path's numerical error).
+fn beyond(
+    axis: &crate::verification::AxisSpan,
+    center: Option<[f64; 2]>,
+    cell_radius: f64,
+    error: f64,
+    touch: f64,
+) -> bool {
+    center.is_some_and(|p| axis.distance(p) - cell_radius - error > touch)
+}
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct StockVolume {
@@ -1052,6 +1064,15 @@ impl Stock {
                     let reachable =
                         bounds.min[2] + tool.cutter().definition().cutting_length_mm - guard;
                     let mut buried = false;
+                    let whole = crate::verification::AxisSpan::new(motion, &path, [0., 1.]);
+                    let cell_radius = self.step[0].hypot(self.step[1]) / 2.;
+                    let touch = radius.max(
+                        tool.cutter()
+                            .definition()
+                            .neck
+                            .as_ref()
+                            .map_or(0., |n| n.diameter_mm / 2.),
+                    );
                     'reach: for y in rect.y0..=rect.y1 {
                         cancelled(cancel)?;
                         for x in rect.x0..=rect.x1 {
@@ -1066,8 +1087,20 @@ impl Stock {
                             }
                             // Native preview certified any undercut and made
                             // no column for it; match that, never claim one.
+                            // Like native preview, cells beyond the cutter
+                            // and its neck are not judged for reach.
                             let upper = self.cells[y * self.nx + x].upper_mm;
-                            if upper > reachable {
+                            if upper > reachable
+                                && !whole.as_ref().is_some_and(|a| {
+                                    beyond(
+                                        a,
+                                        self.cell_center(y * self.nx + x),
+                                        cell_radius,
+                                        error,
+                                        touch,
+                                    )
+                                })
+                            {
                                 match Undercut::new(tool.cutter().definition(), guard) {
                                     Some(u) if upper <= bounds.min[2] + u.shoulder - guard => {
                                         buried = true
@@ -1225,6 +1258,11 @@ impl Stock {
         }
         let mut reach_cell_visits = 0u64;
         let undercut = Undercut::new(tool.cutter().definition(), guard);
+        // Reach is judged where the cutter can touch: cells provably beyond
+        // its cross-section (and its neck) over the whole move are left to
+        // the assembly checks (issue #129), not to its bounding rectangle.
+        let whole = crate::verification::AxisSpan::new(motion, &prepared, [0., 1.]);
+        let touch = radius.max(undercut.as_ref().map_or(0., |u| u.neck));
         // A straight plunge from above the stock: the cutting part sweeps the
         // whole column down to the tip, so the neck follows it through empty
         // space and nothing is left above the cut (no undercut).
@@ -1253,7 +1291,17 @@ impl Stock {
                         );
                     }
                     let upper = self.cells[j * self.nx + i].upper_mm;
-                    if upper > reachable {
+                    if upper > reachable
+                        && !whole.as_ref().is_some_and(|a| {
+                            beyond(
+                                a,
+                                self.cell_center(j * self.nx + i),
+                                cell_radius,
+                                analytic_error,
+                                touch,
+                            )
+                        })
+                    {
                         // A neck may pass beside material between the cutting
                         // length and the shoulder; decided per cell below.
                         match &undercut {
@@ -1318,6 +1366,10 @@ impl Stock {
                     let distance = axis.distance(p);
                     stats.analytic_path_queries += 1;
                     let mut under = false;
+                    if distance - cell_radius - analytic_error > touch {
+                        // Untouched by the cutter and its neck: unchanged.
+                        continue;
+                    }
                     if buried {
                         let near = (distance - cell_radius - analytic_error).max(0.);
                         let u = undercut.as_ref().expect("buried needs a neck");
@@ -1403,6 +1455,9 @@ impl Stock {
                         };
                         let d = (p[0] - (s.a[0] + t * dx)).hypot(p[1] - (s.a[1] + t * dy));
                         let near = (d - cell_radius - s.error).max(0.);
+                        if near > touch {
+                            continue;
+                        }
                         let tip = s.a[2].min(s.b[2]) - s.error;
                         let under = match (&undercut, buried) {
                             (Some(u), true) => u.classify(

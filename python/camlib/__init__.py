@@ -89,6 +89,8 @@ _EXPORTS = {
             "StockSpec",
             "SweepOptions",
             "SimulationError",
+            "ReachRefusal",
+            "ReachRefused",
             "CamWarning",
             "ToolChangePosition",
             "ToolChangeTable",

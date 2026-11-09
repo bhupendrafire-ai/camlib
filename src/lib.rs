@@ -89,6 +89,7 @@ pub mod post_lowering;
 pub mod post_rounding;
 mod post_scheduling;
 mod profiles;
+pub mod reach;
 pub mod regeneration;
 pub mod requests;
 pub mod resources;
