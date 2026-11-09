@@ -104,7 +104,7 @@ class RustPostTest(unittest.TestCase):
         self.assertIn("T8", rust["program"])
         # tests/rust_post.rs checks the Rust post against this program
         # without Python; it must stay the Python post's.
-        self.assertEqual(rust["program"], (ROOT / "fixtures/posts/rust/standalone-rest.nc").read_text())
+        self.assertEqual(rust["program"], (ROOT / "fixtures/posts/rust/standalone-rest.nc").read_bytes().decode())
 
     @unittest.skipUnless(importlib.util.find_spec("cadquery"), "needs CadQuery")
     def test_cadquery_example(self):
