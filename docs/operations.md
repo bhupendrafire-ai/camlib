@@ -643,6 +643,10 @@ How it is computed:
   along the boundary pass or back along the ring just cut; only otherwise a
   retract.
 
+Cancellation is checked while constructing a level, including subdivision
+inside one facet, path chaining and simplification. A cancelled contour returns
+an error; its partial paths cannot become a successful plan.
+
 Verification, independent of the distance field, in the operation report
 (`geodesic`):
 

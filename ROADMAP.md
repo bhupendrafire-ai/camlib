@@ -36,6 +36,7 @@ is ordered by real dependency, not by size:
 ## Phase 1: Correctness
 
 - [x] #116 Machine crash detection: check the posted program against a declared machine model (safety)
+- [x] #136 Geodesic contour construction: observe cancellation within a level
 
 ## Phase 2: Complete milling
 
