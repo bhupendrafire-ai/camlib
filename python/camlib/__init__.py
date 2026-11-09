@@ -17,6 +17,21 @@ import importlib as _importlib
 import json
 
 _EXPORTS = {
+    **dict.fromkeys(
+        (
+            'PlanningCandidate',
+            'OperationChoices',
+            'ComparisonPolicy',
+            'ComparisonReport',
+            'CorrectionTemplate',
+            'CorrectionReport',
+            'correction_candidate',
+            'correct_residuals',
+            'recipe_candidates',
+            'compare_candidates',
+        ),
+        'planning',
+    ),
     **dict.fromkeys(("Job", "Setup", "OperationNode", "RegenerationCache", "CadSource", "PostedProgram"), "jobs"),
     **dict.fromkeys(
         (
@@ -45,6 +60,7 @@ _EXPORTS = {
             "OffsetClearing",
             "AdaptiveClearing",
             "Trace",
+            "Undercut",
             "TracePath",
             "TraceLine",
             "TraceArc",
@@ -65,6 +81,15 @@ _EXPORTS = {
             "Scallop",
             "Geodesic",
             "steep_and_shallow",
+            "ProbeSurface",
+            "ProbeOutsideCorner",
+            "ProbeInsideCorner",
+            "ProbeBore",
+            "ProbeBoss",
+            "ProbePocket",
+            "ProbeWeb",
+            "ToolSetLength",
+            "ToolSetDiameter",
         ),
         "operations",
     ),
@@ -76,10 +101,15 @@ _EXPORTS = {
             "Drill",
             "ChamferMill",
             "ThreadMill",
+            "TSlotCutter",
+            "KeyseatCutter",
+            "LollipopCutter",
+            "DovetailCutter",
             "BoringBar",
             "Torch",
             "LaserHead",
             "Tap",
+            "ProbeTool",
             "ToolAssembly",
             "HolderSection",
         ),
@@ -89,8 +119,13 @@ _EXPORTS = {
         (
             "Simulation",
             "StockSpec",
+            "InitialStock",
+            "StockMesh",
+            "DexelStockSpec",
             "SweepOptions",
             "SimulationError",
+            "ReachRefusal",
+            "ReachRefused",
             "CamWarning",
             "ToolChangePosition",
             "ToolChangeTable",
@@ -98,6 +133,7 @@ _EXPORTS = {
         "simulation",
     ),
     **dict.fromkeys(("Player", "Cursor", "RecordedRun"), "playback"),
+    "DexelStockState": "dexel_state",
     **dict.fromkeys(("Limits", "AvoidArea"), "limits"),
     **dict.fromkeys(
         ("Machine", "ToolSetting", "LoweringOptions", "GCodeDialect", "GCodePost", "NativeGCodeDecoder", "post_events"),
@@ -139,6 +175,9 @@ _EXPORTS = {
     **dict.fromkeys(("PlanarRegion", "Boundary", "Component"), "planar"),
     "WorkFrame": "motion",
     **dict.fromkeys(("cutting_data", "CuttingData"), "cutting"),
+    **dict.fromkeys(
+        ('EngagementFeedBand', 'EngagementFeedPolicy', 'EngagementScheduledProgram', 'schedule_engagement'), 'cutting'
+    ),
 }
 
 __all__ = ["Engine", *sorted(_EXPORTS)]

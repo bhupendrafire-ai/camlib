@@ -4,15 +4,16 @@ What camlib does, what it checks, and where its responsibility ends.
 
 ## Inputs and outputs
 
-You supply a job: stock, a work frame, tool assemblies and an ordered list of
-operations. Geometry is either authored directly (planar line/arc regions with
+You supply a job: stock (a box, or any solid as a closed triangle mesh), a
+work frame, tool assemblies and an ordered list of operations. Geometry is either authored directly (planar line/arc regions with
 islands, hole centres, triangle-mesh surfaces with a stated error) or extracted
 from CadQuery solids with the optional adapter. A solid alone does not choose
 operations, tools or workholding; you do.
 
 camlib produces typed motion (lines, arcs, helices) with operation and tool
-identity, simulated stock removal streamed alongside it, check results, and
-G-code through a Python postprocessor. It never connects to a machine.
+identity, simulated stock removal streamed alongside it, check results, the
+finished stock as a closed mesh (approximate, containing all remaining
+material), and G-code through a Python postprocessor. It never connects to a machine.
 
 ## Operations
 
@@ -41,7 +42,9 @@ See [Operations](operations.md) for parameters. Summary:
 | Chamfer | Top edges, depth from the chamfer tool's angle and tip; stepped widths, leads |
 | Deburr | Horizontal edges of a finished part (every upward-facing face's boundary) and straight sloped edges (ball-end mill), every convex edge accounted for in the report; chamfer mill (chamfer break) or ball-end/bull-nose mill (arc break sized by leg or by the fillet it stays inside); next to vertical or drafted walls (chamfer mill), tangent fillets reported as already broken; the rest of the part proven untouched (whole tool assembly); unreachable and concave stretches reported |
 | Trace / engrave | Open or closed line/arc paths at depth, no radius offset |
+| Undercut | T-slot, keyseat, lollipop and dovetail cutters along paths at one depth under material, entering and leaving through proven-open columns; tri-dexel stock |
 | Feeds and speeds | `cutting_data`: rpm and feed from surface speed and feed per tooth, chip thinning, ball effective diameter |
+| Probing, tool setting | Surface, outside and inside corner, bore, boss, pocket and web cycles that correct a work offset, and tool length and diameter on a declared tool setter, with a `ProbeTool` (stylus ball, stem, body); protected positioning, measuring moves checked clear until `search_mm` before the expected contact; stock never changed; what is stored recorded as a premise |
 | Plasma and laser cutting | Sheet parts with holes: kerf compensation (computed or G41/G42 wear), arc/line leads from the scrap, overcut or negative overburn, pierce clearance (center pierce in small holes), inner features and nested parts first, small-hole feed and THC off, micro-joints, fixed or programmed pierce/cut heights; every lead, kerf path and pierce proven clear of the parts; sheet simulated cut through |
 | Turning (lathe) | Facing, outside roughing (axial passes, every diameter left at its allowance), finishing, external, internal and face grooving, parting off, external and internal single-point threading, drilling on the axis (pecks), inside roughing and finishing (boring bars) of a turned profile and bore with insert/holder/bar geometry; every move checked against the part, its bore, the stock and the chuck; axisymmetric stock with outer and inner bounds; constant surface speed (G96 with its G50/D limit) and feed per revolution (G95/G99); G18 output, radius or diameter X, T0101 words; a lathe setup is an ordinary `Setup` streamed like every run (per-move stock, playback with partial moves, cancellation, posted replay on the stock) with a material check (leftover material against the part) after each operation |
 
@@ -92,6 +95,26 @@ removal well and reports removed and remaining volume as bounds. It cannot
 represent overhangs or enclosed voids. Cell size is independent of machining
 tolerance. Display meshes are approximations, never evidence.
 
+Stock given as a mesh (`StockSpec.from_mesh`) is converted conservatively:
+each cell's upper bound is the highest point of the mesh over it, and material
+is certain only where the column is solid from the box's bottom up, so an
+undercut or void counts as possible material. A box given as a mesh is the
+same stock as the box. `StockState.stock_mesh()` returns the stock as a closed
+mesh of each cell's upper bound; it contains all the material that may remain
+and says that it is approximate.
+
+Milling setups can use tri-dexel stock instead (`DexelStockSpec`): three grids
+of rays along X, Y and Z, each holding its possible and certain material as
+intervals. It represents undercuts (a T-slot under a slot, material below
+empty space) and resolves walls along the rays across them. The tool axis is
++Z (three-axis milling); the kernel also sweeps along the other stock axes
+for indexed machining once orientations can be declared (#2, #5). Planners
+and height-field checks read the run's height view (a valid height-field
+bound of the same material), so three-axis jobs plan the same toolpaths on
+either stock; the rays decide stock contact the height view leaves
+uncertain. Tri-dexel runs take no regeneration cache. Memory and time
+against the height field are in [Tri-dexel benchmarks](benchmarks-dexel.md).
+
 Configured checks examine every line/arc/helix continuously (not just its
 endpoints) against:
 
@@ -110,7 +133,9 @@ Also available:
   tangent to are decided when `Options(comparison_tolerance_mm=...)` exceeds
   the mesh's surface error and the program's resolution (for example 0.005 mm
   at 3 decimals); the material record's `sweep_proof` says which motions were
-  proven and which cells they decide.
+  proven and which cells they decide. A stream resumed from its producer's
+  checkpoint keeps that proof. The check's work budgets grow with the stock
+  grid unless set; an incomplete check names the budget that stopped it.
 - **Machine dynamics** (`MachineLimits`, `Machine.max_normal_accel_mm_s2`,
   `max_axis_feed_mm_min`): curve feeds that need more acceleration or axis
   speed than declared are reported; with a `MotionPolicy` the program can be
@@ -156,7 +181,10 @@ different quantities; setting one does not replace another.
 
 ## Posting
 
-Machines and posts are Python. The engine handles units, modal state, work
+Machines and posts are Python; the default post and declared dialects also
+run in Rust, without Python, with byte-identical output
+([Posting without Python](posts.md#posting-without-python-rust-webassembly)).
+The engine handles units, modal state, work
 frames, work and length offsets, tools, spindle/coolant, controller curve
 capabilities and optional curve-to-line conversion, then independently decodes
 the emitted text. Output precision defaults to 3 decimals (mm). See
@@ -173,6 +201,7 @@ controller parameters, real offsets) is outside what camlib can check.
 | Lathe spindle and feed modes | G96 S (with G50 S or D limit) / G97, G95 or G99 F per revolution / G94 or G98, decoded back; per-move feed bounds checked |
 | Cutter compensation | G41/G42 with the tool's D register (wear), G40: on their own line (LinuxCNC, Centroid) or in the lead move's block (FANUC, Haas) |
 | Oriented spindle stop | M19 (declared per machine) for fine boring |
+| Probing | LinuxCNC `G38.3` (protected, with a trip check) and `G38.2` with `#5061`-`#5063` into `G10 L2`/`L10`/`L1`; or Renishaw Inspection Plus `G65 P9810`/`P9811`/`P9812`/`P9814`/`P9815` (FANUC); decoded back into moves and checked |
 | Beam on/off, power | Plasma `M3 S1`/`M5`, laser `M4 S<power>` (GRBL laser mode) or `M3 S`, from the declared S at full power |
 | Torch height control | Declared on/off codes (e.g. `M63 P2`/`M62 P2`) |
 | Tool changes | Table poses, preserved tip, or Z home |
@@ -198,6 +227,8 @@ decoded G-code.
 
 - Planar regions from faces (`export_floor_region`), surface meshes from
   solids with a stated error (`export_surface_mesh`), `Roughing.from_solid`.
+- `export_stock_mesh(solid)`: a planar-faced solid (blank, casting envelope) as
+  a `StockMesh` for `StockSpec.from_mesh`.
 - `flow_paths(face, ...)`: a face's parameter lines as XY passes for flow
   finishing.
 - `turning_section(solid)`: the turned profile and bore of a solid of

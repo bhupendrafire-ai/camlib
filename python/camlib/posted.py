@@ -33,7 +33,21 @@ def _sha(raw):
     return hashlib.sha256(raw).digest()
 
 
-_KINDS = ('rapid', 'cut', 'plunge', 'lead', 'link', 'retract', 'tap', 'shift', 'thread')
+_KINDS = (
+    'rapid',
+    'cut',
+    'plunge',
+    'lead',
+    'link',
+    'retract',
+    'tap',
+    'shift',
+    'thread',
+    'probe_position',
+    'probe_measure',
+    'probe_touch',
+    'probe_return',
+)
 _CURVES = ('line', 'arc', 'helix')
 _PLANES = ('xy', 'xz', 'yz')
 
@@ -796,7 +810,7 @@ class PostedRun(RecordedRun):
             frame = self.read_chunk(index)
             d = _Decoder(frame.payload)
             if (
-                frame.kind not in (1, 10)
+                frame.kind not in (1, 10, 11)
                 or (d.string(128), d.string(512), d.take(32).tobytes()) != self._stock_identity
                 or d.unpack('<3Q') != (index, index, index + 1)
                 or _motion_digest(d.motion()) != digest
@@ -857,16 +871,12 @@ class PostedRun(RecordedRun):
         except ValueError as error:
             return json.loads(session.incomplete(str(error)))
 
-    def export(self, path=None, *, accept=(), timeout=300):
-        """Write the finished program to ``path`` (atomically) once its checks
-        allow it: every violation or uncertain result, from the motion checks
-        and from material (a definite gouge is a violation; a possible gouge
-        or an incomplete analysis is uncertain), must be accepted by kind in
-        ``accept``, or ``camlib.export.ExportRefused`` is raised and nothing
-        is written. Returns the findings, accepted kinds and unchecked checks.
-        """
-        from pathlib import Path
+    def check_release(self, *, accept=(), timeout=300):
+        """Run the export gate without collecting text or writing an NC file.
 
+        Uses the exact export checks, including actual decoded stock/machine
+        replay. Acceptance stays explicit and is retained in the report.
+        """
         from .export import accepted, gate, material_status, unchecked
 
         kinds = accepted(accept)
@@ -913,6 +923,25 @@ class PostedRun(RecordedRun):
         # Missing-model acceptance has its own explicit machine report and
         # unchecked entry; keep geometric findings focused on checked results.
         findings = [f for f in findings if f["status"] != "unchecked_machine"]
+        return dict(
+            motions=self.posting_status()["checked_motions"],
+            machine=machine,
+            findings=tuple(findings),
+            accepted=tuple(sorted(kinds & released_statuses)),
+            unchecked=unchecked(self._verification_config(), turning=self._config.get('turning') is not None)
+            + (("machine",) if machine["status"] == "unchecked_machine" else ()),
+            material=material,
+        )
+
+    def export(self, path=None, *, accept=(), timeout=300):
+        """Release NC only after the shared release gate has passed.
+
+        A path is replaced atomically. With no path, return the checked text.
+        Explicit acceptance and unchecked coverage are retained in the result.
+        """
+        from pathlib import Path
+
+        report = self.check_release(accept=accept, timeout=timeout)
         text = None
         if path is None:
             number = 1
@@ -947,14 +976,8 @@ class PostedRun(RecordedRun):
         return dict(
             path=str(target) if target is not None else None,
             text=text,
-            motions=self.posting_status()["checked_motions"],
-            machine=machine,
             lines=number - 1,
-            findings=tuple(findings),
-            accepted=tuple(sorted(kinds & released_statuses)),
-            unchecked=unchecked(self._verification_config(), turning=self._config.get('turning') is not None)
-            + (("machine",) if machine["status"] == "unchecked_machine" else ()),
-            material=material,
+            **report,
         )
 
     def nc_lines(self, start=1, *, limit=32):

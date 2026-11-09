@@ -17,10 +17,122 @@ Results go straight into an operation's ``spindle_rpm`` and ``feed_mm_min``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import asdict, dataclass, replace
+import json
 import math
 
 from .tools import Cutter, ToolAssembly
+
+
+@dataclass(frozen=True)
+class EngagementFeedBand:
+    at_least_angle_deg: float
+    max_feed_mm_min: float
+
+
+@dataclass(frozen=True)
+class ToolLoadLimit:
+    tool: str
+    max_axial_mm: float
+    max_radial_mm: float
+    max_cut_feed_mm_min: float
+
+
+@dataclass(frozen=True)
+class EngagementFeedPolicy:
+    """Caller-declared feed/load caps; unresolved is 'refuse' or 'preserve'.
+
+    Options, when supplied, are the native EngagementOptions numerical/work
+    budgets. Optional air increases require a whole-sweep original-stock miss;
+    tool_limits enables conservative general-shape load bounds. No cutting-data
+    defaults or chip-thinning guarantee.
+    """
+
+    bands: tuple
+    unresolved: str
+    options: dict | None = None
+    air_feed_mm_min: float | None = None
+    tool_limits: tuple = ()
+
+    def __post_init__(self):
+        if not isinstance(self.bands, (list, tuple)) or not all(isinstance(b, EngagementFeedBand) for b in self.bands):
+            raise TypeError('feed bands must be a finite collection of EngagementFeedBand values')
+        object.__setattr__(self, 'bands', tuple(self.bands))
+        if not isinstance(self.tool_limits, (list, tuple)) or not all(
+            isinstance(limit, ToolLoadLimit) for limit in self.tool_limits
+        ):
+            raise TypeError('tool_limits must be a finite collection of ToolLoadLimit values')
+        object.__setattr__(self, 'tool_limits', tuple(self.tool_limits))
+
+    def to_dict(self):
+        value = asdict(self)
+        if value['options'] is None:
+            value.pop('options')
+        return value
+
+
+@dataclass(frozen=True)
+class EngagementScheduledProgram:
+    program: object
+    report: dict
+
+
+def schedule_engagement(program, stock, *, policy, initial_stock=None, sweep=None, cancel=None):
+    """Observe committed-stock engagement and apply explicitly declared caps.
+
+    Horizontal flat-cutter cuts retain legacy behavior; tool_limits enables
+    general-shape bounds and air_feed_mm_min permits only certified air changes.
+    Other cut shapes/motions follow
+    the explicit unresolved policy; tapping and canned-cycle motions retain
+    their synchronized/authored feeds. This is offline, does not mutate the
+    input, and returns a new revision bound to stock/policy/input identity.
+    Follow with Machine.schedule and ordinary checked posted replay/export.
+    """
+    from ._buffers import native
+    from .motion import Motion, Program
+    from .simulation import SweepOptions
+
+    if not isinstance(program, Program) or not isinstance(policy, EngagementFeedPolicy):
+        raise TypeError('supply a typed Program and EngagementFeedPolicy')
+    snapshot = deepcopy(program)
+    stock_data = stock.to_dict() if hasattr(stock, 'to_dict') else stock
+    initial = initial_stock.to_dict() if hasattr(initial_stock, 'to_dict') else initial_stock
+    sweep_data = asdict(sweep or SweepOptions()) if not isinstance(sweep, dict) else sweep
+    report = json.loads(
+        native.schedule_engagement(
+            json.dumps(snapshot.to_dict(), allow_nan=False),
+            json.dumps((stock_data, initial, sweep_data), allow_nan=False),
+            json.dumps(policy.to_dict(), allow_nan=False),
+            cancel,
+        )
+    )
+    events = list(snapshot.events)
+    for row in report['observations']:
+        index = row['event_index']
+        event = events[index]
+        if (
+            not isinstance(event, Motion)
+            or event.id != row['motion_id']
+            or event.feed_mm_min != row['original_feed_mm_min']
+        ):
+            raise RuntimeError('engagement report/source event identity mismatch')
+        feed = row['requested_feed_mm_min']
+        if feed is not None and (
+            feed <= 0
+            or (
+                feed > event.feed_mm_min
+                and (
+                    row['status'] != 'proven_air'
+                    or not row['outside_original_stock']
+                    or policy.air_feed_mm_min is None
+                    or feed > policy.air_feed_mm_min
+                )
+            )
+        ):
+            raise RuntimeError('engagement feed increase lacks declared whole-sweep air proof')
+        events[index] = replace(event, feed_mm_min=feed)
+    return EngagementScheduledProgram(replace(snapshot, revision=report['revision'], events=tuple(events)), report)
 
 
 @dataclass(frozen=True)

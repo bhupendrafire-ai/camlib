@@ -42,8 +42,19 @@ pub struct Target {
 pub struct Options {
     pub geometry_tolerance_mm: f64,
     pub comparison_tolerance_mm: f64,
-    pub max_tile_nodes: u64,
-    pub max_boundary_tests: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub residual_tolerance_mm: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gouge_tolerance_mm: Option<f64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub scope_to_region: bool,
+    /// Work budgets. Unset, each grows with the stock grid to the work the
+    /// check can need there (`Budgets`), up to its allowed maximum; an
+    /// incomplete report names the budget that stopped it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tile_nodes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_boundary_tests: Option<u64>,
     pub max_classified_cells: usize,
     pub max_findings: usize,
 }
@@ -52,21 +63,40 @@ impl Default for Options {
         Self {
             geometry_tolerance_mm: 1e-5,
             comparison_tolerance_mm: 0.001,
-            max_tile_nodes: 1_000_000,
-            max_boundary_tests: 50_000_000,
+            residual_tolerance_mm: None,
+            gouge_tolerance_mm: None,
+            scope_to_region: false,
+            max_tile_nodes: None,
+            max_boundary_tests: None,
             max_classified_cells: u32::MAX as usize,
             max_findings: 1024,
         }
     }
 }
 impl Options {
+    pub fn residual_tolerance(self) -> f64 {
+        self.residual_tolerance_mm
+            .unwrap_or(self.comparison_tolerance_mm)
+    }
+    pub fn gouge_tolerance(self) -> f64 {
+        self.gouge_tolerance_mm
+            .unwrap_or(self.comparison_tolerance_mm)
+    }
     pub(crate) fn validate(self) -> Result<(), String> {
         if !self.geometry_tolerance_mm.is_finite()
             || !(1e-7..=0.01).contains(&self.geometry_tolerance_mm)
             || !self.comparison_tolerance_mm.is_finite()
             || !(1e-7..=1.).contains(&self.comparison_tolerance_mm)
-            || !(1..=10_000_000).contains(&self.max_tile_nodes)
-            || !(1..=1_000_000_000).contains(&self.max_boundary_tests)
+            || [self.residual_tolerance_mm, self.gouge_tolerance_mm]
+                .into_iter()
+                .flatten()
+                .any(|v| !v.is_finite() || !(0. ..=1.).contains(&v))
+            || self
+                .max_tile_nodes
+                .is_some_and(|n| !(1..=MAX_TILE_NODES).contains(&n))
+            || self
+                .max_boundary_tests
+                .is_some_and(|n| !(1..=MAX_BOUNDARY_TESTS).contains(&n))
             || !(1..=u32::MAX as usize).contains(&self.max_classified_cells)
             || !(1..=4096).contains(&self.max_findings)
         {
@@ -75,6 +105,122 @@ impl Options {
         Ok(())
     }
 }
+/// The largest allowed `max_tile_nodes`.
+pub const MAX_TILE_NODES: u64 = 10_000_000;
+/// The largest allowed `max_boundary_tests`.
+pub const MAX_BOUNDARY_TESTS: u64 = 1_000_000_000;
+
+/// The nodes of the check's tile tree over an `nx` x `ny` grid when every
+/// tile above a cell splits (the most the traversal visits: a surface
+/// target visits all of them, a prismatic one stops at uniform tiles).
+/// Each split halves a side (`w / 2` and `w - w / 2`), so there are few
+/// distinct tile sizes. Saturating.
+pub fn tile_tree_nodes(nx: usize, ny: usize) -> u64 {
+    fn count(w: usize, h: usize, memo: &mut std::collections::HashMap<(usize, usize), u64>) -> u64 {
+        if w <= 1 && h <= 1 {
+            return 1;
+        }
+        if let Some(&n) = memo.get(&(w, h)) {
+            return n;
+        }
+        let halves = |n: usize| {
+            if n > 1 {
+                vec![n / 2, n - n / 2]
+            } else {
+                vec![n]
+            }
+        };
+        let mut total = 1u64;
+        for &a in &halves(h) {
+            for &b in &halves(w) {
+                total = total.saturating_add(count(b, a, memo));
+            }
+        }
+        memo.insert((w, h), total);
+        total
+    }
+    count(nx, ny, &mut std::collections::HashMap::new())
+}
+
+/// The work budgets one check runs with: the options' values, or, unset,
+/// an upper bound on the work the check can need over this grid and
+/// target, capped at the allowed maximum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Budgets {
+    tile_nodes: u64,
+    boundary_tests: u64,
+    /// Upper bounds on the work this grid and target can need.
+    tile_nodes_needed: u64,
+    boundary_tests_needed: u64,
+}
+impl Budgets {
+    fn new(options: Options, target: &impl MaterialGeometry, nx: usize, ny: usize) -> Self {
+        let tile_nodes_needed = tile_tree_nodes(nx, ny);
+        let boundary_tests_needed =
+            target.boundary_tests_needed((nx * ny) as u64, tile_nodes_needed);
+        Self {
+            tile_nodes: options
+                .max_tile_nodes
+                .unwrap_or(tile_nodes_needed.clamp(1, MAX_TILE_NODES)),
+            boundary_tests: options
+                .max_boundary_tests
+                .unwrap_or(boundary_tests_needed.clamp(1, MAX_BOUNDARY_TESTS)),
+            tile_nodes_needed,
+            boundary_tests_needed,
+        }
+    }
+    fn stop(&self, budget: &'static str, cells: usize, options: Options) -> BudgetStop {
+        let (limit, needed, maximum) = match budget {
+            "max_tile_nodes" => (self.tile_nodes, self.tile_nodes_needed, MAX_TILE_NODES),
+            "max_boundary_tests" => (
+                self.boundary_tests,
+                self.boundary_tests_needed,
+                MAX_BOUNDARY_TESTS,
+            ),
+            _ => (
+                options.max_classified_cells as u64,
+                cells as u64,
+                u32::MAX as u64,
+            ),
+        };
+        let completes_at = (needed <= maximum).then_some(needed.max(1));
+        let message = match completes_at {
+            Some(v) => format!(
+                "the material check stopped at {budget} = {limit}; {budget} = {v} completes it (the most work this stock grid and target can need)"
+            ),
+            None if limit < maximum => format!(
+                "the material check stopped at {budget} = {limit}; raise {budget} (allowed up to {maximum}), or use a coarser stock cell: no bound on the work within the allowed maximum is known for this grid and target"
+            ),
+            None => format!(
+                "the material check stopped at {budget} = {limit}, its allowed maximum: use a coarser stock cell or a lighter target"
+            ),
+        };
+        BudgetStop {
+            budget: budget.into(),
+            limit,
+            completes_at,
+            allowed_maximum: maximum,
+            message,
+        }
+    }
+}
+
+/// The work budget that stopped an incomplete material check (#108).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetStop {
+    /// The option: `max_tile_nodes`, `max_boundary_tests` or
+    /// `max_classified_cells`.
+    pub budget: String,
+    /// The value the check ran with.
+    pub limit: u64,
+    /// A value that completes the check (an upper bound on the work this
+    /// grid and target can need), when one lies within the allowed maximum.
+    pub completes_at: Option<u64>,
+    pub allowed_maximum: u64,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunBinding {
@@ -144,6 +290,15 @@ pub struct Stats {
     pub max_stack_nodes: usize,
     pub work_exhausted: bool,
     pub findings_truncated: bool,
+    /// The work budgets the check ran with (the options' values, or grown
+    /// with the grid when unset).
+    #[serde(default)]
+    pub max_tile_nodes: u64,
+    #[serde(default)]
+    pub max_boundary_tests: u64,
+    /// The budget that stopped the check, when work was exhausted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_by: Option<BudgetStop>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
@@ -154,6 +309,12 @@ pub struct Report {
     pub stock_sha256: String,
     pub context: Context,
     pub comparison_tolerance_mm: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residual_tolerance_mm: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gouge_tolerance_mm: Option<f64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub scope_to_region: bool,
     pub complete: bool,
     pub residual: Summary,
     pub gouge: Summary,
@@ -341,6 +502,9 @@ impl PreparedTarget {
 }
 
 trait MaterialGeometry {
+    fn local_scope(&self) -> bool {
+        false
+    }
     fn finishing_target(&self) -> Option<&PreparedSurfaceTarget> {
         None
     }
@@ -354,18 +518,27 @@ trait MaterialGeometry {
     fn digest(&self) -> &str;
     fn algorithm(&self) -> &'static str;
     fn policy(&self) -> &'static str;
+    /// An upper bound on the boundary tests a whole check charges over
+    /// `cells` cells and `tiles` tile nodes (saturating).
+    fn boundary_tests_needed(&self, cells: u64, tiles: u64) -> u64;
+    /// `None` when the boundary-test budget `limit` is exhausted.
+    #[allow(clippy::too_many_arguments)]
     fn bounds(
         &self,
         xy: [f64; 4],
         leaf: bool,
         spec: &StockSpec,
         arithmetic: f64,
+        limit: u64,
         stats: &mut Stats,
         cancel: &impl CancelSignal,
     ) -> Result<Option<(FootprintClass, [f64; 2])>, String>;
 }
 
 impl MaterialGeometry for PreparedTarget {
+    fn local_scope(&self) -> bool {
+        self.options.scope_to_region
+    }
     fn options(&self) -> Options {
         self.options
     }
@@ -387,16 +560,21 @@ impl MaterialGeometry for PreparedTarget {
     fn policy(&self) -> &'static str {
         "Whole-cell stock premise; independent prismatic target footprint enclosures with source/error guards and compensated volume sums. Binary64 engineering bounds, not certified stock provenance or continuous tool-contact verification."
     }
+    /// Every tile node charges the region's segments once.
+    fn boundary_tests_needed(&self, _cells: u64, tiles: u64) -> u64 {
+        tiles.saturating_mul(self.segments)
+    }
     fn bounds(
         &self,
         xy: [f64; 4],
         _leaf: bool,
         spec: &StockSpec,
         arithmetic: f64,
+        limit: u64,
         stats: &mut Stats,
         _cancel: &impl CancelSignal,
     ) -> Result<Option<(FootprintClass, [f64; 2])>, String> {
-        if stats.estimated_boundary_tests + self.segments > self.options.max_boundary_tests {
+        if stats.estimated_boundary_tests + self.segments > limit {
             return Ok(None);
         }
         stats.estimated_boundary_tests += self.segments;
@@ -428,6 +606,7 @@ impl MaterialGeometry for PreparedTarget {
             match class {
                 FootprintClass::Inside => inside,
                 FootprintClass::Outside => [spec.max_mm[2]; 2],
+                FootprintClass::Mixed if self.options.scope_to_region => inside,
                 FootprintClass::Mixed => [inside[0], spec.max_mm[2]],
             },
         )))
@@ -446,6 +625,7 @@ fn check_material(
     let spec = &context.stock;
     let (nx, ny, step) = spec.grid()?;
     let cells = nx * ny;
+    let budgets = Budgets::new(options, target, nx, ny);
     if heights.scalar_len() != cells * 2
         || !context.fraction.is_finite()
         || !(0.0..=1.).contains(&context.fraction)
@@ -497,6 +677,8 @@ fn check_material(
     let stock_sha256 = format!("{:x}", hash.finalize());
     let mut stats = Stats {
         validated_cells: cells,
+        max_tile_nodes: budgets.tile_nodes,
+        max_boundary_tests: budgets.boundary_tests,
         ..Stats::default()
     };
     let mut findings = Vec::new();
@@ -518,10 +700,12 @@ fn check_material(
     'tiles: while let Some([x0, y0, x1, y1]) = stack.pop() {
         cancelled(cancel)?;
         stats.max_stack_nodes = stats.max_stack_nodes.max(stack.len() + 1);
-        if stats.tile_nodes == options.max_tile_nodes
-            || stats.classified_cells == options.max_classified_cells
-        {
-            stats.work_exhausted = true;
+        if stats.tile_nodes == budgets.tile_nodes {
+            stats.stopped_by = Some(budgets.stop("max_tile_nodes", cells, options));
+            break;
+        }
+        if stats.classified_cells == options.max_classified_cells {
+            stats.stopped_by = Some(budgets.stop("max_classified_cells", cells, options));
             break;
         }
         stats.tile_nodes += 1;
@@ -536,13 +720,29 @@ fn check_material(
             x1 - x0 == 1 && y1 - y0 == 1,
             spec,
             arithmetic,
+            budgets.boundary_tests,
             &mut stats,
             cancel,
         )?
         else {
-            stats.work_exhausted = true;
+            stats.stopped_by = Some(budgets.stop("max_boundary_tests", cells, options));
             break;
         };
+        if target.local_scope() && class == FootprintClass::Outside {
+            // Examined, with no local material claim outside the declared region.
+            // Never skip mixed boundary cells.
+            let count = (x1 - x0) * (y1 - y0);
+            if count
+                > options
+                    .max_classified_cells
+                    .saturating_sub(stats.classified_cells)
+            {
+                stats.stopped_by = Some(budgets.stop("max_classified_cells", cells, options));
+                break;
+            }
+            stats.classified_cells += count;
+            continue;
+        }
         if class == FootprintClass::Mixed && (x1 - x0 > 1 || y1 - y0 > 1) {
             let xm = x0 + (x1 - x0) / 2;
             let ym = y0 + (y1 - y0) / 2;
@@ -573,7 +773,7 @@ fn check_material(
                     cancelled(cancel)?;
                 }
                 if stats.classified_cells == options.max_classified_cells {
-                    stats.work_exhausted = true;
+                    stats.stopped_by = Some(budgets.stop("max_classified_cells", cells, options));
                     break 'tiles;
                 }
                 let i = y * nx + x;
@@ -587,16 +787,25 @@ fn check_material(
                     ];
                     scope.add(i, cell_xy, actual, desired, cancel)?;
                 }
-                let r = [
+                let mut r = [
                     (actual[0] - desired[1] - arithmetic).max(0.),
                     (actual[1] - desired[0] + arithmetic).max(0.),
                 ];
-                let g = [
+                let mut g = [
                     (desired[0] - actual[1] - arithmetic).max(0.),
                     (desired[1] - actual[0] + arithmetic).max(0.),
                 ];
-                let rc = residual.add(r, area, options.comparison_tolerance_mm);
-                let gc = gouge.add(g, area, options.comparison_tolerance_mm);
+                if target.local_scope() && class == FootprintClass::Mixed {
+                    // A mixed cell may only touch the scope's error guard.
+                    // Without a certified positive overlap area, no excess
+                    // volume or definite excess is established in the scope.
+                    // Keep the full-cell upper enclosure for every possible
+                    // overlap instead of counting the whole cell as inside.
+                    r[0] = 0.;
+                    g[0] = 0.;
+                }
+                let rc = residual.add(r, area, options.residual_tolerance());
+                let gc = gouge.add(g, area, options.gouge_tolerance());
                 // The report stays the cell comparison (reproducible from
                 // the stock alone); the per-move proof counts, beside it,
                 // the possible-only gouge cells it rules out (no swept
@@ -634,6 +843,7 @@ fn check_material(
             }
         }
     }
+    stats.work_exhausted = stats.stopped_by.is_some();
     stats.unexamined_cells = cells - stats.classified_cells;
     let unknown = (spec.max_mm[2] - spec.min_mm[2])
         * area
@@ -648,6 +858,9 @@ fn check_material(
         stock_sha256,
         context: context.clone(),
         comparison_tolerance_mm: options.comparison_tolerance_mm,
+        residual_tolerance_mm: options.residual_tolerance_mm,
+        gouge_tolerance_mm: options.gouge_tolerance_mm,
+        scope_to_region: options.scope_to_region,
         complete: stats.unexamined_cells == 0 && finishing.as_ref().is_none_or(|f| f.complete),
         residual: residual.finish(stats.unexamined_cells, unknown),
         gouge: gouge.finish(stats.unexamined_cells, unknown),

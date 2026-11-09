@@ -1,0 +1,216 @@
+{
+ "label": "macos-m-series",
+ "machine": {
+  "system": "Darwin",
+  "machine": "arm64",
+  "python": "3.12.14",
+  "note": "load averages 281.61 348.73 402.24 at start: other build jobs ran on this machine, so absolute times are inflated; each height/dexel pair ran back to back under the same conditions"
+ },
+ "repeat": 3,
+ "workloads": {
+  "pocket": {
+   "height": {
+    "run_seconds": 0.0766,
+    "repeats": 3,
+    "moves": 352,
+    "toolpath_sha256": "9d8d4540fb2b21d7c6fb19edf67e145ae40dad75b9dc5297b2f792c57e1f2edd",
+    "remaining_mm3": [
+     86801.909,
+     87306.251
+    ],
+    "peak_rss_kib": {
+     "python": 38416.0,
+     "native": 8400.0
+    }
+   },
+   "dexel": {
+    "run_seconds": 3.0068,
+    "repeats": 3,
+    "moves": 352,
+    "toolpath_sha256": "9d8d4540fb2b21d7c6fb19edf67e145ae40dad75b9dc5297b2f792c57e1f2edd",
+    "remaining_mm3": [
+     87005.429,
+     87306.251
+    ],
+    "peak_rss_kib": {
+     "python": 63040.0,
+     "native": 29232.0
+    }
+   },
+   "same_toolpath": true,
+   "volume_bounds_overlap": true,
+   "time_ratio": 39.25,
+   "native_memory_ratio": 3.48
+  },
+  "rest-pocket": {
+   "height": {
+    "run_seconds": 0.0415,
+    "repeats": 3,
+    "moves": 130,
+    "toolpath_sha256": "d627703f8f5773fddf901825debb186d8e8f884dd22615c054bb7f0ad1773239",
+    "remaining_mm3": [
+     1727.996,
+     1794.004
+    ],
+    "peak_rss_kib": {
+     "python": 40960.0,
+     "native": 5504.0
+    }
+   },
+   "dexel": {
+    "run_seconds": 0.0322,
+    "repeats": 3,
+    "moves": 130,
+    "toolpath_sha256": "d627703f8f5773fddf901825debb186d8e8f884dd22615c054bb7f0ad1773239",
+    "remaining_mm3": [
+     1759.996,
+     1794.004
+    ],
+    "peak_rss_kib": {
+     "python": 43200.0,
+     "native": 6848.0
+    }
+   },
+   "same_toolpath": true,
+   "volume_bounds_overlap": true,
+   "time_ratio": 0.78,
+   "native_memory_ratio": 1.24
+  },
+  "pocket-dense": {
+   "height": {
+    "run_seconds": 0.4586,
+    "repeats": 3,
+    "moves": 9088,
+    "toolpath_sha256": "2c3fb8c18eb02e79e77679ec6ac31db97115ea90ef41d07cbf757d8c91695415",
+    "remaining_mm3": [
+     86801.909,
+     87306.251
+    ],
+    "peak_rss_kib": {
+     "python": 39824.0,
+     "native": 11040.0
+    }
+   },
+   "dexel": {
+    "run_seconds": 31.6341,
+    "repeats": 3,
+    "moves": 9088,
+    "toolpath_sha256": "2c3fb8c18eb02e79e77679ec6ac31db97115ea90ef41d07cbf757d8c91695415",
+    "remaining_mm3": [
+     87005.429,
+     87306.251
+    ],
+    "peak_rss_kib": {
+     "python": 60128.0,
+     "native": 31232.0
+    }
+   },
+   "same_toolpath": true,
+   "volume_bounds_overlap": true,
+   "time_ratio": 68.98,
+   "native_memory_ratio": 2.83
+  },
+  "roughing-raster": {
+   "height": {
+    "run_seconds": 0.2658,
+    "repeats": 3,
+    "moves": 2169,
+    "toolpath_sha256": "96872a5a8a8d6c2b0f36dc0ecef7b50a5a32d59a03bffcc18dff5b94700a869a",
+    "remaining_mm3": [
+     2934.841,
+     3194.05
+    ],
+    "peak_rss_kib": {
+     "python": 490240.0,
+     "native": 10384.0
+    }
+   },
+   "dexel": {
+    "run_seconds": 1.2539,
+    "repeats": 3,
+    "moves": 2169,
+    "toolpath_sha256": "96872a5a8a8d6c2b0f36dc0ecef7b50a5a32d59a03bffcc18dff5b94700a869a",
+    "remaining_mm3": [
+     2957.881,
+     3194.05
+    ],
+    "peak_rss_kib": {
+     "python": 494672.0,
+     "native": 12000.0
+    }
+   },
+   "same_toolpath": true,
+   "volume_bounds_overlap": true,
+   "time_ratio": 4.72,
+   "native_memory_ratio": 1.16
+  },
+  "roughing-offset": {
+   "height": {
+    "run_seconds": 0.0764,
+    "repeats": 3,
+    "moves": 924,
+    "toolpath_sha256": "197d863174efe415780014ac5205e3314a8fcb72000d4e07c19acee68da1c23d",
+    "remaining_mm3": [
+     2934.843,
+     3194.05
+    ],
+    "peak_rss_kib": {
+     "python": 490528.0,
+     "native": 8816.0
+    }
+   },
+   "dexel": {
+    "run_seconds": 0.5358,
+    "repeats": 3,
+    "moves": 924,
+    "toolpath_sha256": "197d863174efe415780014ac5205e3314a8fcb72000d4e07c19acee68da1c23d",
+    "remaining_mm3": [
+     2957.883,
+     3194.05
+    ],
+    "peak_rss_kib": {
+     "python": 493120.0,
+     "native": 10624.0
+    }
+   },
+   "same_toolpath": true,
+   "volume_bounds_overlap": true,
+   "time_ratio": 7.01,
+   "native_memory_ratio": 1.21
+  },
+  "roughing-adaptive": {
+   "height": {
+    "run_seconds": 2.1724,
+    "repeats": 3,
+    "moves": 97138,
+    "toolpath_sha256": "dc44308b79ee475cc1581bc205fc5fe482cfe4e9c717c6791c82de2b4c4bfe38",
+    "remaining_mm3": [
+     2939.834,
+     3199.042
+    ],
+    "peak_rss_kib": {
+     "python": 491424.0,
+     "native": 50368.0
+    }
+   },
+   "dexel": {
+    "run_seconds": 51.5397,
+    "repeats": 3,
+    "moves": 97138,
+    "toolpath_sha256": "18755e1b6c909a145913e9e1571c9bd0725ac40fa6c0aee9a7b8514d3eaff190",
+    "remaining_mm3": [
+     2962.874,
+     3199.042
+    ],
+    "peak_rss_kib": {
+     "python": 493808.0,
+     "native": 58864.0
+    }
+   },
+   "same_toolpath": false,
+   "volume_bounds_overlap": true,
+   "time_ratio": 23.72,
+   "native_memory_ratio": 1.17
+  }
+ }
+}

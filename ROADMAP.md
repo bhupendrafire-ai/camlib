@@ -35,19 +35,22 @@ is ordered by real dependency, not by size:
 
 ## Phase 1: Correctness
 
+- [x] #132 macOS extension linking, portable wheel loading and actionable first-use refusals
+
 - [x] #116 Machine crash detection: check the posted program against a declared machine model (safety)
+- [x] #136 Geodesic contour construction: observe cancellation within a level
 
 ## Phase 2: Complete milling
 
 Smaller, independent items first, then the 3D stock and what needs it.
 
-- [ ] #7 Probing: work offset, feature and tool-setting cycles (3-axis; tilted planes come with #5)
+- [x] #7 Probing: work offset, feature and tool-setting cycles (3-axis; tilted planes come with #5)
 - [x] #92 Deburr: ball-end and bull-nose tools
 - [x] #93 Deburr: edges next to drafted or filleted walls
 - [x] #94 Deburr: sloped and vertical edges (3-axis part needs #92; tilted tool with #5/#6)
 - [ ] #107 Material check: prove ball and bull-nose ends with their real shape (shares contact work with #92)
-- [ ] #1 3D stock model (tri-dexel) for undercuts and multi-axis machining
-- [ ] #8 Undercut milling tools: T-slot, keyseat, lollipop and dovetail cutters (needs #1)
+- [x] #1 3D stock model (tri-dexel) for undercuts and multi-axis machining
+- [x] #8 Undercut milling tools: T-slot, keyseat, lollipop and dovetail cutters (needs #1)
 
 ## Phase 3: Complete turning
 
@@ -118,6 +121,10 @@ use: 2D, holes, 3D), turning and thermal.
 - [ ] #48 Optimize ThermalCut (plasma and laser)
 
 ## Any time
+
+- [x] #134 Caller-supplied checked recipes, bounded rest correction and declared engagement policy
+
+- [x] #133 Bounded preparation and declared whole-cell stock/material premises (scoped library APIs)
 
 These can run in parallel with any phase.
 

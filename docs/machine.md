@@ -13,6 +13,9 @@ The low-level `post_events`/`post_program` APIs are formatters with independent
 intent checking. They have no stock or machine release gate and do not produce
 a machine-clearance certificate.
 
+As JSON, the model is the machine's `crash_model` in `Machine.to_dict()`, the
+form the Rust post reads ([posts](posts.md#posting-without-python-rust-webassembly)).
+
 ## Declaration contract
 
 Every `MachineModel` field is required. Physical values come from the owner,

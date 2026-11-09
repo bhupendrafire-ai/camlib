@@ -80,6 +80,42 @@ def export_surface_mesh(shape, *, source=None, max_error_mm=0.005, max_facets=No
     )
 
 
+def export_stock_mesh(shape, *, cancel=None):
+    """A CadQuery solid with planar faces and straight edges (a blank, a
+    sawn or pre-machined block) as a ``StockMesh`` for
+    ``StockSpec.from_mesh``. Its facets are the solid itself, in the shape's
+    coordinates; place the shape in the job's frame first.
+
+    Curved faces are refused: chords of a curved face can lie inside the real
+    stock, so a tessellation would understate material. Give such stock as a
+    mesh that contains it (for example a planar envelope)."""
+    import cadquery as cq
+    from .simulation import StockMesh
+
+    if cancel is not None and cancel():
+        raise ValueError("CAD stock export cancelled")
+    if isinstance(shape, cq.Workplane):
+        shape = shape.val()
+    if not isinstance(shape, cq.Shape) or not shape.isValid() or not shape.Solids():
+        raise ValueError("stock export needs a valid CadQuery solid")
+    curved = sorted(
+        {f.geomType() for f in shape.Faces() if f.geomType() != "PLANE"}
+        | {e.geomType() for e in shape.Edges() if e.geomType() != "LINE"}
+    )
+    if curved:
+        raise ValueError(
+            f"stock export takes planar faces and straight edges only (found {', '.join(curved)}): "
+            "facets of curved faces can cut inside the stock; give a mesh that contains it"
+        )
+    triangles = []
+    for face in shape.Faces():
+        vertices, indices = face.tessellate(0.005)
+        triangles.extend(tuple(tuple(vertices[i].toTuple()) for i in tri) for tri in indices)
+        if cancel is not None and cancel():
+            raise ValueError("CAD stock export cancelled")
+    return StockMesh.from_triangles(triangles)
+
+
 def export_hemisphere_surface(face, *, max_error_mm=0.005, max_facets=None, source=None):
     """Bound a selected outward upper hemisphere; its equator is the base Z.
 
@@ -448,7 +484,8 @@ def deburr_levels(
 
     def tangent(edge):
         intervals = analyse.Type(edge.wrapped)
-        return bool(intervals) and all(i.Type() == ChFiDS_TypeOfConcavity.ChFiDS_Tangential for i in intervals)
+        # Size(), not truthiness: OCP 8's interval list is falsy when it has items.
+        return intervals.Size() > 0 and all(i.Type() == ChFiDS_TypeOfConcavity.ChFiDS_Tangential for i in intervals)
 
     def polyline(edge):
         sampler = GCPnts_QuasiUniformDeflection(BRepAdaptor_Curve(edge.wrapped), max_error_mm)
@@ -506,7 +543,13 @@ def deburr_edges(shape, *, max_error_mm=0.005, tangent_tolerance_deg=0.05, toler
     from OCP.GCPnts import GCPnts_QuasiUniformDeflection
     from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE
     from OCP.TopExp import TopExp
-    from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+
+    try:  # OCP 7.x
+        from OCP.TopTools import TopTools_IndexedDataMapOfShapeListOfShape
+    except ImportError:  # OCP 8 binds the same NCollection map under OCP.collections
+        from OCP.collections import (
+            IndexedDataMap_TopoDS_Shape_List_TopoDS_Shape_TopTools_ShapeMapHasher as TopTools_IndexedDataMapOfShapeListOfShape,
+        )
 
     from .operations import DeburrEdge
 
@@ -522,7 +565,8 @@ def deburr_edges(shape, *, max_error_mm=0.005, tangent_tolerance_deg=0.05, toler
     for index, edge in enumerate(solid.Edges()):
         _fixture_cancel(cancel)
         intervals = analyse.Type(edge.wrapped)
-        if not intervals or any(i.Type() != ChFiDS_TypeOfConcavity.ChFiDS_Convex for i in intervals):
+        # Size(), not truthiness: OCP 8's interval list is falsy when it has items.
+        if intervals.Size() == 0 or any(i.Type() != ChFiDS_TypeOfConcavity.ChFiDS_Convex for i in intervals):
             continue
         straight = edge.geomType() == "LINE"
         if straight:

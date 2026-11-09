@@ -10,6 +10,7 @@ behind the design are in [DECISIONS.md](DECISIONS.md).
 |---|---|---|
 | Rust engine | `src/` (crate `camlib`) | Geometry, toolpath planning, stock, verification, posting checks |
 | Stream process | `src/bin/sim_stream.rs` (`cam-sim-stream`) | Runs a setup and streams binary frames on stdout |
+| Rust post | `src/gcode/`, `src/post_job.rs`, `src/bin/post_job.rs` (`cam-post`) | The default post, its decoder and the export gate without Python (JSON in, JSON out; issue #120) |
 | Python extension | `bindings/python/` (`camlib._native`) | Buffer kernels, posting intent and decoding, region engine, native receivers |
 | Python API | `python/camlib/` | Jobs and setups, operations, tools, machines and posts, runs, playback, export |
 
@@ -19,8 +20,8 @@ while the Rust side does the planning and the checking.
 ## One run, end to end
 
 1. **Declare.** A `camlib.jobs.Job(id, revision, setups)` holds `Setup`s. A
-   setup has stock (`StockSpec` for milling and thermal, `TurnStockSpec` for a
-   lathe), tools, operations in order and a start position. A lathe setup also
+   setup has stock (`StockSpec` for milling and thermal, a box or a closed mesh
+   given with `StockSpec.from_mesh`; `TurnStockSpec` for a lathe), tools, operations in order and a start position. A lathe setup also
    has `turning=TurningSetup(...)` (the part profile, chuck and tolerances).
 2. **Compile.** `Job.compile()` validates the job and turns each setup into a
    manifest (JSON). The job revision binds a digest of the whole content, so any
@@ -35,8 +36,9 @@ while the Rust side does the planning and the checking.
      `turning::ops::TurnSession` when the run reaches it. Every move carries its
      exact `TurnDelta`.
 4. **Receive.** `simulation.stock_state()` picks the receiver: `StockState`
-   (height field, validated by native buffer kernels) or
-   `turn_state.TurnStockState` (the native `TurnReceiver`). **Every frame is
+   (height field, validated by native buffer kernels),
+   `turn_state.TurnStockState` (the native `TurnReceiver`) or
+   `dexel_state.DexelStockState` (the native `DexelReceiver`). **Every frame is
    checked against the receiver's own stock before it commits**: cursor,
    attribution, continuity, each changed cell's old value, material only removed.
 5. **Consume.** `Simulation.run_operations()` yields:
@@ -60,7 +62,7 @@ CRC-32), then the payload. Kinds (`src/stream.rs`):
 | Kind | Name | Holds |
 |---|---|---|
 | 1 | Chunk | One milling or thermal move and its height-field cell changes |
-| 2 | Checkpoint | The full committed stock and cursor |
+| 2 | Checkpoint | The full committed stock and cursor; a producer's also ends with its material checks' per-move proof states (`CAMPRF01` section, #108) |
 | 3 | Manifest | The canonical manifest (its SHA-256 binds every later frame) |
 | 4 | End | The run finished; final cursor and position |
 | 5 | Preview | A partial move's stock (not committed) |
@@ -69,6 +71,7 @@ CRC-32), then the payload. Kinds (`src/stream.rs`):
 | 8 | Verification | A check record for a move or a material stage (JSON) |
 | 9 | Control | Typed control events (version 2 runs) |
 | 10 | Turn chunk | One lathe move and its turning stock change |
+| 11 | Dexel chunk | One milling move on tri-dexel stock and the rays it changed |
 
 Every frame carries the run id, revision and manifest digest. A frame from
 another run or revision is refused.
@@ -82,13 +85,41 @@ can say clear, violation or uncertain honestly.
 - **Height field** (`src/stock.rs`, `Stock`): an XY grid of `HeightBounds`
   (lower: material certainly up to here; upper: no material above here). Used by
   milling and thermal runs. Moves are swept with the full tool assembly
-  (cutter and holder).
+  (cutter and holder). A run starts from the whole box, or from a closed mesh
+  (`src/stock_mesh.rs`, manifest `stock` with a `mesh`; always build a run's
+  starting stock with `RunStockSpec::initial_stock`, since the grid alone is
+  the box). The mesh is converted conservatively: a cell's upper bound is the
+  highest point of the mesh over the cell's open footprint (facets lying only
+  on a cell side belong to the neighbour), and its lower bound is claimed only
+  where no other surface lies between the grid's bottom plane and that height
+  and facets on that plane close the column from below. Undercuts and voids
+  become possible material. `Stock::finished_mesh` returns the closed mesh of
+  each cell's upper bound, without T-junctions, which reads back on the same
+  grid as the same bounds; it is approximate (`HEIGHT_FIELD_APPROXIMATION`).
 - **Turning** (`src/turning/stock.rs`, `TurnStock`): per z bin, bounds of the
   outer radius and of the bore radius, plus rings certainly removed inside the
   material (face grooves). Lathe moves carry their changes computed by the
   turning planner's move kernel (`Planner::emit`), which also checks the insert
   against the part, bore and chuck, and the holder and rapids against the
   stock.
+
+- **Tri-dexel** (`src/dexel.rs`, `DexelStock`; issue #1): three grids of rays
+  along X, Y and Z, each ray a prism (its cell's rectangle times its line)
+  holding two sorted interval lists: possible material (outside it the
+  cross-section is empty) and certain material (inside it the cross-section
+  is full). It holds undercuts. Grids combine only conservatively: a check is
+  clear when one grid proves it. The sweep kernel (`src/dexel/sweep.rs`)
+  removes the cutting part's sweep conservatively per ray (outer interval
+  from certain, inner from possible) and refuses a move whose neck, shank or
+  holder may meet possible material unless one grid proves that sweep
+  empty. The run keeps a **height view**: per Z ray, the top of the certain
+  material from the stock bottom (lower) and of the possible material
+  (upper). It is a valid height-field bound, so planners, the retract
+  policy, height-field stock contact, the material verifier and the machine
+  replay read it unchanged; its native proof records are added only for moves
+  that pass under no material. Frames carry ray changes; receivers derive
+  the view themselves. Partial moves are swept from the receiver's stock, as
+  for turning.
 
 Stock only loses material. A receiver refuses any change that adds material, or
 whose old value doesn't match its own stock.
@@ -97,7 +128,25 @@ whose old value doesn't match its own stock.
 
 - **Per move** (`src/stream_verification.rs`, records of kind 8): scene bodies
   (fixtures, protected parts as prisms), stock contact (rapids and links must not
-  touch stock), machine limits.
+  touch stock), machine limits. On tri-dexel stock, contact the height view
+  leaves uncertain is clear when one ray grid proves the swept assembly misses
+  possible material (`DexelStock::proves_clear`); violations come from the
+  height view's certain material.
+- **Tri-dexel material** (`src/dexel/material.rs`,
+  `DexelStock::compare_solid`, Python `DexelStockState.compare_solid`):
+  dexel stock against a closed triangle mesh of the part with a stated
+  error, undercuts included. Per ray, the part's certain and possible
+  intervals come from the centre line's crossings (exact orientations) and
+  the band where the ray's prism, grown by the error, meets a facet. A point's
+  3D distance never exceeds its distance along a ray, so excess within
+  tolerance along the rays proves the check; a cell counts as possible
+  excess only when all three grids allow it there. A definite finding needs a
+  witness whose exact distance to the mesh, less its error, exceeds the
+  tolerance. In runs, the stream's material stages still compare the height
+  view with `Target`/`SurfaceTarget`. Where two cut faces meet at an edge,
+  every grid's bound spans a whole cell, so the tolerance the rays can
+  prove there is about a cell's diagonal; choose `cell_size_mm` against the
+  comparison tolerance.
 - **Material** (`src/material.rs`, `camlib.material.Verifier`): stock against a
   target (`Target`: planar region and floor; `SurfaceTarget`: mesh). It reports
   leftover material (residual) and over-cut (gouge) as certain and possible
@@ -110,7 +159,12 @@ whose old value doesn't match its own stock.
   also proves every motion against the target (`src/material/sweep_proof.rs`,
   issues #72 and #106). The tool is eroded by the comparison tolerance less the
   target's declared error. Against a `SurfaceTarget` mesh, the exact section
-  contact of `flat::Index::sections_chord_clear` proves it clear. Against a
+  contact of `flat::Index::sections_chord_clear` proves it clear. A ball or
+  bull-nose end is proven with its real shape (#107): eroded, it is a smaller
+  bull lifted by the erosion, and `flat::Index::bull_chord_bound_clear` bounds
+  its contact (concave along each edge and chord, so no Lipschitz bound is
+  needed at the corner's vertical rim); a corner smaller than the erosion
+  falls back to the enclosing flat end, which is sound but conservative. Against a
   prismatic `Target`, the floor is checked exactly and the walls by the region's
   1-Lipschitz signed clearance on bisected chords; the boundary error and floor
   error are the declared error. A possible
@@ -120,6 +174,20 @@ whose old value doesn't match its own stock.
   stock alone; the record's `sweep_proof`, beside it, gives the proven and
   unproven motions and the decided cells. `export.material_status(report,
   sweep_proof)` is clear when the proof decides every possible-only gouge cell.
+  A cell is decided only when every motion since the raw stock was proven:
+  a producer's checkpoint keeps each proof's state (history flag, proven and
+  unproven counts, and the touched cells, one bit per cell, run-length coded
+  when smaller), under the frame's run identity and checksum, so a stream
+  resumed from it (`StreamProducer::from_checkpoint`, `--resume`, or
+  `restore_checkpoint`) decides the same cells as one that never stopped. A
+  checkpoint without it (a consumer's) resumes with `history_complete: false`,
+  and decides nothing. Work budgets: `max_tile_nodes` and `max_boundary_tests`
+  left unset grow with the grid to an upper bound on the work the check can
+  need (the full tile tree; per cell, the target's hierarchy nodes, facets
+  and edge tests, or per tile the region's segments), capped at the allowed
+  maximums. An incomplete report's `stats.stopped_by` names the budget that
+  stopped it and, when that bound is within the maximum, the value that
+  completes it.
   Lathe runs report
   `turning::ops::material_report` after every operation; there, gouges are
   excluded per move by the planner's exact checks.
@@ -145,7 +213,12 @@ whose old value doesn't match its own stock.
    controller decoder) reads the written blocks back into motion, which is
    compared with the source move within the machine's tolerance. A mismatch
    fails the post. The decoder never trusts the post that produced the output.
-5. Arcs that can't be written exactly at the machine's precision are refused,
+5. Without Python, `src/gcode/` holds a port of the default post and decoder
+   (`GCodePost`, `NativeGCodeDecoder`) driven by the same intent checker, and
+   `src/post_job.rs` the whole `Job.post_nc` run (stock replay, machine model,
+   export gate). Their output must stay byte-identical to the Python default
+   post's (`python/tests/test_rust_post.py`); change both together.
+6. Arcs that can't be written exactly at the machine's precision are refused,
    or become checked segments with `LoweringOptions(native_arcs=True)`.
    `camlib.dynamics.schedule` gives acceleration-aware timing and optional feed
    scheduling.
@@ -167,7 +240,10 @@ whose old value doesn't match its own stock.
   the plan (decoded); finishing chords between samples (certified, not just
   sampled endpoints).
 - **Not proven:** posts have not been run on real machines (issue #20); camlib
-  cannot know the real work offsets, tool lengths or clamps. Display data (stock
+  cannot know the real work offsets, tool lengths or clamps. A probing cycle
+  (`src/probe.rs`) records what it stores on the controller (a work offset, a
+  tool length or radius) as a premise; the program after it is checked with
+  the declared values, not the measured ones. Display data (stock
   meshes, previews) is approximate. "Possible" material bounds include the stock
   grid's and the target mesh's resolution.
 
@@ -218,6 +294,8 @@ whose old value doesn't match its own stock.
 | Certain / possible | Lower and upper bounds of stock or of a check result |
 | Certified chord | A straight move between two samples proven within tolerance of the surface along its whole length |
 | Air cut | A feed move that removes no stock |
+| Protected move | A probe move that stops the machine if the stylus triggers (LinuxCNC G38.3 with a trip check, Renishaw O9810) |
+| Touch zone | The last `search_mm` of a probing measuring move, where the stylus is expected to touch; only there is the ball exempt from contact checks |
 | Rest machining | Cutting only material left by earlier operations, read from the stock |
 | R plane | The retract height of a drilling cycle |
 | Lowering | Rewriting moves a controller can't take exactly (for example arcs) as checked segments |

@@ -2,6 +2,7 @@
 //! atomically; run/revision, sequence, continuity and old stock values are checked.
 //! Disk retention, playback clock and Python/viewer adapters build on this layer.
 use crate::{
+    dexel::{DexelDelta, DexelStock, DexelStockSpec, Ray, RayChange, Spans},
     motion::{Curve, Event, Motion, MoveKind, Plane, Vec3},
     operation::OperationReport,
     pocket::Operation,
@@ -9,6 +10,7 @@ use crate::{
         CancelSignal, CellChange, HeightBounds, Stock, StockDelta, StockSnapshot, StockSpec,
         SweepOptions, SweepStats,
     },
+    stock_mesh::{MeshStockSpec, StockMesh},
     tool::{PreparedAssembly, ToolAssembly, valid_id},
     turning::{
         ops::{TurnDelta, TurnSetup},
@@ -49,7 +51,10 @@ const VERIFICATION: u16 = 8;
 const CONTROL: u16 = 9;
 /// A committed lathe move: its motion and its turning stock change.
 const TURN_CHUNK: u16 = 10;
+/// A committed tri-dexel move: its motion and the rays it changed.
+const DEXEL_CHUNK: u16 = 11;
 const CONTROL_JSON_LIMIT: usize = 4096;
+const DEXEL_CACHE: &str = "tri-dexel runs have no regeneration cache (it holds height-field stock changes); plan the run without a cache";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,41 +62,127 @@ pub struct RunIdentity {
     pub id: String,
     pub revision: String,
 }
-/// The stock of a run: a height field (milling, thermal cutting) or
-/// axisymmetric bar stock (turning).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+/// The stock of a run: a box on a height field (milling, thermal cutting),
+/// any solid given as a closed mesh on a height field, axisymmetric bar
+/// stock (turning) or tri-dexel stock (milling with undercuts,
+/// `crate::dexel`).
+#[derive(Clone, Debug, PartialEq)]
 pub enum RunStockSpec {
     Height(StockSpec),
     Turn(TurnStockSpec),
+    /// Wire form: the height-field grid's fields plus `mesh`.
+    Mesh(MeshStockSpec),
+    Dexel(DexelStockSpec),
 }
 impl From<StockSpec> for RunStockSpec {
     fn from(spec: StockSpec) -> Self {
         Self::Height(spec)
     }
 }
+impl From<MeshStockSpec> for RunStockSpec {
+    fn from(spec: MeshStockSpec) -> Self {
+        Self::Mesh(spec)
+    }
+}
+impl Serialize for RunStockSpec {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Height(spec) => spec.serialize(serializer),
+            Self::Turn(spec) => spec.serialize(serializer),
+            Self::Mesh(spec) => spec.serialize(serializer),
+            Self::Dexel(spec) => spec.serialize(serializer),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for RunStockSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Plain {
+            Height(StockSpec),
+            Turn(TurnStockSpec),
+            Dexel(DexelStockSpec),
+        }
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // A mesh stock's own refusals (an open mesh, ...) reach the caller.
+        if value.get("mesh").is_some() {
+            return MeshStockSpec::deserialize(value)
+                .map(Self::Mesh)
+                .map_err(D::Error::custom);
+        }
+        match Plain::deserialize(value).map_err(D::Error::custom)? {
+            Plain::Height(spec) => Ok(Self::Height(spec)),
+            Plain::Turn(spec) => Ok(Self::Turn(spec)),
+            Plain::Dexel(spec) => Ok(Self::Dexel(spec)),
+        }
+    }
+}
 impl RunStockSpec {
+    /// The height-field grid (of a box or a mesh stock).
     pub fn height(&self) -> Result<&StockSpec, String> {
         match self {
             Self::Height(spec) => Ok(spec),
+            Self::Mesh(spec) => Ok(spec.grid()),
             Self::Turn(_) => {
                 Err("this needs a height-field stock; the run has turning stock".into())
             }
+            Self::Dexel(_) => Err(
+                "this needs a height-field stock spec; the run has tri-dexel stock (its height view: view())"
+                    .into(),
+            ),
         }
     }
     pub fn height_mut(&mut self) -> Result<&mut StockSpec, String> {
         match self {
             Self::Height(spec) => Ok(spec),
+            Self::Mesh(spec) => Ok(spec.grid_mut()),
             Self::Turn(_) => {
                 Err("this needs a height-field stock; the run has turning stock".into())
             }
+            Self::Dexel(_) => Err("this needs a height-field stock spec".into()),
         }
     }
     pub fn turn(&self) -> Option<&TurnStockSpec> {
         match self {
             Self::Turn(spec) => Some(spec),
-            Self::Height(_) => None,
+            Self::Height(_) | Self::Mesh(_) | Self::Dexel(_) => None,
         }
+    }
+    pub fn dexel(&self) -> Option<&DexelStockSpec> {
+        match self {
+            Self::Dexel(spec) => Some(spec),
+            _ => None,
+        }
+    }
+    /// The height field planners and height-field checks read: the stock
+    /// itself (a mesh stock's grid), or a tri-dexel stock's height view.
+    pub fn view(&self) -> Result<StockSpec, String> {
+        match self {
+            Self::Height(spec) => Ok(spec.clone()),
+            Self::Mesh(spec) => Ok(spec.grid().clone()),
+            Self::Dexel(spec) => spec.view_spec(),
+            Self::Turn(_) => {
+                Err("this needs a height-field stock; the run has turning stock".into())
+            }
+        }
+    }
+    /// The solid a mesh stock starts from.
+    pub fn mesh(&self) -> Option<&StockMesh> {
+        match self {
+            Self::Mesh(spec) => Some(spec.mesh()),
+            Self::Height(_) | Self::Turn(_) | Self::Dexel(_) => None,
+        }
+    }
+    /// The run's starting stock. Always start a run's stock here: the grid
+    /// alone (`height()`) is the whole box, not a mesh stock.
+    pub fn initial_stock(&self, cancel: &impl CancelSignal) -> Result<RunStock, String> {
+        Ok(match self {
+            Self::Height(spec) => RunStock::Height(Box::new(Stock::new(spec.clone())?)),
+            Self::Mesh(spec) => RunStock::Height(Box::new(spec.initial_stock(cancel)?)),
+            Self::Turn(spec) => RunStock::Turn(TurnStock::new(spec.clone())?),
+            Self::Dexel(spec) => RunStock::Dexel(Box::new(DexelStock::new(spec.clone())?)),
+        })
     }
 }
 /// A run's committed stock.
@@ -99,11 +190,15 @@ impl RunStockSpec {
 pub enum RunStock {
     Height(Box<Stock>),
     Turn(TurnStock),
+    Dexel(Box<DexelStock>),
 }
 impl RunStock {
+    /// The height field: the stock itself, or a tri-dexel stock's height
+    /// view (a valid height-field bound of the same material).
     pub fn height(&self) -> Result<&Stock, String> {
         match self {
             Self::Height(stock) => Ok(stock),
+            Self::Dexel(stock) => Ok(stock.view()),
             Self::Turn(_) => {
                 Err("this needs a height-field stock; the run has turning stock".into())
             }
@@ -112,6 +207,7 @@ impl RunStock {
     fn height_mut(&mut self) -> Result<&mut Stock, String> {
         match self {
             Self::Height(stock) => Ok(stock),
+            Self::Dexel(stock) => Ok(stock.view_mut()),
             Self::Turn(_) => {
                 Err("this needs a height-field stock; the run has turning stock".into())
             }
@@ -120,7 +216,13 @@ impl RunStock {
     pub fn turn(&self) -> Result<&TurnStock, String> {
         match self {
             Self::Turn(stock) => Ok(stock),
-            Self::Height(_) => Err("this needs turning stock; the run has a height field".into()),
+            _ => Err("this needs turning stock; the run has milling stock".into()),
+        }
+    }
+    pub fn dexel(&self) -> Result<&DexelStock, String> {
+        match self {
+            Self::Dexel(stock) => Ok(stock),
+            _ => Err("this needs tri-dexel stock".into()),
         }
     }
 }
@@ -129,6 +231,7 @@ pub struct StreamManifest {
     pub version: u32,
     pub run: RunIdentity,
     pub stock: RunStockSpec,
+    pub initial_stock: Option<crate::stock::InitialStock>,
     pub tools: Vec<ToolAssembly>,
     pub initial_position_mm: Vec3,
     pub sweep: SweepOptions,
@@ -238,13 +341,57 @@ impl StreamManifest {
             );
         }
         match &self.stock {
-            RunStockSpec::Height(spec) => {
+            RunStockSpec::Height(_) | RunStockSpec::Mesh(_) => {
+                let spec = self.stock.height()?;
                 spec.grid()?;
+                if let Some(initial) = &self.initial_stock {
+                    // One declaration of the starting material: a stock mesh
+                    // (#121) or whole-cell bounds (#133), never both.
+                    if matches!(self.stock, RunStockSpec::Mesh(_)) {
+                        return Err("declare the starting stock one way: a stock mesh (StockSpec mesh) or whole-cell initial_stock bounds, not both".into());
+                    }
+                    initial.validate(spec)?;
+                }
                 if self.turning.is_some() {
                     return Err("a turning setup needs turning stock".into());
                 }
+                if self.tools.iter().any(|t| t.cutter.shape.undercuts())
+                    || self
+                        .operations
+                        .iter()
+                        .any(|op| matches!(op, Operation::Undercut(_)))
+                {
+                    return Err("undercut cutters (lollipop, dovetail) and undercut operations cut under material a height field cannot hold; use tri-dexel stock (DexelStockSpec)".into());
+                }
+            }
+            RunStockSpec::Dexel(spec) => {
+                spec.grid()?;
+                if self.initial_stock.is_some() {
+                    return Err(
+                        "declared initial stock bounds are whole height-field cells; tri-dexel stock starts from its box"
+                            .into(),
+                    );
+                }
+                if self.turning.is_some() {
+                    return Err("a turning setup needs turning stock".into());
+                }
+                if self
+                    .tools
+                    .iter()
+                    .any(|t| matches!(t.cutter.shape, crate::tool::CutterShape::Beam))
+                {
+                    return Err(
+                        "tri-dexel stock models milling cutters; plasma and laser runs use height-field stock"
+                            .into(),
+                    );
+                }
             }
             RunStockSpec::Turn(spec) => {
+                if self.initial_stock.is_some() {
+                    return Err(
+                        "height-field initial stock is not a turning stock declaration".into(),
+                    );
+                }
                 spec.validate()?;
                 let turning = self
                     .turning
@@ -507,13 +654,23 @@ impl CheckpointFields {
         // Height cells: 16 bytes. Turning cells: 32 bytes, then a u32 ring
         // count and 32 bytes per ring.
         let shape = match &manifest.stock {
-            RunStockSpec::Height(spec) => {
-                let (nx, ny, _) = spec.grid()?;
-                self.count == nx * ny && cell_bytes == self.count * 16
+            RunStockSpec::Height(_) | RunStockSpec::Mesh(_) => {
+                // A producer checkpoint may end with its proof states.
+                let (nx, ny, _) = manifest.stock.height()?.grid()?;
+                self.count == nx * ny
+                    && cell_bytes
+                        .checked_sub(self.count * 16)
+                        .is_some_and(|rest| rest <= max_proof_section(manifest, self.count))
             }
             RunStockSpec::Turn(spec) => {
                 let rest = cell_bytes.checked_sub(self.count * 32 + 4);
                 self.count == spec.validate()? && rest.is_some_and(|r| r % 32 == 0)
+            }
+            // Tri-dexel rays: two u32 counts each, then their intervals.
+            RunStockSpec::Dexel(spec) => {
+                self.count == spec.grid()?.total_rays()
+                    && cell_bytes >= self.count * 8
+                    && cell_bytes.is_multiple_of(8)
             }
         };
         if self.generation != self.sequence
@@ -558,6 +715,11 @@ pub struct StreamReceiver {
     controls: Option<ControlState>,
     /// The last committed motion's tool (None after a restore).
     last_tool: Option<String>,
+    /// Retained cells are not evidence of raw stock, even at cursor zero.
+    restored_from_checkpoint: bool,
+    /// The per-move proof states a producer checkpoint kept (#108), until
+    /// a producer restored from it takes them.
+    restored_proofs: Option<Vec<Vec<u8>>>,
 }
 impl StreamProducer {
     pub fn new(manifest: StreamManifest) -> Result<Self, String> {
@@ -606,6 +768,7 @@ impl StreamProducer {
         }
     }
     fn from_state(mut state: StreamReceiver, read_only: bool) -> Result<Self, String> {
+        let proofs = state.restored_proofs.take();
         if !read_only
             && state
                 .manifest
@@ -632,7 +795,12 @@ impl StreamProducer {
                 .verification
                 .as_ref()
                 .map(|_| {
-                    crate::stream_verification::Runtime::prepare(&state.manifest, state.sequence)
+                    crate::stream_verification::Runtime::prepare(
+                        &state.manifest,
+                        state.sequence,
+                        state.restored_from_checkpoint,
+                        proofs.as_deref(),
+                    )
                 })
                 .transpose()?
         };
@@ -701,8 +869,15 @@ impl StreamProducer {
     pub fn manifest(&self) -> &StreamManifest {
         &self.state.manifest
     }
+    /// The stock checkpoint, plus the material checks' per-move proof
+    /// states at this cursor (#108), so a producer resumed from it keeps
+    /// deciding cells.
     pub fn checkpoint(&self, limit: usize) -> Result<Vec<u8>, String> {
-        self.state.checkpoint(limit)
+        let proofs = self
+            .checks
+            .as_ref()
+            .and_then(crate::stream_verification::Runtime::proof_states);
+        self.state.checkpoint_with(limit, proofs.as_deref())
     }
     /// Synchronize a disposable query cache from an already committed source
     /// chunk. This reuses receiver CRC/identity/sequence/old-value checks and does
@@ -722,26 +897,13 @@ impl StreamProducer {
         frame(RESTORED, body, limit)
     }
     pub fn restore_checkpoint(&mut self, bytes: &[u8], limit: usize) -> Result<(), String> {
-        self.state.restore_checkpoint(bytes, limit)?;
-        if !self.read_only
-            && self
-                .state
-                .manifest
-                .verification
-                .as_ref()
-                .is_some_and(|c| c.stock_contact.is_some())
-        {
-            self.state
-                .stock
-                .height_mut()?
-                .enable_contact_queries(&std::sync::atomic::AtomicBool::new(false))?;
-        }
-        if let Some(checks) = &mut self.checks {
-            checks.tracker = crate::stream_verification::Tracker::new(
-                checks.tracker.binding.clone(),
-                self.state.sequence,
-            );
-        }
+        let state = StreamReceiver::from_checkpoint(self.state.manifest.clone(), bytes, limit)?;
+        // Reuse construction so no proof counters, touched cells, active
+        // stages or history claims survive a stock replacement, except the
+        // proof states the checkpoint itself kept (#108). The whole
+        // replacement is prepared (a bad proof state refuses it) before any
+        // part of the restored state is committed.
+        *self = Self::from_state(state, self.read_only)?;
         Ok(())
     }
     /// Noncommitting prefix query. Consumers overlay it on the move-start stock;
@@ -872,7 +1034,29 @@ impl StreamProducer {
         limit: usize,
         cancel: &impl CancelSignal,
     ) -> Result<PreparedMotionFrames, String> {
+        let result =
+            self.try_push_prepared_motion(motion, cached, record, verified_cache, limit, cancel);
+        if let Some(checks) = &mut self.checks {
+            checks.finish_motion(result.is_ok());
+        }
+        result
+    }
+    fn try_push_prepared_motion(
+        &mut self,
+        motion: Motion,
+        cached: Option<StockDelta>,
+        record: bool,
+        verified_cache: bool,
+        limit: usize,
+        cancel: &impl CancelSignal,
+    ) -> Result<PreparedMotionFrames, String> {
         self.writable()?;
+        if self.state.manifest.stock.dexel().is_some() {
+            if cached.is_some() || record || verified_cache {
+                return Err(DEXEL_CACHE.into());
+            }
+            return self.push_dexel_motion(motion, limit, cancel);
+        }
         self.state.check_motion(&motion)?;
         let completed = self
             .state
@@ -1056,6 +1240,75 @@ impl StreamProducer {
             .motion(&motion)?;
         self.push_turn_motion(motion, delta, limit, cancel)
     }
+    /// A tri-dexel move: checks on the height view (as a height-field run),
+    /// then the dexel kernel's change, committed with its native view records.
+    fn push_dexel_motion(
+        &mut self,
+        motion: Motion,
+        limit: usize,
+        cancel: &impl CancelSignal,
+    ) -> Result<PreparedMotionFrames, String> {
+        self.state.check_motion(&motion)?;
+        let completed = self
+            .state
+            .sequence
+            .checked_add(1)
+            .ok_or("stream cursor exhausted")?;
+        let tool = self.tools.get(&motion.tool).ok_or("stream tool missing")?;
+        let report = if let Some(checks) = &mut self.checks {
+            checks.ready_for_motion()?;
+            checks.motion_with(
+                self.state.stock.height()?,
+                Some(self.state.stock.dexel()?),
+                tool,
+                &motion,
+                completed,
+                cancel,
+            )?
+        } else {
+            None
+        };
+        if let Some(bytes) = &report {
+            check_size(bytes.len() - HEADER, limit)?;
+        }
+        let next_tracker = if let (Some(checks), Some(bytes)) = (&self.checks, &report) {
+            let mut tracker = checks.tracker.clone();
+            tracker.accept(bytes, completed, Some(&motion))?;
+            Some(tracker)
+        } else {
+            None
+        };
+        let delta = self.state.stock.dexel()?.preview_sweep(
+            tool,
+            &motion,
+            1.,
+            self.state.manifest.sweep,
+            cancel,
+        )?;
+        let bytes = encode_dexel_chunk(
+            &self.state.manifest,
+            &self.state.identity,
+            self.state.sequence,
+            self.state.control_cursor(),
+            &motion,
+            delta.changes(),
+            limit,
+        )?;
+        if cancel.is_cancelled() {
+            return Err("stream production cancelled; no prefix committed".into());
+        }
+        let chunk = DexelMotionChunk {
+            sequence: self.state.sequence,
+            control_cursor: self.state.control_cursor(),
+            motion,
+            changes: vec![],
+        };
+        self.state.commit_dexel_chunk(chunk, Some(&delta))?;
+        if let Some(tracker) = next_tracker {
+            self.checks.as_mut().unwrap().tracker = tracker;
+        }
+        Ok((bytes, report, None, Default::default()))
+    }
     fn push_unchecked_motion(
         &mut self,
         motion: Motion,
@@ -1063,6 +1316,9 @@ impl StreamProducer {
         cancel: &impl CancelSignal,
     ) -> Result<Vec<u8>, String> {
         self.writable()?;
+        if self.state.manifest.stock.dexel().is_some() {
+            return self.push_dexel_motion(motion, limit, cancel).map(|f| f.0);
+        }
         self.state.check_motion(&motion)?;
         let tool = self.tools.get(&motion.tool).ok_or("stream tool missing")?;
         let delta = self.state.stock.height()?.preview_sweep(
@@ -1096,9 +1352,11 @@ impl StreamProducer {
 impl StreamReceiver {
     pub fn new(manifest: StreamManifest) -> Result<Self, String> {
         manifest.validate()?;
-        let stock = match &manifest.stock {
-            RunStockSpec::Height(spec) => RunStock::Height(Box::new(Stock::new(spec.clone())?)),
-            RunStockSpec::Turn(spec) => RunStock::Turn(TurnStock::new(spec.clone())?),
+        let stock = match (&manifest.stock, &manifest.initial_stock) {
+            (RunStockSpec::Height(spec), Some(initial)) => {
+                RunStock::Height(Box::new(Stock::from_initial(spec.clone(), initial)?))
+            }
+            _ => manifest.stock.initial_stock(&|| false)?,
         };
         let identity = identity_bytes(&manifest)?;
         Ok(Self {
@@ -1111,6 +1369,8 @@ impl StreamReceiver {
             last_motion_id: None,
             finished: false,
             last_tool: None,
+            restored_from_checkpoint: false,
+            restored_proofs: None,
         })
     }
     /// The committed height-field stock (milling and thermal runs).
@@ -1164,8 +1424,51 @@ impl StreamReceiver {
             let chunk = decode_turn_chunk(&self.manifest, &self.identity, frame, limit)?;
             return self.commit_turn_chunk(chunk);
         }
+        if self.manifest.stock.dexel().is_some() {
+            let chunk = decode_dexel_chunk(&self.manifest, &self.identity, frame, limit)?;
+            return self.commit_dexel_chunk(chunk, None);
+        }
         let chunk = decode_chunk_prepared(&self.manifest, &self.identity, frame, limit)?;
         self.commit_chunk(chunk)
+    }
+    /// Commit a tri-dexel move: its own sweep's delta (`native`, producer)
+    /// or received ray changes, each checked against this stock.
+    fn commit_dexel_chunk(
+        &mut self,
+        chunk: DexelMotionChunk,
+        native: Option<&DexelDelta>,
+    ) -> Result<Motion, String> {
+        if chunk.sequence != self.sequence || chunk.control_cursor != self.control_cursor() {
+            return Err("stream chunk missing, repeated or out of order".into());
+        }
+        let to_complete = self
+            .sequence
+            .checked_add(1)
+            .ok_or("stream cursor exhausted")?;
+        self.check_motion(&chunk.motion)?;
+        if chunk.motion.kind.is_rapid() && !chunk.changes.is_empty() {
+            return Err("a rapid removes no stock".into());
+        }
+        let RunStock::Dexel(stock) = &mut self.stock else {
+            return Err("tri-dexel chunk on a run without tri-dexel stock".into());
+        };
+        match native {
+            Some(delta) => {
+                if delta.motion_id != chunk.motion.id
+                    || delta.operation != chunk.motion.operation
+                    || delta.fraction != 1.
+                {
+                    return Err("tri-dexel delta attribution or fraction mismatch".into());
+                }
+                stock.apply_delta(delta)?
+            }
+            None => stock.apply_changes(&chunk.motion, 1., &chunk.changes)?,
+        }
+        self.sequence = to_complete;
+        self.position = chunk.motion.curve.end();
+        self.last_motion_id = Some(chunk.motion.id);
+        self.last_tool = Some(chunk.motion.tool.clone());
+        Ok(chunk.motion)
     }
     fn commit_turn_chunk(&mut self, chunk: TurnMotionChunk) -> Result<Motion, String> {
         if chunk.sequence != self.sequence || chunk.delta.motion_id != chunk.motion.id {
@@ -1262,6 +1565,9 @@ impl StreamReceiver {
         Ok(chunk.motion)
     }
     pub fn checkpoint(&self, limit: usize) -> Result<Vec<u8>, String> {
+        self.checkpoint_with(limit, None)
+    }
+    fn checkpoint_with(&self, limit: usize, proofs: Option<&[Vec<u8>]>) -> Result<Vec<u8>, String> {
         let mut body = self.identity.clone();
         put_u64(&mut body, self.sequence);
         put_vec3(&mut body, self.position);
@@ -1274,11 +1580,15 @@ impl StreamReceiver {
                 if let Some(controls) = &self.controls {
                     put_control_json(&mut body, controls)?;
                 }
-                check_size(body.len() + stock.cells().len() * 16, limit)?;
-                body.reserve(stock.cells().len() * 16);
+                let section = proofs
+                    .map(|states| proof_section(states, &cells_digest(stock.cells())))
+                    .unwrap_or_default();
+                check_size(body.len() + stock.cells().len() * 16 + section.len(), limit)?;
+                body.reserve(stock.cells().len() * 16 + section.len());
                 for h in stock.cells() {
                     put_height(&mut body, *h);
                 }
+                body.extend_from_slice(&section);
             }
             RunStock::Turn(stock) => {
                 // One stock generation per committed move, as in a height field.
@@ -1294,6 +1604,21 @@ impl StreamReceiver {
                 for r in stock.rings() {
                     for v in r {
                         put_f64(&mut body, *v);
+                    }
+                }
+            }
+            RunStock::Dexel(stock) => {
+                put_u64(&mut body, stock.generation());
+                put_u32(&mut body, stock.grid().total_rays() as u32);
+                if let Some(controls) = &self.controls {
+                    put_control_json(&mut body, controls)?;
+                }
+                let bytes = stock.grid().total_rays() * 8 + stock.intervals() * 16;
+                check_size(body.len() + bytes, limit)?;
+                body.reserve(bytes);
+                for a in 0..3 {
+                    for r in stock.rays(a) {
+                        put_ray(&mut body, r);
                     }
                 }
             }
@@ -1318,11 +1643,15 @@ impl StreamReceiver {
         if manifest.stock.turn().is_some() {
             return Self::from_checkpoint_turn(manifest, fields, &mut body);
         }
+        if manifest.stock.dexel().is_some() {
+            return Self::from_checkpoint_dexel(manifest, fields, &mut body);
+        }
         let mut cells = Vec::with_capacity(fields.count);
         for _ in 0..fields.count {
             cells.push(body.height()?);
         }
-        Self::from_checkpoint_cells(manifest, fields, cells)
+        let proofs = read_proof_section(body.take(body.left())?, &manifest, fields.count)?;
+        Self::from_checkpoint_cells(manifest, fields, cells, proofs)
     }
     fn from_checkpoint_turn(
         manifest: StreamManifest,
@@ -1356,6 +1685,45 @@ impl StreamReceiver {
             finished: false,
             controls: fields.controls,
             last_tool: None,
+            restored_from_checkpoint: true,
+            restored_proofs: None,
+        })
+    }
+    fn from_checkpoint_dexel(
+        manifest: StreamManifest,
+        fields: CheckpointFields,
+        body: &mut Decoder<'_>,
+    ) -> Result<Self, String> {
+        let spec = manifest
+            .stock
+            .dexel()
+            .ok_or("tri-dexel checkpoint needs tri-dexel stock")?;
+        let grid = spec.grid()?;
+        let mut rays: [Vec<Ray>; 3] = Default::default();
+        for (a, list) in rays.iter_mut().enumerate() {
+            list.reserve(grid.rays(a));
+            for _ in 0..grid.rays(a) {
+                list.push(body.ray(spec.max_intervals)?);
+            }
+        }
+        if body.left() != 0 {
+            return Err("trailing tri-dexel checkpoint data".into());
+        }
+        let stock = DexelStock::from_parts(spec.clone(), fields.generation, rays)?;
+        Ok(Self {
+            identity: identity_bytes(&manifest)?,
+            manifest,
+            stock: RunStock::Dexel(Box::new(stock)),
+            sequence: fields.sequence,
+            position: fields.position,
+            last_motion_id: (fields.has_last == 1).then_some(fields.last),
+            finished: false,
+            controls: fields.controls,
+            last_tool: None,
+            // A retained snapshot, with no kept proof states (tri-dexel
+            // checkpoints carry none): the history before it is unseen.
+            restored_from_checkpoint: true,
+            restored_proofs: None,
         })
     }
     /// A single retained file, parsed into final cell storage in bounded blocks.
@@ -1366,9 +1734,10 @@ impl StreamReceiver {
         limit: usize,
     ) -> Result<Self, String> {
         manifest.validate()?;
-        if manifest.stock.turn().is_some() {
-            // Turning stock is small (one cell per z bin): read the whole
-            // frame (bounded by its header) and decode it.
+        if manifest.stock.turn().is_some() || manifest.stock.dexel().is_some() {
+            // Turning stock is small (one cell per z bin), and tri-dexel rays
+            // have variable lengths: read the whole frame (bounded by its
+            // header) and decode it.
             let bytes = read_frame(reader, limit)?.ok_or("empty checkpoint file")?;
             if reader.read(&mut [0u8; 1]).map_err(|e| e.to_string())? != 0 {
                 return Err("trailing checkpoint file data".into());
@@ -1414,6 +1783,7 @@ impl StreamReceiver {
         let mut crc = crc32fast::Hasher::new();
         crc.update(&header[..16]);
         crc.update(&prefix);
+        let section = length - prefix.len() - fields.count * 16;
         let mut cells = Vec::with_capacity(fields.count);
         let mut block = [0u8; 65536];
         let mut remaining = fields.count * 16;
@@ -1431,25 +1801,42 @@ impl StreamReceiver {
             }
             remaining -= count;
         }
+        // The proof section is bounded by `validate` (a few bits per cell).
+        let mut proofs = vec![0u8; section];
+        reader
+            .read_exact(&mut proofs)
+            .map_err(|e| format!("truncated checkpoint proof states: {e}"))?;
+        crc.update(&proofs);
         if crc.finalize() != expected {
             return Err("checkpoint file checksum mismatch".into());
         }
         if reader.read(&mut [0u8; 1]).map_err(|e| e.to_string())? != 0 {
             return Err("trailing checkpoint file data".into());
         }
-        Self::from_checkpoint_cells(manifest, fields, cells)
+        let proofs = read_proof_section(&proofs, &manifest, fields.count)?;
+        Self::from_checkpoint_cells(manifest, fields, cells, proofs)
     }
     fn from_checkpoint_cells(
         manifest: StreamManifest,
         fields: CheckpointFields,
         cells: Vec<HeightBounds>,
+        kept: Option<KeptProofs>,
     ) -> Result<Self, String> {
         let identity = identity_bytes(&manifest)?;
-        let stock = Stock::from_snapshot(StockSnapshot {
+        // Kept proof states describe the stock they were computed with: for
+        // any other cells they are discarded, and the resumed history is
+        // unseen (reported, never decided).
+        let restored_proofs = kept
+            .filter(|(digest, _)| *digest == cells_digest(&cells))
+            .map(|(_, states)| states);
+        let mut stock = Stock::from_snapshot(StockSnapshot {
             spec: manifest.stock.height()?.clone(),
             generation: fields.generation,
             cells,
         })?;
+        if let Some(initial) = &manifest.initial_stock {
+            stock.initial_volume(initial)?;
+        }
         Ok(Self {
             manifest,
             identity,
@@ -1460,6 +1847,8 @@ impl StreamReceiver {
             finished: false,
             controls: fields.controls,
             last_tool: None,
+            restored_from_checkpoint: true,
+            restored_proofs,
         })
     }
     /// A lathe move's first `fraction` from the stock at its start (the
@@ -1498,6 +1887,28 @@ impl StreamReceiver {
         shown.apply_move(&delta.changes, &delta.rings)?;
         Ok(shown)
     }
+    /// A tri-dexel move's first `fraction` from the stock at its start (the
+    /// committed receiver is unchanged): the dexel kernel on the prefix.
+    pub fn preview_dexel(
+        &self,
+        next: &Motion,
+        fraction: f64,
+        cancel: &impl CancelSignal,
+    ) -> Result<DexelStock, String> {
+        self.check_motion(next)?;
+        let tool = self
+            .manifest
+            .tools
+            .iter()
+            .find(|t| t.id == next.tool)
+            .ok_or("partial tool missing")?
+            .prepare()?;
+        let stock = self.stock.dexel()?;
+        let delta = stock.preview_sweep(&tool, next, fraction, self.manifest.sweep, cancel)?;
+        let mut shown = stock.clone();
+        shown.apply_delta(&delta)?;
+        Ok(shown)
+    }
     /// Reconstruct this cursor's next move prefix from move-start stock. The
     /// committed receiver remains unchanged while the UI displays partial stock.
     pub fn preview_partial(
@@ -1514,6 +1925,12 @@ impl StreamReceiver {
             .find(|t| t.id == next.tool)
             .ok_or("partial tool missing")?
             .prepare()?;
+        if self.manifest.stock.dexel().is_some() {
+            return Err(
+                "a tri-dexel run previews a partial move from its receiver's stock (preview_dexel)"
+                    .into(),
+            );
+        }
         self.stock
             .height()?
             .preview_sweep(&tool, next, fraction, self.manifest.sweep, cancel)
@@ -1529,6 +1946,7 @@ fn check_chunk_header(manifest: &StreamManifest, chunk: &MotionChunk) -> Result<
             .height()
             .is_ok_and(|s| chunk.delta.spec != *s)
         || manifest.stock.turn().is_some()
+        || manifest.stock.dexel().is_some()
         || chunk.delta.fraction != 1.
         || chunk.delta.motion_id != chunk.motion.id
         || chunk.delta.operation != chunk.motion.operation
@@ -1635,6 +2053,111 @@ fn decode_turn_chunk(
         motion,
     })
 }
+/// A committed tri-dexel move: the motion and the rays it changed.
+#[derive(Debug)]
+pub struct DexelMotionChunk {
+    pub sequence: u64,
+    pub control_cursor: Option<ControlCursor>,
+    pub motion: Motion,
+    pub changes: Vec<RayChange>,
+}
+fn encode_dexel_chunk(
+    manifest: &StreamManifest,
+    identity: &[u8],
+    sequence: u64,
+    control_cursor: Option<ControlCursor>,
+    motion: &Motion,
+    changes: &[RayChange],
+    limit: usize,
+) -> Result<Vec<u8>, String> {
+    let spec = manifest
+        .stock
+        .dexel()
+        .ok_or("tri-dexel chunk needs tri-dexel stock")?;
+    if changes.len() > spec.grid()?.total_rays()
+        || (manifest.version == 2) != control_cursor.is_some()
+    {
+        return Err("tri-dexel chunk exceeds the ray count or misses its control cursor".into());
+    }
+    let mut body = identity.to_vec();
+    let to = sequence.checked_add(1).ok_or("stream cursor exhausted")?;
+    for value in [sequence, sequence, to] {
+        put_u64(&mut body, value);
+    }
+    put_control_cursor(&mut body, control_cursor);
+    put_motion(&mut body, motion)?;
+    let bytes: usize = 4 + changes
+        .iter()
+        .map(|c| {
+            5 + 16
+                + 16 * (c.before.possible.len()
+                    + c.before.certain.len()
+                    + c.after.possible.len()
+                    + c.after.certain.len())
+        })
+        .sum::<usize>();
+    check_size(body.len() + bytes, limit)?;
+    body.reserve(bytes);
+    put_u32(&mut body, changes.len() as u32);
+    for c in changes {
+        put_u8(&mut body, c.axis);
+        put_u32(&mut body, c.index);
+        put_ray(&mut body, &c.before);
+        put_ray(&mut body, &c.after);
+    }
+    frame(DEXEL_CHUNK, body, limit)
+}
+fn decode_dexel_chunk(
+    manifest: &StreamManifest,
+    identity: &[u8],
+    bytes: &[u8],
+    limit: usize,
+) -> Result<DexelMotionChunk, String> {
+    let spec = manifest
+        .stock
+        .dexel()
+        .ok_or("tri-dexel chunk needs tri-dexel stock")?;
+    let mut body = payload(bytes, DEXEL_CHUNK, limit)?;
+    if body.take(identity.len())? != identity {
+        return Err("stale/foreign stream run or input revision".into());
+    }
+    let sequence = body.u64()?;
+    if body.u64()? != sequence || sequence.checked_add(1) != Some(body.u64()?) {
+        return Err("tri-dexel chunk cursor mismatch".into());
+    }
+    let control_cursor = body.control_cursor(manifest)?;
+    let motion = body.motion()?;
+    let count = body.u32()? as usize;
+    if count > spec.grid()?.total_rays() || count.saturating_mul(21) > body.left() {
+        return Err("invalid tri-dexel chunk ray count/length".into());
+    }
+    let mut changes = Vec::with_capacity(count);
+    for _ in 0..count {
+        changes.push(RayChange {
+            axis: body.u8()?,
+            index: body.u32()?,
+            before: body.ray(spec.max_intervals)?,
+            after: body.ray(spec.max_intervals)?,
+        });
+    }
+    if body.left() != 0 {
+        return Err("trailing tri-dexel chunk data".into());
+    }
+    Ok(DexelMotionChunk {
+        sequence,
+        control_cursor,
+        motion,
+        changes,
+    })
+}
+/// Decode a committed tri-dexel move frame (motion and ray changes).
+pub fn decode_dexel_chunk_frame(
+    manifest: &StreamManifest,
+    bytes: &[u8],
+    limit: usize,
+) -> Result<DexelMotionChunk, String> {
+    decode_dexel_chunk(manifest, &identity_bytes(manifest)?, bytes, limit)
+}
 /// Decode a committed lathe move frame (motion and stock change).
 pub fn decode_turn_chunk_frame(
     manifest: &StreamManifest,
@@ -1696,16 +2219,23 @@ pub fn decode_chunk(
     manifest.validate()?;
     decode_chunk_prepared(manifest, &identity_bytes(manifest)?, bytes, limit)
 }
-/// Decode only the motion of a committed chunk frame, using the same frame,
-/// identity, cursor and control-prefix validation as `decode_chunk`. Cell
-/// changes are not parsed (callers that need them use `decode_chunk`).
+/// Decode only the motion of a committed chunk frame (a height-field or a
+/// tri-dexel move: both start with the same cursor and motion), using the
+/// same frame, identity, cursor and control-prefix validation as
+/// `decode_chunk`. Stock changes are not parsed (callers that need them use
+/// `decode_chunk` or `decode_dexel_chunk_frame`).
 pub fn decode_chunk_motion(
     manifest: &StreamManifest,
     identity: &[u8],
     bytes: &[u8],
     limit: usize,
 ) -> Result<Motion, String> {
-    let mut body = payload(bytes, CHUNK, limit)?;
+    let kind = if manifest.stock.dexel().is_some() {
+        DEXEL_CHUNK
+    } else {
+        CHUNK
+    };
+    let mut body = payload(bytes, kind, limit)?;
     if body.take(identity.len())? != identity {
         return Err("stale/foreign stream run or input revision".into());
     }
@@ -1925,6 +2455,13 @@ pub fn read_frame(reader: &mut impl Read, limit: usize) -> Result<Option<Vec<u8>
     Ok(Some(output))
 }
 
+/// Frame kinds a frame reader in this crate may dispatch on.
+pub(crate) const CHUNK_KIND: u16 = CHUNK;
+pub(crate) const OPERATION_KIND: u16 = OPERATION;
+/// The kind of a complete frame, from its validated header.
+pub(crate) fn frame_kind(bytes: &[u8]) -> Result<u16, String> {
+    Ok(check_header(bytes, MAX_FRAME_BYTES)?.0)
+}
 fn point_valid(p: Vec3) -> bool {
     p.iter().all(|v| v.is_finite() && v.abs() <= 1e6)
 }
@@ -1967,6 +2504,7 @@ fn check_header(header: &[u8], limit: usize) -> Result<(u16, usize), String> {
         VERIFICATION,
         CONTROL,
         TURN_CHUNK,
+        DEXEL_CHUNK,
     ]
     .contains(&kind)
     {
@@ -2058,6 +2596,17 @@ fn put_turn_cell(out: &mut Vec<u8>, c: TurnCell) {
         put_f64(out, v);
     }
 }
+fn put_spans(out: &mut Vec<u8>, s: &Spans) {
+    put_u32(out, s.len() as u32);
+    for i in s.as_slice() {
+        put_f64(out, i[0]);
+        put_f64(out, i[1]);
+    }
+}
+fn put_ray(out: &mut Vec<u8>, r: &Ray) {
+    put_spans(out, &r.possible);
+    put_spans(out, &r.certain);
+}
 fn put_height(out: &mut Vec<u8>, v: HeightBounds) {
     put_f64(out, v.lower_mm);
     put_f64(out, v.upper_mm);
@@ -2066,6 +2615,86 @@ fn put_string(out: &mut Vec<u8>, v: &str) {
     out.extend_from_slice(&(v.len() as u16).to_le_bytes());
     out.extend_from_slice(v.as_bytes());
 }
+/// A producer checkpoint's trailing section (#108): the material checks'
+/// per-move proof states, one per configured stage (empty for a stage
+/// without a proof). The frame's run identity, cursor and checksum cover it.
+const PROOF_SECTION: &[u8; 8] = b"CAMPRF01";
+/// SHA-256 of a height-field stock's cells as a checkpoint encodes them.
+/// The proof states bind it: a kept proof covers exactly the stock it was
+/// computed with (#108 with #133's raw-stock premise).
+fn cells_digest(cells: &[HeightBounds]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    let mut buffer = Vec::with_capacity(16);
+    for &cell in cells {
+        buffer.clear();
+        put_height(&mut buffer, cell);
+        hasher.update(&buffer);
+    }
+    hasher.finalize().into()
+}
+fn proof_section(states: &[Vec<u8>], cells: &[u8; 32]) -> Vec<u8> {
+    let mut out = PROOF_SECTION.to_vec();
+    out.extend_from_slice(cells);
+    put_u32(&mut out, states.len() as u32);
+    for state in states {
+        put_u64(&mut out, state.len() as u64);
+        out.extend_from_slice(state);
+    }
+    out
+}
+/// The largest proof section a checkpoint of this run may carry.
+fn max_proof_section(manifest: &StreamManifest, cells: usize) -> usize {
+    let stages = manifest
+        .verification
+        .as_ref()
+        .map_or(0, |c| c.material.len());
+    if stages == 0 {
+        return 0;
+    }
+    PROOF_SECTION.len()
+        + 32
+        + 4
+        + stages * (8 + crate::material::SweepProof::max_state_bytes(cells))
+}
+/// The proof states of a checkpoint's trailing section and the digest of
+/// the cells they were computed with (none when absent: a consumer's
+/// checkpoint, or one from a run without material proofs).
+fn read_proof_section(
+    bytes: &[u8],
+    manifest: &StreamManifest,
+    cells: usize,
+) -> Result<Option<KeptProofs>, String> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    let bad = || "invalid checkpoint proof section".to_string();
+    let stages = manifest
+        .verification
+        .as_ref()
+        .map_or(0, |c| c.material.len());
+    let mut body = Decoder { bytes, offset: 0 };
+    if body.take(PROOF_SECTION.len()).map_err(|_| bad())? != PROOF_SECTION {
+        return Err(bad());
+    }
+    let digest: [u8; 32] = body.take(32).map_err(|_| bad())?.try_into().unwrap();
+    if body.u32().map_err(|_| bad())? as usize != stages {
+        return Err(bad());
+    }
+    let mut states = Vec::with_capacity(stages);
+    for _ in 0..stages {
+        let length = body.u64().map_err(|_| bad())?;
+        if length > crate::material::SweepProof::max_state_bytes(cells) as u64 {
+            return Err(bad());
+        }
+        states.push(body.take(length as usize).map_err(|_| bad())?.to_vec());
+    }
+    if body.left() != 0 {
+        return Err(bad());
+    }
+    Ok(Some((digest, states)))
+}
+/// A checkpoint's kept proof states and the digest of their stock cells.
+type KeptProofs = ([u8; 32], Vec<Vec<u8>>);
 pub fn identity_bytes(manifest: &StreamManifest) -> Result<Vec<u8>, String> {
     let run = &manifest.run;
     let mut bytes = Vec::new();
@@ -2103,6 +2732,10 @@ fn put_motion(out: &mut Vec<u8>, m: &Motion) -> Result<(), String> {
             MoveKind::Tap => 6,
             MoveKind::Shift => 7,
             MoveKind::Thread => 8,
+            MoveKind::ProbePosition => 9,
+            MoveKind::ProbeMeasure => 10,
+            MoveKind::ProbeTouch => 11,
+            MoveKind::ProbeReturn => 12,
         },
     );
     put_u8(out, u8::from(m.feed_mm_min.is_some()));
@@ -2205,6 +2838,24 @@ impl<'a> Decoder<'a> {
         let inner = bounds()?;
         Ok(TurnCell { outer, inner })
     }
+    /// One interval list; `limit` bounds its count before allocation.
+    fn spans(&mut self, limit: usize) -> Result<Spans, String> {
+        let count = self.u32()? as usize;
+        if count > limit || count.saturating_mul(16) > self.left() {
+            return Err("invalid tri-dexel interval count/length".into());
+        }
+        let mut spans = Vec::with_capacity(count);
+        for _ in 0..count {
+            spans.push([self.f64()?, self.f64()?]);
+        }
+        Ok(Spans::from_vec(spans))
+    }
+    fn ray(&mut self, limit: usize) -> Result<Ray, String> {
+        Ok(Ray {
+            possible: self.spans(limit)?,
+            certain: self.spans(limit)?,
+        })
+    }
     fn height(&mut self) -> Result<HeightBounds, String> {
         Ok(HeightBounds {
             lower_mm: self.f64()?,
@@ -2232,6 +2883,10 @@ impl<'a> Decoder<'a> {
             6 => MoveKind::Tap,
             7 => MoveKind::Shift,
             8 => MoveKind::Thread,
+            9 => MoveKind::ProbePosition,
+            10 => MoveKind::ProbeMeasure,
+            11 => MoveKind::ProbeTouch,
+            12 => MoveKind::ProbeReturn,
             _ => return Err("invalid binary motion kind".into()),
         };
         let feed_flag = self.u8()?;

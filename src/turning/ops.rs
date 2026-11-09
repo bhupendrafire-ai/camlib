@@ -2841,6 +2841,7 @@ mod tests {
             controlled_point: j.controlled_point,
         };
         let manifest = StreamManifest {
+            initial_stock: None,
             version: 1,
             run: RunIdentity {
                 id: "lathe".into(),
