@@ -197,32 +197,56 @@ fn bull_profile(d: f64, r: f64, rc: f64) -> f64 {
 }
 /// One rotationally symmetric part of a tool assembly, seen from below: its
 /// lower surface is flat out to `r0` at `z0` above the tool tip, then rises
-/// linearly (`rise` mm of height per mm of radius) out to `r1`. A chamfer
+/// out to `r1`, either linearly (`rise` mm of height per mm of radius, with
+/// `arc` 0) or along a circular arc of radius `arc` centred at radius `r0`,
+/// height `z0 + arc` (with `rise` 0 and `r1 - r0` at most `arc`). A chamfer
 /// mill's cone (tip radius r0, rise = 1 / tan(half angle)), a flat end
-/// (rise 0, r0 = r1) and every cylinder or frustum of a shank, neck or holder
-/// (at its lower end) are sections. The profile is convex and non-decreasing
-/// in the radius, so contact on a triangle is a concave maximisation.
+/// (rise 0, r0 = r1), a ball end (r0 0, arc = r1 = the radius), a bull-nose
+/// end (r0 = radius - corner radius, arc = the corner radius) and every
+/// cylinder or frustum of a shank, neck or holder (at its lower end) are
+/// sections. The profile is convex and non-decreasing in the radius, so
+/// contact on a triangle is a concave maximisation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Section {
     pub z0: f64,
     pub r0: f64,
     pub r1: f64,
     pub rise: f64,
+    pub arc: f64,
 }
 impl Section {
     /// Height of the lower surface above the tip at radius `d` (None
     /// beyond `r1`).
-    fn profile(&self, d: f64) -> Option<f64> {
+    pub(crate) fn profile(&self, d: f64) -> Option<f64> {
         if d <= self.r0 {
             Some(self.z0)
         } else if d <= self.r1 {
-            Some(self.z0 + (d - self.r0) * self.rise)
+            Some(if self.arc > 0. {
+                let s = d - self.r0;
+                self.z0 + self.arc - (self.arc * self.arc - s * s).max(0.).sqrt()
+            } else {
+                self.z0 + (d - self.r0) * self.rise
+            })
         } else {
             None
         }
     }
+    /// Where along the direction of steepest ascent (slope `g`) of a plane
+    /// the tip rests highest: the radius at which the profile's slope first
+    /// reaches `g` (r0 for a linear rise at least `g`, r1 when the profile
+    /// never gets that steep).
+    fn reach_for_slope(&self, g: f64) -> f64 {
+        if self.arc > 0. {
+            // h'(r0 + s) = s / sqrt(arc^2 - s^2) = g.
+            (self.r0 + self.arc * g / (1. + g * g).sqrt()).min(self.r1)
+        } else if g <= self.rise {
+            self.r0
+        } else {
+            self.r1
+        }
+    }
     pub(crate) fn valid(&self) -> bool {
-        [self.z0, self.r0, self.r1, self.rise]
+        [self.z0, self.r0, self.r1, self.rise, self.arc]
             .iter()
             .all(|v| v.is_finite())
             && self.z0 >= 0.
@@ -230,6 +254,8 @@ impl Section {
             && self.r0 <= self.r1
             && self.r1 > 0.
             && self.rise >= 0.
+            && self.arc >= 0.
+            && (self.arc == 0. || (self.rise == 0. && self.r1 - self.r0 <= self.arc * (1. + 1e-12)))
     }
 }
 
@@ -284,6 +310,7 @@ pub(crate) fn bounded_sections(
             r0: radius,
             r1: radius,
             rise: 0.,
+            arc: 0.,
         });
     }
     Ok(sections)
@@ -302,6 +329,7 @@ fn sections_of(
             r0: radius,
             r1: radius,
             rise: 0.,
+            arc: 0.,
         },
         CutterShape::Chamfer {
             tip_diameter_mm, ..
@@ -315,6 +343,7 @@ fn sections_of(
                 r0,
                 r1: radius,
                 rise: top / (radius - r0),
+                arc: 0.,
             }
         }
         CutterShape::Drill { .. } => Section {
@@ -322,18 +351,42 @@ fn sections_of(
             r0: 0.,
             r1: radius,
             rise: cutter.tip_height_at_radius(radius).ok_or("drill profile")? / radius,
+            arc: 0.,
         },
-        CutterShape::Ball | CutterShape::Bull { .. } if enclose_curved => Section {
+        // A lollipop or dovetail lies inside the cylinder of its widest
+        // radius from the tip up to its cutting length.
+        CutterShape::Ball
+        | CutterShape::Bull { .. }
+        | CutterShape::Lollipop
+        | CutterShape::Dovetail { .. }
+            if enclose_curved =>
+        {
+            Section {
+                z0: 0.,
+                r0: radius,
+                r1: radius,
+                rise: 0.,
+                arc: 0.,
+            }
+        }
+        // The corner arc: a quarter circle from the flat (none for a ball)
+        // out to the cutter radius.
+        CutterShape::Ball => Section {
             z0: 0.,
-            r0: radius,
+            r0: 0.,
             r1: radius,
             rise: 0.,
+            arc: radius,
+        },
+        CutterShape::Bull { corner_radius_mm } => Section {
+            z0: 0.,
+            r0: radius - corner_radius_mm,
+            r1: radius,
+            rise: 0.,
+            arc: corner_radius_mm,
         },
         _ => {
-            return Err(
-                "tool sections cover flat, chamfer and drill ends (a ball or bull-nose end is curved)"
-                    .into(),
-            );
+            return Err("tool sections cover flat, chamfer, drill, ball and bull-nose ends".into());
         }
     }];
     // Neck and shank below the holder: cylinders at their lower ends.
@@ -351,6 +404,7 @@ fn sections_of(
             r0: r,
             r1: r,
             rise: 0.,
+            arc: 0.,
         });
     }
     for h in &def.holders {
@@ -360,6 +414,7 @@ fn sections_of(
                 r0: h.radius_min_mm,
                 r1: h.radius_max_mm,
                 rise: (h.z_max_mm - h.z_min_mm) / (h.radius_max_mm - h.radius_min_mm),
+                arc: 0.,
             }
         } else {
             Section {
@@ -367,6 +422,7 @@ fn sections_of(
                 r0: h.radius_min_mm,
                 r1: h.radius_min_mm,
                 rise: 0.,
+                arc: 0.,
             }
         });
     }
@@ -500,12 +556,17 @@ impl Tri {
                 let d = (q[0] - p[0]).hypot(q[1] - p[1]).min(s.r1);
                 q[2] - s.profile(d).unwrap_or(f64::INFINITY)
             };
-            let lipschitz = (b[2] - a[2]).abs() + s.rise * qa.sqrt();
-            take(&mut best, golden_max_bound(at, t0, t1, lipschitz));
+            if s.arc > 0. {
+                take(&mut best, concave_max_upper(at, t0, t1));
+            } else {
+                let lipschitz = (b[2] - a[2]).abs() + s.rise * qa.sqrt();
+                take(&mut best, golden_max_bound(at, t0, t1, lipschitz));
+            }
         }
         // Facet z = A x + B y + C: along the gradient (slope g) the objective
-        // grows at g until r0, then at g - rise: the maximum is at r0 when
-        // g <= rise, at r1 otherwise (any point within r0 when g = 0).
+        // grows at g until r0, then at g - h'(d): a linear rise peaks at r0
+        // when g <= rise, at r1 otherwise; an arc where its slope reaches g
+        // (any point within r0 when g = 0).
         let [a, b, c] = self.p;
         let det = (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1]);
         if det.abs() > 1e-300 {
@@ -515,7 +576,7 @@ impl Tri {
             let (q, h) = if g < 1e-15 {
                 (p, s.z0)
             } else {
-                let reach = if g <= s.rise { s.r0 } else { s.r1 };
+                let reach = s.reach_for_slope(g);
                 (
                     [p[0] + gx / g * reach, p[1] + gy / g * reach],
                     s.profile(reach).unwrap(),
@@ -2101,10 +2162,15 @@ mod tests {
                 let d = (q[0] - p[0]).hypot(q[1] - p[1]);
                 let h = if d <= s.r0 {
                     s.z0
-                } else if d <= s.r1 {
-                    s.z0 + (d - s.r0) * s.rise
-                } else {
+                } else if d > s.r1 {
                     continue;
+                } else if s.arc > 0. {
+                    // The arc's centre is at (r0, z0 + arc): the lower
+                    // half of that circle.
+                    let centre = [s.r0, s.z0 + s.arc];
+                    centre[1] - (s.arc * s.arc - (d - centre[0]).powi(2)).max(0.).sqrt()
+                } else {
+                    s.z0 + (d - s.r0) * s.rise
                 };
                 best = best.max(q[2] - h);
             }
@@ -2128,6 +2194,7 @@ mod tests {
                 r0: 0.1,
                 r1: 3.,
                 rise: 1.,
+                arc: 0.,
             },
             // 60 degree spot drill.
             Section {
@@ -2135,6 +2202,7 @@ mod tests {
                 r0: 0.,
                 r1: 2.,
                 rise: 1. / (30f64.to_radians()).tan(),
+                arc: 0.,
             },
             // Flat end, and a holder frustum higher up.
             Section {
@@ -2142,12 +2210,14 @@ mod tests {
                 r0: 2.,
                 r1: 2.,
                 rise: 0.,
+                arc: 0.,
             },
             Section {
                 z0: 20.,
                 r0: 8.,
                 r1: 14.,
                 rise: 2.5,
+                arc: 0.,
             },
         ];
         for corners in triangles {
@@ -2177,6 +2247,249 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Ball (r 2), bull-nose (r 2, corner 0.7), the ball grown radially by
+    /// 0.3 (as deburr grows sections) and a part arc (r1 - r0 < arc).
+    fn arc_sections() -> [Section; 4] {
+        [
+            Section {
+                z0: 0.,
+                r0: 0.,
+                r1: 2.,
+                rise: 0.,
+                arc: 2.,
+            },
+            Section {
+                z0: 0.,
+                r0: 1.3,
+                r1: 2.,
+                rise: 0.,
+                arc: 0.7,
+            },
+            Section {
+                z0: 0.,
+                r0: 0.3,
+                r1: 2.3,
+                rise: 0.,
+                arc: 2.,
+            },
+            Section {
+                z0: 1.,
+                r0: 0.5,
+                r1: 1.5,
+                rise: 0.,
+                arc: 2.,
+            },
+        ]
+    }
+
+    #[test]
+    fn section_contact_bounds_dense_sampling_for_ball_and_bull_arcs() {
+        let triangles = [
+            [[0., 0., 0.], [10., 0., 5.], [0., 10., 2.]],
+            [[2., 2., 3.], [8., 3., 1.], [4., 9., 6.]],
+            [[0., 0., 4.], [6., 0., 4.], [0., 6., 4.]],
+            // Steep (nearly vertical) wall: the arc's steep rim touches it.
+            [[5., 0., 0.], [5., 8., 0.], [5.0001, 4., 9.]],
+            // Very steep facet (slope 40).
+            [[3., 0., 0.], [3.25, 0., 10.], [3., 9., 0.]],
+        ];
+        for corners in triangles {
+            let t = tri(corners);
+            for p in [
+                [3., 3.],
+                [11., 1.],
+                [5., 5.],
+                [0.5, 4.],
+                [4.2, 4.],
+                [7.2, 1.],
+                [5.6, 4.],
+                [1.4, 2.],
+            ] {
+                for s in &arc_sections() {
+                    assert!(s.valid());
+                    let sampled = sampled_section(corners, p, s, 600);
+                    match t.section_contact(p, s) {
+                        None => assert_eq!(sampled, f64::NEG_INFINITY, "{corners:?} {p:?} {s:?}"),
+                        Some(_) if sampled == f64::NEG_INFINITY => {
+                            assert!(t.distance_xy(p) > s.r1 - 0.05, "{corners:?} {p:?} {s:?}")
+                        }
+                        // An upper bound of every sample, and close to them.
+                        // At a full quarter arc's rim the slope is unbounded,
+                        // so samples one spacing apart can differ by
+                        // sqrt(2 arc spacing) in height: allow that.
+                        Some(z) => assert!(
+                            z >= sampled - 1e-9 && z - sampled < 0.25,
+                            "{corners:?} {p:?} {s:?}: {z} vs {sampled}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arc_section_contact_agrees_with_the_bull_nose_closed_form() {
+        // `bull_contact` (used by the surface finishing strategies, tested
+        // above against dense sampling) computes the same contact by its
+        // own code: the two must agree for ball and bull-nose ends.
+        let triangles = [
+            [[0., 0., 0.], [10., 0., 5.], [0., 10., 2.]],
+            [[2., 2., 3.], [8., 3., 1.], [4., 9., 6.]],
+            [[0., 0., 4.], [6., 0., 4.], [0., 6., 4.]],
+            [[5., 0., 0.], [5., 8., 0.], [5.0001, 4., 9.]],
+            [[3., 0., 0.], [3.25, 0., 10.], [3., 9., 0.]],
+        ];
+        for corners in triangles {
+            let t = tri(corners);
+            for i in 0..=24 {
+                for j in 0..=24 {
+                    let p = [-1. + 0.5 * i as f64, -1. + 0.5 * j as f64];
+                    for (r, rc) in [(2., 2.), (2., 0.7), (3., 1.)] {
+                        let s = Section {
+                            z0: 0.,
+                            r0: r - rc,
+                            r1: r,
+                            rise: 0.,
+                            arc: rc,
+                        };
+                        match (t.section_contact(p, &s), t.bull_contact(p, r, rc)) {
+                            (None, None) => {}
+                            (Some(a), Some(b)) => assert!(
+                                a >= b - 1e-6 && a - b < 1e-6,
+                                "{corners:?} {p:?} {r} {rc}: section {a}, bull {b}"
+                            ),
+                            other => panic!("{corners:?} {p:?} {r} {rc}: {other:?}"),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arc_chord_clearance_agrees_with_dense_positions() {
+        let mesh = SurfaceMesh {
+            version: 1,
+            units: "mm".into(),
+            triangles: std::sync::Arc::new(vec![
+                [[0., 0., 0.], [20., 0., 0.], [0., 20., 0.]],
+                // A wall rising to Z 6 along x = 10.
+                [[10., 0., 0.], [10., 20., 0.], [10.0001, 10., 6.]],
+                // A ridge.
+                [[12., 2., 0.], [16., 10., 3.], [20., 2., 0.]],
+            ]),
+            surface_error_mm: 0.,
+            source: serde_json::json!({}),
+        };
+        let index = Index::new(&mesh, -1., 3., &|| false).unwrap();
+        let mut seen = vec![0; index.len()];
+        let mut stamp = 0;
+        let mut checked = (0, 0);
+        for (r, rc) in [(2., 2.), (2., 0.7)] {
+            let arc = [Section {
+                z0: 0.,
+                r0: r - rc,
+                r1: r,
+                rise: 0.,
+                arc: rc,
+            }];
+            for (a, b) in [
+                ([2., 5., 0.5], [6., 15., 0.5]),
+                ([4., 5., 1.], [9.5, 15., 1.]),
+                ([7.5, 5., 0.2], [7.5, 15., 0.2]),
+                ([7.9, 5., 0.6], [8.3, 15., 0.6]),
+                ([12., 2., 1.], [16., 18., 2.]),
+                ([11., 6., 2.], [21., 6., 2.]),
+                ([11., 6., 3.2], [21., 6., 3.2]),
+                ([2., 10., 4.], [12., 10., 4.]),
+                ([2., 10., 6.5], [14., 10., 6.5]),
+            ] {
+                let proven = index.sections_chord_clear(a, b, &arc, 0., &mut seen, &mut stamp);
+                // Independent: the bull-nose closed form at dense positions.
+                let mut lowest = f64::INFINITY;
+                for i in 0..=4000 {
+                    let t = i as f64 / 4000.;
+                    let p = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])];
+                    let need = index.max_bull(p, r, rc, &mut seen, &mut stamp);
+                    lowest = lowest.min(a[2] + t * (b[2] - a[2]) - need);
+                }
+                if proven {
+                    checked.0 += 1;
+                    assert!(
+                        lowest >= -1e-9,
+                        "{r} {rc} {a:?}->{b:?} proven but gouges by {lowest}"
+                    );
+                } else {
+                    checked.1 += 1;
+                }
+                if lowest > 1e-3 {
+                    assert!(
+                        proven,
+                        "{r} {rc} {a:?}->{b:?} clear by {lowest} but not proven"
+                    );
+                }
+            }
+        }
+        // Both outcomes occur.
+        assert!(checked.0 > 3 && checked.1 > 3, "{checked:?}");
+    }
+
+    #[test]
+    fn ball_and_bull_assembly_sections_follow_their_profile() {
+        use crate::tool::{Cutter, HolderSection, ToolAssembly};
+        for (shape, flat) in [
+            (CutterShape::Ball, 0.),
+            (
+                CutterShape::Bull {
+                    corner_radius_mm: 0.5,
+                },
+                1.,
+            ),
+        ] {
+            let tool = ToolAssembly {
+                id: "t".into(),
+                cutter: Cutter {
+                    id: "t".into(),
+                    name: String::new(),
+                    shape: shape.clone(),
+                    diameter_mm: 3.,
+                    cutting_length_mm: 6.,
+                    overall_length_mm: 50.,
+                    shank_diameter_mm: 6.,
+                    flutes: 2,
+                    center_cutting: true,
+                    material: "carbide".into(),
+                    neck: None,
+                },
+                stickout_mm: 20.,
+                gauge_length_mm: 60.,
+                holders: vec![HolderSection {
+                    z_min_mm: 20.,
+                    z_max_mm: 60.,
+                    radius_min_mm: 8.,
+                    radius_max_mm: 16.,
+                }],
+            };
+            let prepared = tool.prepare().unwrap();
+            let sections = assembly_sections(&prepared).unwrap();
+            let end = sections[0];
+            assert_eq!((end.z0, end.r0, end.r1), (0., flat, 1.5));
+            assert!(end.valid() && end.arc == 1.5 - flat);
+            // The assembly's own radius at each height on the end matches
+            // the section's profile there.
+            for k in 1..50 {
+                let z = (1.5 - flat) * k as f64 / 50.;
+                let r = prepared.radius_at(z).unwrap().radius_mm;
+                let h = end.profile(r).unwrap();
+                assert!((h - z).abs() < 1e-9, "{shape:?} z {z}: r {r} -> {h}");
+            }
+            // The enclosing sections still replace the end by its cylinder.
+            assert_eq!(enclosing_sections(&prepared).unwrap()[0].arc, 0.);
+            // The shank above the flutes.
+            assert_eq!((sections[1].z0, sections[1].r0), (6., 3.));
         }
     }
 
@@ -2221,7 +2534,8 @@ mod tests {
                 z0: 4.,
                 r0: 3.,
                 r1: 3.,
-                rise: 0.
+                rise: 0.,
+                arc: 0.,
             }
         );
         assert_eq!(
@@ -2230,7 +2544,8 @@ mod tests {
                 z0: 20.,
                 r0: 8.,
                 r1: 16.,
-                rise: 5.
+                rise: 5.,
+                arc: 0.,
             }
         );
         // Each section agrees with the assembly's radius at its heights.
@@ -2284,6 +2599,7 @@ mod tests {
             r0: 0.1,
             r1: 3.,
             rise: 1.,
+            arc: 0.,
         }];
         for (a, b) in [
             ([2., 5., 0.5], [6., 15., 0.5]),
@@ -2398,6 +2714,7 @@ mod tests {
                     r0: 300.,
                     r1: 300.,
                     rise: 0.,
+                    arc: 0.,
                 }],
                 &mut vec![0; index.len()],
                 &mut 0,

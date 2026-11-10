@@ -45,12 +45,12 @@ is ordered by real dependency, not by size:
 Smaller, independent items first, then the 3D stock and what needs it.
 
 - [x] #7 Probing: work offset, feature and tool-setting cycles (3-axis; tilted planes come with #5)
-- [ ] #92 Deburr: ball-end and bull-nose tools
-- [ ] #93 Deburr: edges next to drafted or filleted walls
-- [ ] #94 Deburr: sloped and vertical edges (3-axis part needs #92; tilted tool with #5/#6)
+- [x] #92 Deburr: ball-end and bull-nose tools
+- [x] #93 Deburr: edges next to drafted or filleted walls
+- [x] #94 Deburr: sloped and vertical edges (3-axis part needs #92; tilted tool with #5/#6)
 - [ ] #107 Material check: prove ball and bull-nose ends with their real shape (shares contact work with #92)
-- [ ] #1 3D stock model (tri-dexel) for undercuts and multi-axis machining
-- [ ] #8 Undercut milling tools: T-slot, keyseat, lollipop and dovetail cutters (needs #1)
+- [x] #1 3D stock model (tri-dexel) for undercuts and multi-axis machining
+- [x] #8 Undercut milling tools: T-slot, keyseat, lollipop and dovetail cutters (needs #1)
 
 ## Phase 3: Complete turning
 

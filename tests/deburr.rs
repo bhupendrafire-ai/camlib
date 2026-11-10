@@ -1,5 +1,7 @@
-//! Deburr (#11): horizontal edges broken with a chamfer mill, and nothing else
-//! touched. The checks here are independent of the planner: a dense
+//! Deburr (#11, #92, #93, #94): horizontal edges broken with a chamfer,
+//! ball-end or bull-nose mill, next to vertical or drafted walls; sloped
+//! edges with a ball; every listed convex edge accounted for; and nothing
+//! else touched. The checks here are independent of the planner: a dense
 //! penetration oracle built from the tool assembly's own radius profile and
 //! sampled points of the part, and the stock's actual heights.
 use camlib::{
@@ -40,6 +42,21 @@ fn chamfer_mill() -> ToolAssembly {
             radius_max_mm: 16.,
         }],
     }
+}
+
+/// A ball-end (corner radius = radius) or bull-nose mill of diameter 4.
+fn round_end(corner: Option<f64>) -> ToolAssembly {
+    let mut t = chamfer_mill();
+    t.id = "b4".into();
+    t.cutter.id = "b4".into();
+    t.cutter.shape = match corner {
+        None => CutterShape::Ball,
+        Some(corner_radius_mm) => CutterShape::Bull { corner_radius_mm },
+    };
+    t.cutter.diameter_mm = 4.;
+    t.cutter.shank_diameter_mm = 4.;
+    t.cutter.cutting_length_mm = 8.;
+    t
 }
 
 fn end_mill() -> ToolAssembly {
@@ -120,7 +137,9 @@ fn operation(surface: SurfaceMesh, levels: Vec<DeburrLevel>) -> DeburrOperation 
         tool: "c90".into(),
         surface,
         levels,
-        width_mm: 0.5,
+        edges: vec![],
+        width_mm: Some(0.5),
+        break_radius_mm: None,
         tip_clearance_mm: 0.3,
         clearance_z_mm: 70.,
         cutting_sense: "climb".into(),
@@ -292,6 +311,7 @@ fn block_top_edges_are_broken_all_round_and_nothing_else() {
         vec![DeburrLevel {
             regions: vec![rect([5., 5.], [35., 25.])],
             z_mm: 10.,
+            broken_edges: vec![],
         }],
     );
     let cancel = AtomicBool::new(false);
@@ -383,6 +403,7 @@ fn edge_against_a_rising_wall_is_skipped_and_reported() {
         vec![DeburrLevel {
             regions: vec![rect([5., 5.], [20., 25.])],
             z_mm: 6.,
+            broken_edges: vec![],
         }],
     );
     let spec = spec(12.);
@@ -475,4 +496,539 @@ fn edge_against_a_rising_wall_is_skipped_and_reported() {
         depth,
         tip,
     );
+}
+
+/// Runs a deburr plan to the end on `stock`, returning its motions.
+fn run(plan: &mut DeburrPlan, tool: &ToolAssembly, stock: &mut Stock) -> Vec<Motion> {
+    let cancel = AtomicBool::new(false);
+    let mut motions = vec![];
+    while let Some(m) = plan.next_motion_with_stock(stock, &cancel).unwrap() {
+        commit(stock, tool, &m);
+        motions.push(m);
+    }
+    plan.finish_report(&cancel).unwrap();
+    motions
+}
+
+fn machined_block(spec: &StockSpec) -> Stock {
+    let mut stock = Stock::new(spec.clone()).unwrap();
+    machine(
+        &mut stock,
+        [2., 2., 12.],
+        &[
+            [2., 2., 0.],
+            [38., 2., 0.],
+            [38., 28., 0.],
+            [2., 28., 0.],
+            [2., 2., 0.],
+        ],
+    );
+    stock
+}
+
+#[test]
+fn ball_and_bull_nose_break_block_edges_as_a_cove_and_nothing_else() {
+    let part = cuboid([5., 5., 0.], [35., 25., 10.]);
+    let spec = spec(10.);
+    let cancel = AtomicBool::new(false);
+    // (corner, leg): a 4 mm ball (rc 2), a 4 mm bull-nose with a 1.5 corner.
+    for (corner, leg) in [(None, 0.5), (Some(1.5), 0.6)] {
+        let tool = round_end(corner);
+        let rc = corner.unwrap_or(2.);
+        let mut op = operation(
+            mesh(part.clone()),
+            vec![DeburrLevel {
+                regions: vec![rect([5., 5.], [35., 25.])],
+                z_mm: 10.,
+                broken_edges: vec![],
+            }],
+        );
+        op.tool = tool.id.clone();
+        op.width_mm = Some(leg);
+        let mut plan = DeburrPlan::prepare(op, &tool, &spec, [0., 0., 70.], 1, &cancel).unwrap();
+        let report = plan.report();
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.runs, 1);
+        assert_eq!(report.break_profile, "arc");
+        assert_eq!(report.break_arc_radius_mm, Some(rc));
+        // Equal legs: the corner circle's centre c out and c up.
+        let c = ((2. * rc * rc - leg * leg).sqrt() - leg) / 2.;
+        assert!((report.face_width_mm - leg).abs() < 1e-12);
+        assert!((report.wall_depth_mm - leg).abs() < 1e-12);
+        assert!(((rc * rc - c * c).sqrt() - c - leg).abs() < 1e-12);
+        assert!((report.axis_offset_mm - (2. - rc + c)).abs() < 1e-12);
+        let mut stock = machined_block(&spec);
+        let motions = run(&mut plan, &tool, &mut stock);
+        let tip = motions
+            .iter()
+            .find(|m| m.kind == MoveKind::Cut)
+            .map(|m| m.curve.start()[2])
+            .unwrap();
+        assert!((tip - (10. + c - rc)).abs() < 1e-9, "tip {tip}");
+        // Independent: only the break is cut (dense part samples against
+        // the assembly's own radius profile).
+        assert_only_breaks(
+            &tool,
+            &motions,
+            &samples(&part, 0.25),
+            ([5., 5.], [35., 25.]),
+            10.,
+            leg,
+            leg,
+            tip,
+        );
+        // Stock against the analytic cove: at inward distance x the
+        // surface is z_e + c - sqrt(rc^2 - (x + c)^2) (the corner circle);
+        // untouched beyond the leg.
+        let guard = 2. * spec.cell_size_mm;
+        let (mut broken, mut fillet_safe) = (0, true);
+        for i in 0..stock.cells().len() {
+            let q = stock.cell_center(i).unwrap();
+            if !(5. < q[0] && q[0] < 35. && 5. < q[1] && q[1] < 25.) {
+                continue;
+            }
+            let x = (q[0] - 5.).min(35. - q[0]).min(q[1] - 5.).min(25. - q[1]);
+            let h = stock.cells()[i];
+            if x > leg + guard {
+                assert_eq!(h.lower_mm, 10., "untouched at {q:?}");
+            } else if x < leg - guard {
+                let cove = |x: f64| 10. + c - (rc * rc - (x + c) * (x + c)).max(0.).sqrt();
+                // Cut at least to the cove at the cell's far side, and not
+                // below it at the near side.
+                assert!(h.upper_mm <= cove(x + 0.08) + 1e-6, "{q:?}: {h:?}");
+                // Cells on the wall keep the roughing pass's conservative
+                // lower bound (it touched them): only inner cells say how
+                // deep the break went.
+                if x > spec.cell_size_mm {
+                    assert!(h.lower_mm >= cove(x - 0.08) - 1e-6, "{q:?}: {h:?}");
+                }
+                broken += 1;
+                // The cove stays outside the reported fillet (rho): the
+                // fillet surface at x is 10 - rho + sqrt(rho^2 - (rho - x)^2).
+                let rho = report_fillet(&plan);
+                let fillet = 10. - rho + (rho * rho - (rho - x).powi(2)).max(0.).sqrt();
+                fillet_safe &= cove(x) >= fillet - 1e-9;
+            }
+        }
+        assert!(broken > 100, "{broken}");
+        assert!(fillet_safe);
+    }
+}
+
+fn report_fillet(plan: &DeburrPlan) -> f64 {
+    plan.report().fillet_radius_mm.unwrap()
+}
+
+#[test]
+fn break_given_as_a_fillet_radius_stays_inside_that_fillet() {
+    let part = cuboid([5., 5., 0.], [35., 25., 10.]);
+    let spec = spec(10.);
+    let cancel = AtomicBool::new(false);
+    let tool = round_end(None);
+    let mut op = operation(
+        mesh(part.clone()),
+        vec![DeburrLevel {
+            regions: vec![rect([5., 5.], [35., 25.])],
+            z_mm: 10.,
+            broken_edges: vec![],
+        }],
+    );
+    op.tool = tool.id.clone();
+    op.width_mm = None;
+    op.break_radius_mm = Some(0.8);
+    let plan = DeburrPlan::prepare(op.clone(), &tool, &spec, [0., 0., 70.], 1, &cancel).unwrap();
+    let report = plan.report();
+    assert!(report.skipped.is_empty());
+    let (rc, rho) = (2f64, 0.8f64);
+    let c = rc / 2f64.sqrt() - rho * (1. - 1. / 2f64.sqrt());
+    // The corner circle touches the fillet's: centres rc + rho apart.
+    assert!((((c + rho) * 2f64.sqrt()) - (rc + rho)).abs() < 1e-12);
+    assert!((report.fillet_radius_mm.unwrap() - rho).abs() < 1e-12);
+    let leg = (rc * rc - c * c).sqrt() - c;
+    assert!((report.face_width_mm - leg).abs() < 1e-12 && leg < rho);
+    // Densely: the cove is never inside the fillet (no gouge against the
+    // filleted part), and touches it.
+    let mut closest = f64::INFINITY;
+    for k in 0..=10000 {
+        let x = leg * k as f64 / 10000.;
+        let cove = c - (rc * rc - (x + c) * (x + c)).sqrt();
+        let fillet = -rho + (rho * rho - (rho - x).powi(2)).sqrt();
+        assert!(cove >= fillet - 1e-12, "x {x}: {cove} < {fillet}");
+        closest = closest.min(cove - fillet);
+    }
+    assert!(closest < 1e-4, "{closest}");
+    // Refusals: both sizes, neither, too large, and a chamfer mill's radius.
+    for (width, radius, message) in [
+        (Some(0.5), Some(0.8), "exactly one"),
+        (None, None, "exactly one"),
+        (Some(2.5), None, "corner radius"),
+        (None, Some(5.), "1 + sqrt 2"),
+        (Some(1.9), None, "tip_clearance_mm"),
+    ] {
+        let mut bad = op.clone();
+        bad.width_mm = width;
+        bad.break_radius_mm = radius;
+        let error = DeburrPlan::prepare(bad, &tool, &spec, [0., 0., 70.], 1, &cancel)
+            .err()
+            .unwrap();
+        assert!(error.contains(message), "{error}");
+    }
+    let mut chamfer = op.clone();
+    chamfer.tool = "c90".into();
+    let error = DeburrPlan::prepare(chamfer, &chamfer_mill(), &spec, [0., 0., 70.], 1, &cancel)
+        .err()
+        .unwrap();
+    assert!(error.contains("ball-end and bull-nose"), "{error}");
+    let mut flat = op;
+    flat.tool = "em6".into();
+    let error = DeburrPlan::prepare(flat, &end_mill(), &spec, [0., 0., 70.], 1, &cancel)
+        .err()
+        .unwrap();
+    assert!(error.contains("chamfer mill"), "{error}");
+}
+
+/// A block whose side walls are drafted by `draft_deg` (the top smaller).
+fn frustum(lo: [f64; 2], hi: [f64; 2], height: f64, draft_deg: f64) -> Vec<[Vec3; 3]> {
+    let inset = height * draft_deg.to_radians().tan();
+    let b = |x: usize, y: usize| [[lo[0], hi[0]][x], [lo[1], hi[1]][y], 0.];
+    let t = |x: usize, y: usize| {
+        [
+            [lo[0] + inset, hi[0] - inset][x],
+            [lo[1] + inset, hi[1] - inset][y],
+            height,
+        ]
+    };
+    let quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| vec![[a, b, c], [a, c, d]];
+    [
+        quad(t(0, 0), t(1, 0), t(1, 1), t(0, 1)),
+        quad(b(0, 0), b(0, 1), b(1, 1), b(1, 0)),
+        quad(b(0, 0), b(1, 0), t(1, 0), t(0, 0)),
+        quad(b(1, 0), b(1, 1), t(1, 1), t(1, 0)),
+        quad(b(1, 1), b(0, 1), t(0, 1), t(1, 1)),
+        quad(b(0, 1), b(0, 0), t(0, 0), t(0, 1)),
+    ]
+    .concat()
+}
+
+#[test]
+fn drafted_walls_are_broken_to_the_requested_width_and_steep_ones_reported() {
+    let cancel = AtomicBool::new(false);
+    let tool = chamfer_mill();
+    let spec = spec(10.);
+    let (w, d) = (0.5, 0.1 + 0.3);
+    // 5 degrees: broken all round. The 45 degree cone ends the break on the
+    // wall at depth h = w / (tan 45 - tan 5).
+    let draft = 5f64;
+    let part = frustum([5., 5.], [35., 25.], 10., draft);
+    let inset = 10. * draft.to_radians().tan();
+    let (lo, hi) = ([5. + inset, 5. + inset], [35. - inset, 25. - inset]);
+    let op = operation(
+        mesh(part.clone()),
+        vec![DeburrLevel {
+            regions: vec![rect(lo, hi)],
+            z_mm: 10.,
+            broken_edges: vec![],
+        }],
+    );
+    let mut plan = DeburrPlan::prepare(op, &tool, &spec, [0., 0., 70.], 1, &cancel).unwrap();
+    let report = plan.report();
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    let t = draft.to_radians().tan();
+    let h = w / (1. - t);
+    let level = &report.level_details[0];
+    assert!((level.max_wall_draft_deg - draft).abs() < 1e-9, "{level:?}");
+    // The axis moves out so the break's lower edge keeps the tip clearance:
+    // h tan(5) on a wall, and at the corners, where the drafted corner edge
+    // leans out sqrt 2 times as far, up to w k / (1 - k), k = sqrt 2 tan 5.
+    let k = 2f64.sqrt() * t;
+    let x = level.axis_offset_mm;
+    assert!(
+        x >= d + h * t - 1e-9 && x <= d + w * k / (1. - k) + 1e-9,
+        "{level:?}"
+    );
+    // The face width stays exact: the cone's radius at the face is x + w.
+    assert!(
+        (level.tip_z_mm - (10. - (x + w - 0.1))).abs() < 1e-9,
+        "{level:?}"
+    );
+    // Unmachined stock: the oracle only looks at the part.
+    let mut stock = Stock::new(spec.clone()).unwrap();
+    let motions = run(&mut plan, &tool, &mut stock);
+    // Independent: every part sample the assembly reaches below its surface
+    // is on the face within the width, or on a wall above depth h.
+    let prepared = tool.prepare().unwrap();
+    let points = samples(&part, 0.25);
+    let inside = |q: Vec3| {
+        (q[0] - lo[0])
+            .min(hi[0] - q[0])
+            .min(q[1] - lo[1])
+            .min(hi[1] - q[1])
+    };
+    let mut reached = 0;
+    for m in motions.iter().filter(|m| m.kind == MoveKind::Cut) {
+        let prepared_curve = m.curve.prepare(1e-5).unwrap();
+        let n = (prepared_curve.length_mm() / 0.2).ceil().max(1.) as usize;
+        for i in 0..=n {
+            let p = prepared_curve.position(i as f64 / n as f64).unwrap();
+            for q in &points {
+                let r = (q[0] - p[0]).hypot(q[1] - p[1]);
+                let Some(height) = tool_height(&prepared, tool.gauge_length_mm, r) else {
+                    continue;
+                };
+                if q[2] - (p[2] + height) <= 1e-6 {
+                    continue;
+                }
+                reached += 1;
+                let on_face = (q[2] - 10.).abs() <= 1e-6 && inside(*q) <= w + 0.02;
+                let on_wall = q[2] < 10. && 10. - q[2] <= h + 0.02;
+                // A drafted corner edge (where two walls meet, sqrt 2 tan 5
+                // out) is broken down to w / (1 - k).
+                let corner = (q[0] - lo[0]).min(hi[0] - q[0]) < -0.01
+                    && (q[1] - lo[1]).min(hi[1] - q[1]) < -0.01;
+                let on_wall =
+                    on_wall || (corner && q[2] < 10. && 10. - q[2] <= w / (1. - k) + 0.02);
+                assert!(on_face || on_wall, "{p:?} cuts the part at {q:?}");
+            }
+        }
+    }
+    assert!(reached > 100, "{reached}");
+    // 50 degrees, beyond the cone's 45: reported with that reason, not cut.
+    let part = frustum([5., 5.], [35., 25.], 2., 50.);
+    let inset = 2. * 50f64.to_radians().tan();
+    let op = operation(
+        mesh(part),
+        vec![DeburrLevel {
+            regions: vec![rect([5. + inset, 5. + inset], [35. - inset, 25. - inset])],
+            z_mm: 2.,
+            broken_edges: vec![],
+        }],
+    );
+    let plan = DeburrPlan::prepare(op, &tool, &spec, [0., 0., 70.], 1, &cancel).unwrap();
+    let report = plan.report();
+    assert_eq!(report.runs, 0);
+    assert!(!report.skipped.is_empty());
+    assert!(
+        report
+            .skipped
+            .iter()
+            .all(|s| s.reason.contains("drafted too steeply")),
+        "{:?}",
+        report.skipped
+    );
+    assert_eq!(report.level_details[0].max_wall_draft_deg, 0.);
+}
+
+#[test]
+fn a_declared_broken_edge_is_reported_as_already_broken() {
+    // A rounded-over long edge, modelled as a quarter-cylinder fillet
+    // (radius 1) between the top face (y <= 24) and the back wall (y = 25).
+    let mut part = cuboid([5., 5., 0.], [35., 24., 10.]);
+    part.extend(cuboid([5., 24., 0.], [35., 25., 9.]));
+    let steps = 16;
+    for i in 0..steps {
+        let a = |k: usize| std::f64::consts::FRAC_PI_2 * k as f64 / steps as f64;
+        let p = |x: f64, k: usize| [x, 24. + a(k).sin(), 9. + a(k).cos()];
+        part.push([p(5., i), p(35., i), p(35., i + 1)]);
+        part.push([p(5., i), p(35., i + 1), p(5., i + 1)]);
+    }
+    let cancel = AtomicBool::new(false);
+    let tool = chamfer_mill();
+    let op = operation(
+        mesh(part),
+        vec![DeburrLevel {
+            regions: vec![rect([5., 5.], [35., 24.])],
+            z_mm: 10.,
+            broken_edges: vec![camlib::deburr::DeburrBrokenEdge {
+                points: vec![[5., 24.], [35., 24.]],
+                error_mm: 0.,
+            }],
+        }],
+    );
+    let plan = DeburrPlan::prepare(op, &tool, &spec(10.), [0., 0., 70.], 1, &cancel).unwrap();
+    let report = plan.report();
+    // The rounded edge (30 long, plus the path's corner arcs) counts as
+    // broken; it is never cut, and not reported unreachable.
+    assert!(
+        report.already_broken_length_mm > 30.,
+        "{}",
+        report.already_broken_length_mm
+    );
+    assert!(
+        report.unreachable_length_mm < 4.,
+        "{}",
+        report.unreachable_length_mm
+    );
+    assert!(report.cut_length_mm > 30. + 2. * 19. - 4. - 1.);
+}
+
+/// A prism 40 x 20 whose top slopes from Z `z0` at x = 0 to Z `z1` at x = 40.
+fn sloped_prism(z0: f64, z1: f64) -> Vec<[Vec3; 3]> {
+    let p = |x: f64, y: f64, top: bool| [x, y, if top { z0 + (z1 - z0) * x / 40. } else { 0. }];
+    let quad = |a: Vec3, b: Vec3, c: Vec3, d: Vec3| vec![[a, b, c], [a, c, d]];
+    [
+        quad(
+            p(0., 0., true),
+            p(40., 0., true),
+            p(40., 20., true),
+            p(0., 20., true),
+        ),
+        quad(
+            p(0., 0., false),
+            p(0., 20., false),
+            p(40., 20., false),
+            p(40., 0., false),
+        ),
+        quad(
+            p(0., 0., false),
+            p(40., 0., false),
+            p(40., 0., true),
+            p(0., 0., true),
+        ),
+        quad(
+            p(0., 20., false),
+            p(0., 20., true),
+            p(40., 20., true),
+            p(40., 20., false),
+        ),
+        quad(
+            p(0., 0., false),
+            p(0., 0., true),
+            p(0., 20., true),
+            p(0., 20., false),
+        ),
+        quad(
+            p(40., 0., false),
+            p(40., 20., false),
+            p(40., 20., true),
+            p(40., 0., true),
+        ),
+    ]
+    .concat()
+}
+
+#[test]
+fn sloped_edges_are_broken_with_a_ball_and_every_listed_edge_is_accounted_for() {
+    use camlib::deburr::DeburrEdge;
+    let (z0, z1) = (16., 6.);
+    let part = sloped_prism(z0, z1);
+    let slope = ((z1 - z0) / 40f64).atan();
+    // The top's outward normal (it falls toward +x), and the side walls'.
+    let top = [-slope.sin(), 0., slope.cos()];
+    let edge = |id: &str, kind: &str, a: Vec3, b: Vec3, normals: [Vec3; 2]| DeburrEdge {
+        id: id.into(),
+        kind: kind.into(),
+        points: vec![a, b],
+        error_mm: 0.,
+        straight: true,
+        normals,
+        planar: [true, true],
+    };
+    let edges = vec![
+        edge(
+            "front",
+            "sloped",
+            [0., 0., z0],
+            [40., 0., z1],
+            [top, [0., -1., 0.]],
+        ),
+        edge(
+            "back",
+            "sloped",
+            [0., 20., z0],
+            [40., 20., z1],
+            [top, [0., 1., 0.]],
+        ),
+        edge(
+            "corner",
+            "vertical",
+            [0., 0., 0.],
+            [0., 0., z0],
+            [[-1., 0., 0.], [0., -1., 0.]],
+        ),
+        edge(
+            "bottom",
+            "horizontal",
+            [0., 0., 0.],
+            [40., 0., 0.],
+            [[0., 0., -1.], [0., -1., 0.]],
+        ),
+    ];
+    // Unmachined stock up to Z16 over the whole prism: flutes long enough
+    // to reach the low end through it.
+    let mut tool = round_end(None);
+    tool.cutter.cutting_length_mm = 18.;
+    let mut op = operation(mesh(part.clone()), vec![]);
+    op.tool = tool.id.clone();
+    op.edges = edges;
+    let spec = StockSpec {
+        version: 1,
+        units: "mm".into(),
+        min_mm: [-4., -4., 0.],
+        max_mm: [44., 24., 16.],
+        cell_size_mm: 0.1,
+        max_cells: 1 << 22,
+    };
+    let cancel = AtomicBool::new(false);
+    let mut plan = DeburrPlan::prepare(op, &tool, &spec, [-4., -4., 70.], 1, &cancel).unwrap();
+    let report = plan.report();
+    let by_id = |id: &str| report.edges.iter().find(|e| e.id == id).unwrap();
+    assert_eq!(report.edges.len(), 4);
+    for id in ["front", "back"] {
+        let e = by_id(id);
+        // Broken but for its ends (where the ball would reach the end walls).
+        assert!(e.cut_length_mm > 0.75 * e.length_mm, "{e:?}");
+        assert_ne!(e.status, "skipped");
+    }
+    assert_eq!(by_id("corner").status, "skipped");
+    assert!(by_id("corner").reasons[0].contains("vertical edge"));
+    assert_eq!(by_id("bottom").status, "skipped");
+    assert!(by_id("bottom").reasons[0].contains("faces down"));
+    let mut stock = Stock::new(spec.clone()).unwrap();
+    let motions = run(&mut plan, &tool, &mut stock);
+    // Independent: the 90 degree edges' ball centre runs s out along the
+    // outward bisector, s = sqrt(R^2 - L^2 / 2) - L / sqrt(2); every part
+    // sample the assembly reaches (its own radius profile) must be within R
+    // of that line (the cove), nothing else.
+    let (r, leg) = (2f64, 0.5f64);
+    let s = (r * r - leg * leg / 2.).sqrt() - leg / 2f64.sqrt();
+    let from_centre_line = |side: f64, q: Vec3| {
+        let wall = [0., side, 0.];
+        let b: Vec3 = std::array::from_fn(|k| (top[k] + wall[k]) / 2f64.sqrt());
+        let a: Vec3 = [0., if side < 0. { 0. } else { 20. }, z0];
+        let a: Vec3 = std::array::from_fn(|k| a[k] + s * b[k]);
+        let v = [40., 0., z1 - z0];
+        let l = (v[0] * v[0] + v[2] * v[2]).sqrt();
+        let v = v.map(|x| x / l);
+        let d: Vec3 = std::array::from_fn(|k| q[k] - a[k]);
+        let t = d[0] * v[0] + d[1] * v[1] + d[2] * v[2];
+        let perp: Vec3 = std::array::from_fn(|k| d[k] - t * v[k]);
+        (perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]).sqrt()
+    };
+    let prepared = tool.prepare().unwrap();
+    let points = samples(&part, 0.2);
+    let mut reached = 0;
+    for m in motions.iter().filter(|m| m.kind != MoveKind::Rapid) {
+        let curve = m.curve.prepare(1e-5).unwrap();
+        let n = (curve.length_mm() / 0.1).ceil().max(1.) as usize;
+        for i in 0..=n {
+            let p = curve.position(i as f64 / n as f64).unwrap();
+            for q in &points {
+                let d = (q[0] - p[0]).hypot(q[1] - p[1]);
+                let Some(h) = tool_height(&prepared, tool.gauge_length_mm, d) else {
+                    continue;
+                };
+                if q[2] - (p[2] + h) <= 1e-6 {
+                    continue;
+                }
+                reached += 1;
+                let side = if q[1] < 10. { -1. } else { 1. };
+                assert!(
+                    from_centre_line(side, *q) <= r + 1e-6,
+                    "{:?} at {p:?} cuts the part at {q:?} outside the break",
+                    m.kind
+                );
+            }
+        }
+    }
+    assert!(reached > 50, "{reached}");
 }

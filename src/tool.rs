@@ -41,6 +41,26 @@ pub enum CutterShape {
     /// is the ball's lower half and a cylinder of its radius above), and
     /// the stem must be thinner than the ball.
     Probe,
+    /// A lollipop (ball-shank undercut) cutter: a sphere of `diameter_mm` on
+    /// a neck. The cutting length is the sphere's height from its tip to
+    /// where it meets the neck (between its radius and its diameter).
+    /// Needs a neck and tri-dexel stock: it cuts above its widest section.
+    Lollipop,
+    /// A dovetail cutter: widest at its flat tip (`diameter_mm`), its flank
+    /// tapering toward the spindle at `flank_angle_rad` from the tip face
+    /// (a 60 degree cutter cuts a 60 degree dovetail). Needs tri-dexel stock:
+    /// it cuts under material above its tip.
+    Dovetail {
+        flank_angle_rad: f64,
+    },
+}
+impl CutterShape {
+    /// Whether the cutting part narrows toward the spindle: it then cuts
+    /// under material above its widest section, which only tri-dexel stock
+    /// represents.
+    pub fn undercuts(&self) -> bool {
+        matches!(self, Self::Lollipop | Self::Dovetail { .. })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -143,6 +163,37 @@ impl Cutter {
         }
         let (tip_height, slope) = match self.shape {
             CutterShape::Flat | CutterShape::Beam => (0., 0.),
+            CutterShape::Lollipop => {
+                let neck = self.neck.as_ref().ok_or(
+                    "a lollipop cutter needs a neck: the sphere's top joins it below the shank",
+                )?;
+                let top = self.cutting_length_mm;
+                if top < radius || top > 2. * radius {
+                    return Err("a lollipop cutter's cutting length is the sphere's height up to the neck: between its radius and its diameter".into());
+                }
+                if neck.diameter_mm / 2. > (top * (2. * radius - top)).max(0.).sqrt() + 1e-9 {
+                    return Err("a lollipop cutter's neck must fit the sphere where they meet (the cutting length)".into());
+                }
+                (radius, 0.)
+            }
+            CutterShape::Dovetail { flank_angle_rad } => {
+                if !flank_angle_rad.is_finite()
+                    || !(0.01..std::f64::consts::FRAC_PI_2 - 0.001).contains(&flank_angle_rad)
+                {
+                    return Err("a dovetail cutter's flank angle must be finite and between 0.01 rad and just under 90 degrees".into());
+                }
+                let slope = flank_angle_rad.tan();
+                let top = radius - self.cutting_length_mm / slope;
+                let waist = self
+                    .neck
+                    .as_ref()
+                    .map_or(self.shank_diameter_mm, |n| n.diameter_mm)
+                    / 2.;
+                if top <= 0. || waist > top + 1e-9 {
+                    return Err("a dovetail cutter's flank must end (at its cutting length) no narrower than the neck or shank above it".into());
+                }
+                (0., slope)
+            }
             CutterShape::Ball | CutterShape::Probe => (radius, 0.),
             CutterShape::Bull { corner_radius_mm } => {
                 if !positive(corner_radius_mm) || corner_radius_mm > radius {
@@ -193,8 +244,8 @@ impl PreparedCutter {
             return None;
         }
         Some(match self.definition.shape {
-            CutterShape::Flat | CutterShape::Beam => 0.,
-            CutterShape::Ball | CutterShape::Probe => {
+            CutterShape::Flat | CutterShape::Beam | CutterShape::Dovetail { .. } => 0.,
+            CutterShape::Ball | CutterShape::Probe | CutterShape::Lollipop => {
                 self.radius
                     - ((self.radius - radius_mm) * (self.radius + radius_mm))
                         .max(0.)
@@ -212,16 +263,44 @@ impl PreparedCutter {
             } => (radius_mm - tip_diameter_mm / 2.).max(0.) / self.slope,
         })
     }
+    /// Heights of the cutting part whose radius reaches `radius_mm`: one
+    /// interval, the cutting profile being unimodal (it widens from the tip
+    /// to its widest section, then may narrow toward the spindle).
+    pub fn heights_at_radius(&self, radius_mm: f64) -> Option<[f64; 2]> {
+        let low = self.tip_height_at_radius(radius_mm)?;
+        let top = self.definition.cutting_length_mm;
+        let high = match self.definition.shape {
+            CutterShape::Lollipop => (self.radius
+                + ((self.radius - radius_mm) * (self.radius + radius_mm))
+                    .max(0.)
+                    .sqrt())
+            .min(top),
+            CutterShape::Dovetail { .. } => ((self.radius - radius_mm) * self.slope).min(top),
+            _ => top,
+        };
+        Some([low, high])
+    }
+    /// The height of the cutting part's widest section (its lowest one).
+    pub fn widest_height(&self) -> f64 {
+        self.tip_height
+    }
     pub fn radius_at(&self, z_mm: f64) -> Option<ProfileSlice> {
         if !z_mm.is_finite() || z_mm < 0. || z_mm > self.definition.overall_length_mm {
             return None;
         }
         if z_mm <= self.definition.cutting_length_mm {
-            let radius_mm = if z_mm >= self.tip_height {
+            let radius_mm = if let CutterShape::Lollipop = self.definition.shape {
+                (z_mm * (2. * self.radius - z_mm)).max(0.).sqrt()
+            } else if let CutterShape::Dovetail { .. } = self.definition.shape {
+                self.radius - z_mm / self.slope
+            } else if z_mm >= self.tip_height {
                 self.radius
             } else {
                 match self.definition.shape {
-                    CutterShape::Flat | CutterShape::Beam => self.radius,
+                    CutterShape::Flat
+                    | CutterShape::Beam
+                    | CutterShape::Lollipop
+                    | CutterShape::Dovetail { .. } => self.radius,
                     CutterShape::Ball | CutterShape::Probe => {
                         (z_mm * (2. * self.radius - z_mm)).max(0.).sqrt()
                     }

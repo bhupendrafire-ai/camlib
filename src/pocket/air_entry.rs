@@ -8,11 +8,120 @@ pub(super) fn none(n: &usize) -> bool {
 }
 
 impl PocketPlan {
+    /// The lowest tip height at `point` above which every whole-cell stock
+    /// upper bound lies clear of the tool assembly's sections (each section's
+    /// radius plus a guard, over every cell its disk overlaps). The stream's
+    /// stock-contact check reads these same bounds, so a rapid that stops
+    /// above this height can be certified by it, not only by the exact
+    /// committed sweeps. Outside the stock grid nothing is stock.
+    pub(crate) fn cell_entry_height(&self, stock: &Stock, point: Point) -> f64 {
+        self.cell_sweep_height(stock, point, 0.)
+    }
+
+    /// `cell_entry_height` for every tool position within `around` of
+    /// `point` (a helix bore of radius `around` about centre `point`): the
+    /// lowest tip height above which no whole-cell stock upper bound meets
+    /// any tool section anywhere on that disk.
+    pub(crate) fn cell_sweep_height(&self, stock: &Stock, point: Point, around: f64) -> f64 {
+        let [nx, ny] = stock.dimensions();
+        let [wx, wy] = stock.cell_widths_mm();
+        let min = stock.spec().min_mm;
+        let cells = stock.cells();
+        let guard = 32. * self.operation.tolerance_mm;
+        let mut height = f64::NEG_INFINITY;
+        for &(radius, bottom) in &self.air_entry_parts {
+            let reach = radius + around + guard;
+            let span = |v: f64, o: f64, w: f64, n: usize| {
+                let lo = ((v - reach - o) / w).floor().max(0.);
+                let hi = ((v + reach - o) / w).floor().min(n as f64 - 1.);
+                (lo as usize, hi)
+            };
+            let (i0, i1) = span(point[0], min[0], wx, nx);
+            let (j0, j1) = span(point[1], min[1], wy, ny);
+            if i1 < 0. || j1 < 0. {
+                continue;
+            }
+            for j in j0..=j1 as usize {
+                for i in i0..=i1 as usize {
+                    let (x0, y0) = (min[0] + i as f64 * wx, min[1] + j as f64 * wy);
+                    let dx = (x0 - point[0]).max(point[0] - x0 - wx).max(0.);
+                    let dy = (y0 - point[1]).max(point[1] - y0 - wy).max(0.);
+                    if dx.hypot(dy) <= reach {
+                        height = height.max(cells[j * nx + i].upper_mm - bottom);
+                    }
+                }
+            }
+        }
+        height
+    }
     /// Use `cache` for committed-clearance entry queries (shared across plans).
     pub(crate) fn share_entry_scene(&mut self, cache: &EntrySceneCache) {
         self.entry_scene = cache.clone();
     }
-    pub(super) fn cleared_entry_start(
+    /// Whether the committed sweeps prove a horizontal stroke `a`-`b` with
+    /// the tool tip at `z` clear of stock for every tool section (each
+    /// section's radius plus a guard), up to a skin of 0.01 mm (or 64
+    /// tolerances) above `z`, the slack a vertical entry is allowed too.
+    /// Work exhaustion or any uncertainty proves nothing.
+    pub(crate) fn cleared_link(
+        &self,
+        a: Point,
+        b: Point,
+        z: f64,
+        stock: &Stock,
+        cancel: &impl CancelSignal,
+    ) -> Result<bool, String> {
+        let mut cache = self
+            .entry_scene
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cached = cache.take();
+        let (mut scene, mut cursor) = match cached {
+            Some((scene, cursor)) if scene.stock_spec() == stock.spec() => (scene, cursor),
+            _ => (
+                EngagementScene::new_with_cancel(stock.spec().clone(), vec![], cancel)?,
+                crate::stock::ClearanceCursor::default(),
+            ),
+        };
+        let (rebuild, sweeps) =
+            stock.committed_clearance_since(&mut cursor, self.operation.tolerance_mm, cancel)?;
+        if rebuild {
+            scene = EngagementScene::new_with_cancel(stock.spec().clone(), sweeps, cancel)?;
+        } else {
+            for sweep in sweeps {
+                scene.append(sweep)?;
+            }
+        }
+        let scene = &cache.insert((scene, cursor)).0;
+        let skin = 0.01_f64.max(64. * self.operation.tolerance_mm);
+        let guard = 32. * self.operation.tolerance_mm
+            + 4096.
+                * f64::EPSILON
+                * (1. + a[0].abs() + a[1].abs() + b[0].abs() + b[1].abs() + z.abs());
+        let mut work = 100_000;
+        for &(radius, bottom) in &self.air_entry_parts {
+            let height = z + skin + bottom - guard;
+            if height > stock.spec().max_mm[2] {
+                continue;
+            }
+            match scene.clear_line(
+                a,
+                b,
+                radius + guard,
+                height,
+                self.operation.tolerance_mm,
+                &mut work,
+                cancel,
+            ) {
+                Ok(true) => (),
+                Ok(false) => return Ok(false),
+                Err(_) if !cancel.is_cancelled() => return Ok(false),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(true)
+    }
+    pub(crate) fn cleared_entry_start(
         &self,
         center: Point,
         orbit: f64,

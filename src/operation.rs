@@ -18,6 +18,7 @@ use crate::{
     stock::{CancelSignal, Stock, StockSpec},
     tool::ToolAssembly,
     trace::{TracePlan, TraceReport},
+    undercut::{UndercutPlan, UndercutReport},
     waterline::{WaterlinePlan, WaterlineReport},
 };
 use serde::Serialize;
@@ -38,6 +39,7 @@ pub enum OperationReport<'a> {
     Parallel(&'a ParallelReport),
     Waterline(&'a WaterlineReport),
     Trace(&'a TraceReport),
+    Undercut(&'a UndercutReport),
     ThreadMill(&'a ThreadMillReport),
     Tapping(&'a TappingReport),
     Reaming(&'a ReamingReport),
@@ -60,6 +62,7 @@ pub enum OperationPlan {
     Parallel(Box<ParallelPlan>),
     Waterline(Box<WaterlinePlan>),
     Trace(Box<TracePlan>),
+    Undercut(Box<UndercutPlan>),
     ThreadMill(Box<ThreadMillPlan>),
     Tapping(Box<TappingPlan>),
     Reaming(Box<ReamingPlan>),
@@ -304,6 +307,9 @@ impl OperationPlan {
             Operation::Contour(p) => Ok(Self::Contour(Box::new(ContourPlan::prepare(
                 p, tool, stock, initial, first_id, cancel,
             )?))),
+            Operation::Undercut(p) => Ok(Self::Undercut(Box::new(UndercutPlan::prepare(
+                p, tool, stock, initial, first_id, cancel,
+            )?))),
             Operation::Trace(p) => Ok(Self::Trace(Box::new(TracePlan::prepare(
                 p, tool, stock, initial, first_id, cancel,
             )?))),
@@ -354,6 +360,7 @@ impl OperationPlan {
             Self::Parallel(p) => OperationReport::Parallel(p.report()),
             Self::Waterline(p) => OperationReport::Waterline(p.report()),
             Self::Trace(p) => OperationReport::Trace(p.report()),
+            Self::Undercut(p) => OperationReport::Undercut(p.report()),
             Self::ThreadMill(p) => OperationReport::ThreadMill(p.report()),
             Self::Tapping(p) => OperationReport::Tapping(p.report()),
             Self::Reaming(p) => OperationReport::Reaming(p.report()),
@@ -378,6 +385,7 @@ impl OperationPlan {
             Self::Parallel(p) => p.prefix_events(),
             Self::Waterline(p) => p.prefix_events(),
             Self::Trace(p) => p.prefix_events(),
+            Self::Undercut(p) => p.prefix_events(),
             Self::ThreadMill(p) => p.prefix_events(),
             Self::Tapping(p) => p.prefix_events(),
             Self::Reaming(p) => p.prefix_events(),
@@ -402,6 +410,7 @@ impl OperationPlan {
             Self::Parallel(p) => p.suffix_events(),
             Self::Waterline(p) => p.suffix_events(),
             Self::Trace(p) => p.suffix_events(),
+            Self::Undercut(p) => p.suffix_events(),
             Self::ThreadMill(p) => p.suffix_events(),
             Self::Tapping(p) => p.suffix_events(),
             Self::Reaming(p) => p.suffix_events(),
@@ -430,6 +439,7 @@ impl OperationPlan {
             Self::Parallel(p) => p.next_motion_with_stock(stock, cancel),
             Self::Waterline(p) => p.next_motion_with_stock(stock, cancel),
             Self::Trace(p) => p.next_motion_with_stock(stock, cancel),
+            Self::Undercut(p) => p.next_motion_with_stock(stock, cancel),
             Self::ThreadMill(p) => p.next_motion_with_stock(stock, cancel),
             Self::Tapping(p) => p.next_motion_with_stock(stock, cancel),
             Self::Reaming(p) => p.next_motion_with_stock(stock, cancel),
@@ -469,6 +479,7 @@ impl OperationPlan {
             Self::Parallel(p) => p.finish_report(cancel),
             Self::Waterline(p) => p.finish_report(cancel),
             Self::Trace(p) => p.finish_report(cancel),
+            Self::Undercut(p) => p.finish_report(cancel),
             Self::ThreadMill(p) => p.finish_report(cancel),
             Self::Tapping(p) => p.finish_report(cancel),
             Self::Reaming(p) => p.finish_report(cancel),

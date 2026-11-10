@@ -551,7 +551,7 @@ class RecordedRun:
             source = self.read_chunk(completed - 1, files)
             decoder = _Decoder(source.payload)
             if (
-                source.kind != 1
+                source.kind not in (1, 11)
                 or (decoder.string(128), decoder.string(512), decoder.take(32).tobytes()) != self._verification_identity
                 or decoder.unpack("<3Q") != (completed - 1, completed - 1, completed)
             ):
@@ -832,7 +832,7 @@ class Player:
         frame = self.run.read_chunk(index)
         d = _Decoder(frame.payload)
         self._base._identity(d)
-        if frame.kind not in (1, 10) or d.unpack("<3Q") != (index, index, index + 1):
+        if frame.kind not in (1, 10, 11) or d.unpack("<3Q") != (index, index, index + 1):
             raise ProtocolError("retained motion sequence/range mismatch")
         return frame
 
@@ -854,7 +854,7 @@ class Player:
     def _motion_from(self, frame, state):
         d = _Decoder(frame.payload)
         state._identity(d)
-        if frame.kind not in (1, 10):
+        if frame.kind not in (1, 10, 11):
             raise ProtocolError("history record is not a committed motion")
         d.unpack("<3Q")
         return d.motion()
@@ -902,9 +902,9 @@ class Player:
             include(update.dirty_rect)
         motion = None
         partial_dirty = None
-        if cursor.fraction and getattr(work, "turning", False):
-            # Within a lathe move: the turning kernel on the move's first
-            # fraction, from the stock at its start.
+        if cursor.fraction and (getattr(work, "turning", False) or getattr(work, "local_preview", False)):
+            # Within a lathe or tri-dexel move: the run's own kernel on the
+            # move's first fraction, from the stock at its start.
             frame = self._frame(cursor.completed)
             motion = self._motion_from(frame, work)
             shown = work.preview(frame, cursor.fraction)

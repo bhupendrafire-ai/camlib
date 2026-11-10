@@ -40,8 +40,9 @@ See [Operations](operations.md) for parameters. Summary:
 | Thread milling | Internal/external helical threads; hole or boss proven in the stock first |
 | Tapping | Rigid right- and left-hand tapping cycles (G33.1 under M3/M4, or G84/G74 and G80 where declared); drilled hole proven first |
 | Chamfer | Top edges, depth from the chamfer tool's angle and tip; stepped widths, leads |
-| Deburr | Horizontal edges of a finished part (every upward-facing face's boundary), chamfer mill; the rest of the part proven untouched (whole tool assembly); unreachable and concave stretches reported |
+| Deburr | Horizontal edges of a finished part (every upward-facing face's boundary) and straight sloped edges (ball-end mill), every convex edge accounted for in the report; chamfer mill (chamfer break) or ball-end/bull-nose mill (arc break sized by leg or by the fillet it stays inside); next to vertical or drafted walls (chamfer mill), tangent fillets reported as already broken; the rest of the part proven untouched (whole tool assembly); unreachable and concave stretches reported |
 | Trace / engrave | Open or closed line/arc paths at depth, no radius offset |
+| Undercut | T-slot, keyseat, lollipop and dovetail cutters along paths at one depth under material, entering and leaving through proven-open columns; tri-dexel stock |
 | Feeds and speeds | `cutting_data`: rpm and feed from surface speed and feed per tooth, chip thinning, ball effective diameter |
 | Probing, tool setting | Surface, outside and inside corner, bore, boss, pocket and web cycles that correct a work offset, and tool length and diameter on a declared tool setter, with a `ProbeTool` (stylus ball, stem, body); protected positioning, measuring moves checked clear until `search_mm` before the expected contact; stock never changed; what is stored recorded as a premise |
 | Plasma and laser cutting | Sheet parts with holes: kerf compensation (computed or G41/G42 wear), arc/line leads from the scrap, overcut or negative overburn, pierce clearance (center pierce in small holes), inner features and nested parts first, small-hole feed and THC off, micro-joints, fixed or programmed pierce/cut heights; every lead, kerf path and pierce proven clear of the parts; sheet simulated cut through |
@@ -101,6 +102,18 @@ undercut or void counts as possible material. A box given as a mesh is the
 same stock as the box. `StockState.stock_mesh()` returns the stock as a closed
 mesh of each cell's upper bound; it contains all the material that may remain
 and says that it is approximate.
+
+Milling setups can use tri-dexel stock instead (`DexelStockSpec`): three grids
+of rays along X, Y and Z, each holding its possible and certain material as
+intervals. It represents undercuts (a T-slot under a slot, material below
+empty space) and resolves walls along the rays across them. The tool axis is
++Z (three-axis milling); the kernel also sweeps along the other stock axes
+for indexed machining once orientations can be declared (#2, #5). Planners
+and height-field checks read the run's height view (a valid height-field
+bound of the same material), so three-axis jobs plan the same toolpaths on
+either stock; the rays decide stock contact the height view leaves
+uncertain. Tri-dexel runs take no regeneration cache. Memory and time
+against the height field are in [Tri-dexel benchmarks](benchmarks-dexel.md).
 
 Configured checks examine every line/arc/helix continuously (not just its
 endpoints) against:

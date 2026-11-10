@@ -224,6 +224,15 @@ class Verifier:
             overlay = (state._frame.raw, state._offset, state._count)
         elif isinstance(state, StockState):
             base = state
+        elif getattr(state, "local_preview", False) and hasattr(state, "view_spec"):
+            # A tri-dexel run: its height view, a valid height-field bound.
+            context = dict(
+                stock=state.view_spec,
+                generation=state.completed,
+                fraction=0.0,
+                run=dict(run=state._manifest["run"], manifest_sha256=state._digest.hex()),
+            )
+            return json.loads(self._prepared.check(state.heights, _json(context), None))
         else:
             raise TypeError("material verification needs authoritative StockState or PartialStockView")
         manifest = base._manifest

@@ -21,7 +21,11 @@ def part():
     return base.union(frustum).cut(opening)
 
 
-def roughing_job(adaptive=False, *, routing=None, offset=False, omit_empty_cuts=False, stock_front=False):
+def roughing_job(
+    adaptive=False, *, routing=None, offset=False, omit_empty_cuts=False, stock_front=False, engagement_front=False
+):
+    if engagement_front:
+        clearing = AdaptiveClearing(0.25, path_strategy='engagement_front')
     if stock_front:
         adaptive = True
     if offset and (adaptive or routing is not None):
@@ -32,7 +36,9 @@ def roughing_job(adaptive=False, *, routing=None, offset=False, omit_empty_cuts=
         't1', EndMill('em2', diameter=2, flute_length=20, overall_length=50), 30, 60, (HolderSection(30, 60, 4, 4),)
     )
     clearing = (
-        AdaptiveClearing(
+        clearing
+        if engagement_front
+        else AdaptiveClearing(
             0.25,
             orbit_radius_mm=0.5,
             min_orbit_radius_mm=0.2,

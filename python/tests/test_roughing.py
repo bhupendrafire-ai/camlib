@@ -100,6 +100,55 @@ class RoughingTest(unittest.TestCase):
                 self.assertGreater(front['bulk_contours'], 0)
                 self.assertLessEqual(front['max_bounded_engagement_deg'], report['max_engagement_deg'])
 
+    def test_step_up_layers_follow_each_stepdown_and_remove_the_wall_stair(self):
+        base = example().roughing_job(offset=True)
+        operation = base['operations'][0]
+        self.assertNotIn('stepup_mm', operation.to_dict())
+        stepped = dict(base, operations=(replace(operation, stepup_mm=0.5),))
+        self.assertEqual(stepped['operations'][0].to_dict()['stepup_mm'], 0.5)
+
+        def run(c):
+            with Simulation(**c) as sim:
+                report = None
+                for update in sim.run_operations():
+                    if isinstance(update, OperationUpdate) and update.stage == 'end':
+                        report = update.report
+                self.assertTrue(sim.state.finished)
+                return report, sim.state.volume()['removed_lower_mm3']
+
+        (plain, removed), (report, more) = run(base), run(stepped)
+        full = [layer['tip_z_mm'] for layer in plain['layers']]
+        self.assertEqual([layer['tip_z_mm'] for layer in report['layers'] if 'step_up_of_z_mm' not in layer], full)
+        ups = [layer for layer in report['layers'] if 'step_up_of_z_mm' in layer]
+        self.assertTrue(ups)
+        self.assertTrue(all(layer['step_up_of_z_mm'] in full for layer in ups))
+        self.assertTrue(all(0 < layer['tip_z_mm'] - layer['step_up_of_z_mm'] < 2 for layer in ups))
+        self.assertGreater(more, removed + 1.0)
+
+        with self.assertRaises(SimulationError):
+            run(dict(base, operations=(replace(operation, stepup_mm=2.0),)))
+
+    def test_engagement_front_clears_every_layer_and_reports_its_estimate(self):
+        c = example().roughing_job(engagement_front=True)
+        clearing = c['operations'][0].clearing
+        self.assertEqual(clearing.to_dict()['path_strategy'], 'engagement_front')
+        report = None
+        with Simulation(**c) as sim:
+            for update in sim.run_operations():
+                if isinstance(update, OperationUpdate) and update.stage == 'end':
+                    report = update.report
+            self.assertTrue(sim.state.finished)
+            self.assertEqual(report['completed_layers'], 4)
+            self.assertEqual(report['motions'], sim.state.completed)
+            self.assertLess(sim.state.completed, 20000)
+            self.assertGreater(sim.state.volume()['removed_lower_mm3'], 5500)
+            self.assertGreaterEqual(report['helical_entries'], 1)
+            for layer in report['layers']:
+                front = layer['clearing']
+                self.assertEqual(front['strategy'], 'engagement_front')
+                self.assertLessEqual(front['max_estimated_engagement_mm'], 0.25 * 1.3)
+                self.assertEqual(front['geometric_residual_status'], 'estimated')
+
     def test_empty_cut_policy_is_an_explicit_strict_python_boolean(self):
         operation = config()['operations'][0]
         self.assertNotIn('omit_empty_cuts', operation.to_dict())

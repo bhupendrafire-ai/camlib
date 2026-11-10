@@ -217,9 +217,48 @@ location. `clearing` is one of:
   passes, with that much overlap reserved for the coverage proof,
 - `AdaptiveClearing(max_radial_engagement_mm)`: engagement-limited, with the
   same orbit, `cutting_sense` and `path_strategy` options as `AdaptivePocket`.
+- `AdaptiveClearing(w, path_strategy="engagement_front")` (roughing only):
+  follows the boundary between cut and uncut stock, turning so each step
+  removes a radial width of about `w`. Passes start from air or from stock
+  already cleared (proven clear by the committed cuts) and helix only into
+  enclosed material; short moves between passes stay down when the link
+  is clear. The engagement is steered on a fine grid built from the stock
+  model, so `max_estimated_engagement_mm` in the layer report is an
+  estimate. Every cutting and link move is checked exactly against the
+  layer region before it is emitted, and the run fails rather than emit
+  one that does not fit. Orbit options and `omit_empty_cuts` do not apply,
+  and the entry must be `StockEdgeEntry`. With `rapid_descent_clearance_mm`
+  (opt-in, on `Roughing`), a descent into a column that the committed cuts
+  prove clear for the whole tool assembly is rapid down to that far above
+  the proven height, and only the rest is fed; otherwise every entry feeds
+  down from `feed_z_mm` through material already cut. An entry beside the
+  material it cuts (where the whole-cell stock bounds still hold that
+  material) then plunges a few stock cells back, where the bounds let the
+  rapid come lower, and feeds across at depth. A helical entry ramps only
+  through material: above the height the committed cuts or the stock cell
+  bounds prove clear over its whole bore it descends straight down, and a
+  bore that is clear to the layer gets a straight plunge (reported as
+  `air_entries`). `ramp_clearance_mm` (opt-in, on `Roughing`) starts each
+  helix that far above the material it meets, never above `feed_z_mm`.
+  `link_feed_mm_min` (opt-in, on `Roughing`) feeds the stay-down links at
+  that rate wherever the committed stock's whole-cell upper bounds prove the
+  cutter's footprint clear of stock (checked in stretches of at most 2 mm);
+  any stretch that may touch stock keeps `feed_mm_min`. Reported per layer as
+  `fast_links` and `fast_link_mm`. `link_chip_thinning` (opt-in, needs
+  `link_feed_mm_min`) also speeds up stretches that may touch stock lightly:
+  a tooth at angle t from the feed direction cuts a chip fz·cos(t) and meets
+  material only at lateral offset r·sin(t) from the line, so from the
+  smallest lateral offset s of any stock cell the cutter can reach whose
+  upper bound is above the link depth (cell extent included), no chip is
+  thicker than that of a side cut with ae = r − s. The stretch feeds at
+  `feed_mm_min` · f(engagement) / f(r − s), with f(ae) = 2·√(ae/D − (ae/D)²)
+  (Sandvik Coromant, radial chip thinning), rounded down to 10 mm/min and
+  capped at `link_feed_mm_min`, so no chip is thicker than at `feed_mm_min`
+  and the clearing's radial engagement. Reported as `thinned_links` and
+  `thinned_link_mm`.
 
-Default entry is `StockEdgeEntry()`. `retract_z_mm`/`feed_z_mm` work for raster
-and offset clearing. `RestRoughing` machines only what earlier operations left
+Default entry is `StockEdgeEntry()`. `retract_z_mm`/`feed_z_mm` work for raster,
+offset and engagement_front clearing. `RestRoughing` machines only what earlier operations left
 (`rest_tolerance_mm`, 0.01, is ignored), never repeating strokes proven already
 cleared. Further options:
 
@@ -229,6 +268,14 @@ cleared. Further options:
   part (face the stock first).
 - `clearing_tolerance_mm` sets the allowed construction error of each layer's
   clearing region; the operation fails if it cannot be kept.
+- `stepup_mm` adds step-up layers: after each full `stepdown_mm` layer, layers
+  at most `stepup_mm` apart climb back up through that layer's depth, each
+  clearing only a band next to the part (the layer's shadow grown by three
+  times the cutter radius plus radial allowance, which contains every point
+  the full layer could not reach). The stair a full stepdown leaves on sloped
+  and stepped walls shrinks to one step-up. Each step-up layer is reported
+  with `step_up_of_z_mm`, the full layer it climbs from. Must be positive and
+  smaller than `stepdown_mm`.
 
 Total roughing depth may exceed the flute length: each deeper layer is
 prepared for its actual increment below the preceding layer, with a reserve
@@ -487,6 +534,40 @@ where the controller and precision allow. Nothing protects the part except the
 configured checks, since the path is the programmer's. Supports
 `retract_z_mm`/`feed_z_mm`.
 
+## Undercut: `Undercut`
+
+Required: `paths`, `tip_z_mm`, `entry_mm`, `clearance_z_mm`; optional
+`exit_mm`. An undercut cutter (`TSlotCutter`, `KeyseatCutter`,
+`LollipopCutter`, `DovetailCutter`) follows tool-centre paths (`TracePath`) at
+one tip height, under material left by earlier operations: the wide bottom of
+a T-slot under a slot milled first, a keyseat in a wall, a dovetail on a slot
+or pocket wall. As established practice (Machinery's Handbook, milling
+cutters; cutter makers' application guides), the cutter goes down to depth
+in open space (`entry_mm`: outside the part, or a cleared pocket), cuts
+sideways and goes back up in open space (`exit_mm`, or back along each open
+path to its start and the entry). It never plunges into material.
+
+```python
+from camlib import TracePath, TraceLine, TSlotCutter, Undercut, DexelStockSpec
+
+cutter = TSlotCutter("tslot", diameter=10, width=2, neck_diameter=3,
+                     neck_length=10, overall_length=50, shank_diameter=6)
+op = Undercut("t-slot", tool, (TracePath((-8, 10), (TraceLine((38, 10)),)),),
+              tip_z_mm=3, entry_mm=(-8, 10), exit_mm=(38, 10), clearance_z_mm=20,
+              feed_mm_min=300, plunge_mm_min=100, spindle_rpm=6000,
+              coolant="flood", tool_number=2, length_register=2)
+```
+
+Undercut operations, and lollipop and dovetail cutters in any operation,
+need tri-dexel stock (`DexelStockSpec`); a height-field setup refuses them.
+The plan proves, on the run's height view, that the columns where the tool
+goes down and up are open for the whole assembly, and refuses otherwise. The
+tri-dexel sweep refuses a move whose neck, shank or holder may touch
+material (a neck wider than the slot above). Compare the result with the
+part with `DexelStockState.compare_solid` (a closed mesh of the part); the
+stream's material stages compare the height view, which cannot hold an
+undercut.
+
 ## Chamfer: `Chamfer`
 
 Required: `region`, `top_z_mm`, `width_mm`, `clearance_z_mm`. Chamfers the
@@ -501,11 +582,14 @@ in the stock first.
 
 ## Deburr: `Deburr`
 
-Required: `surface` (the finished part as a `SurfaceMesh`), `levels`,
-`width_mm`, `clearance_z_mm`, and a chamfer mill (`ChamferMill`). Breaks the
-horizontal edges of a finished part: every boundary of every upward-facing
-planar face. `camlib.cadquery.deburr_levels(solid)` makes the levels (the
-faces at each height, exported exactly):
+Required: `surface` (the finished part as a `SurfaceMesh`), `levels`, the
+break size, `clearance_z_mm`, and a chamfer mill (`ChamferMill`), ball-end
+mill (`BallEndMill`) or bull-nose mill (`BullEndMill`). Breaks the horizontal
+edges of a finished part (every boundary of every upward-facing planar face)
+and, given the part's convex `edges`, sloped edges with a ball-end mill,
+accounting for every convex edge.
+`camlib.cadquery.deburr_levels(solid)` makes the levels (the faces at each
+height, exported exactly):
 
 ```python
 from camlib import Deburr
@@ -516,15 +600,63 @@ op = Deburr("deburr", c90, export_surface_mesh(part), deburr_levels(part), 0.5, 
             tool_number=2, length_register=2, coolant="flood")
 ```
 
-- The tool axis runs on the outward offset of each face boundary, so the cone
-  breaks the edge `width_mm` wide on the face and the chamfer depth down a
-  vertical wall (`wall_depth_mm` in the report: equal for 90 degrees),
-  whatever the edge's curvature. `tip_clearance_mm` (0.5) keeps the point out
-  of the cut.
-- Nothing else is touched, by an exact proof for the whole tool (cone,
-  neck, shank and holder) against the part above the face, below the break
-  and anything in the break's height band that is not the face or a vertical
-  wall under its boundary. The proof allows for the mesh's `surface_error_mm`
+- The tool axis runs on the outward offset of each face boundary, so the
+  break is the tool's own profile seen across the edge, whatever the edge's
+  curvature. A face point s inside the boundary is at least the offset plus
+  s from the path (exactly that on a convex stretch).
+- **Chamfer mill:** the cone breaks the edge `width_mm` wide on the face and
+  the chamfer depth down a vertical wall (`wall_depth_mm` in the report:
+  equal for 90 degrees). The axis is `tip_clearance_mm` (0.5) beyond the
+  tip's flat, which keeps the point out of the cut.
+- **Ball-end or bull-nose mill:** the break is a concave arc of the tool's
+  corner radius rc (`break_profile` "arc"). Across the edge, the corner's
+  circle has its centre c outward of the wall and c above the face, on the
+  edge's outward bisector. The tool tip is then rc - c below the face and
+  the axis r - rc + c outward of the boundary (r the tool radius). Because
+  c >= 0, only the corner arc reaches the part: the flat bottom stays
+  outside the wall and the body above the corner stays above the face. Give
+  the size in one of two ways:
+  - `width_mm` L, the leg: equal legs L on the face and down a vertical
+    wall, c = (sqrt(2 rc^2 - L^2) - L) / 2. L is at most rc.
+  - `break_radius_mm` rho (with `width_mm=None`): the largest break that
+    stays inside a fillet of radius rho. The corner circle touches the
+    fillet's circle, c = rc / sqrt(2) - rho (1 - 1 / sqrt(2)), and rho is at
+    most rc (1 + sqrt(2)). The legs are then L = sqrt(rc^2 - c^2) - c, less
+    than rho.
+
+  The report gives the legs (`face_width_mm`, `wall_depth_mm`), the axis
+  offset (`axis_offset_mm`) and `fillet_radius_mm`: the smallest fillet
+  radius whose fillet contains the break. Checking the stock against the
+  part filleted with that radius shows no gouge. The break's lower edge
+  must be at least `tip_clearance_mm` out from the end of the tool's flat
+  (c >= `tip_clearance_mm`, the ball's centre line for a ball), so the
+  point does not cut. A larger break is refused.
+- **Drafted walls** (chamfer mill): a planar wall hanging off the boundary
+  at draft beta below alpha, the cone's half angle, is found in the part
+  mesh. Each of its points is depth tan(beta) out from the boundary. The
+  cone ends the break on it at depth h = width / (tan alpha - tan beta),
+  the slant leg h / cos beta. The level's axis moves out by h tan(beta) for
+  the steepest such wall, so the break's lower edge there keeps the tip
+  clearance and the width on the face stays exact (`level_details`:
+  `axis_offset_mm`, `tip_z_mm`, `max_wall_draft_deg`). The proof excludes
+  such a wall only down to that depth. The cone reaches a point at depth d
+  only if d (tan alpha - tan beta) < width (plus the proof's margins), so
+  nothing deeper is cut. A wall drafted too steeply for the cone, at or near
+  its half angle or beyond its radius, stays an obstacle, and the stretch is
+  reported with that reason. With a ball-end or bull-nose mill, drafted
+  walls stay obstacles and are reported (use a chamfer mill).
+- **Fillets:** `deburr_levels` lists the boundary edges where a face meets
+  a fillet tangentially (`DeburrLevel.broken_edges`, from OpenCascade's
+  `BRepOffset_Analyse`). There is no sharp edge there, so the stretch is
+  reported as already broken (`already_broken_length_mm`), not unreachable.
+- Nothing else is touched, by an exact proof for the whole tool (cone or
+  corner arc, neck, shank and holder) against the part above the face,
+  below the break and anything in the break's height band that is not the
+  face, a vertical wall under its boundary or (to the depth above) a drafted
+  wall hanging off it. The arc's contact is a
+  concave maximisation like the cone's. It is bounded without a slope
+  bound, because a full quarter arc is vertical at its rim, and tested
+  against dense sampling. The proof allows for the mesh's `surface_error_mm`
   and two stock cell diagonals.
 - A stretch that cannot be proven is not cut. The tool retracts and
   re-enters where cutting can be proven again (entries and exits are proven
@@ -532,9 +664,29 @@ op = Deburr("deburr", c90, export_surface_mesh(part), deburr_levels(part), 0.5, 
   wall rises from the face, in `concave_length_mm` (nothing to break); convex
   edges the tool cannot reach in `unreachable_length_mm`.
 - The stock must already be machined to the part. A non-center-cutting
-  chamfer mill enters only where the stock is proven clear under its tip.
-- Not yet: ball-end deburring, and edges that are not horizontal (sloped
-  or vertical edges need tilting the tool, see the multi-axis issues).
+  tool enters only where the stock is proven clear under its tip.
+- **Every convex edge** (`edges`, from `camlib.cadquery.deburr_edges`, which
+  lists each convex edge as horizontal, vertical or sloped with its faces'
+  normals; convexity from OpenCascade's `BRepOffset_Analyse`): the report's
+  `edges` accounts for each one as `cut`, `partly cut` or `skipped`, with
+  the reasons for what was not cut. A horizontal edge on a level's boundary
+  takes the level's result.
+- **Sloped edges** (and horizontal edges under a sloped face), when straight
+  between planar faces, are broken with a ball-end mill. The ball's centre
+  runs on the edge moved s out along the outward bisector b of the faces'
+  normals (cos g = b . n), which leaves a cylindrical cove with equal legs
+  L = sqrt(R^2 - s^2 cos^2 g) - s sin g along both faces, whatever the
+  slope. `width_mm` gives L; `break_radius_mm` rho gives s = R + rho -
+  rho / cos g, the cove touching a rho fillet. For a 90 degree edge these
+  are the horizontal formulas. The proof is against the part with the two
+  faces' strips along the edge replaced by the cove itself (radius R plus
+  the proof's margins), so the whole assembly may touch nothing else. That
+  matters for the shank on a steep edge. Near the edge's ends, where the
+  ball would reach the next face, the path stays unproven and is reported.
+- Skipped with a reason: vertical edges (breaking one needs the tool's side
+  run along it), edges with a face facing down (they need a tilted tool,
+  #5/#6), curved edges that are not on a level, and edges off the levels
+  with a chamfer or bull-nose mill.
 
 ## Parallel finishing: `Parallel`
 
@@ -1244,6 +1396,11 @@ work planes waits for #2 and #5.
 `Drill(point_angle=118)`, `ChamferMill(angle=90, tip_diameter=0)`,
 `ThreadMill(diameter=, tooth_height=, neck_diameter=, neck_length=)`,
 `Tap(drill_diameter=, thread_length=, shank_diameter=)`,
+`TSlotCutter(diameter=, width=, neck_diameter=, neck_length=)` and
+`KeyseatCutter` (a cutting disk on a narrower neck),
+`LollipopCutter(diameter=, neck_diameter=, neck_length=, cutting_length=None)`
+(a sphere on a neck), `DovetailCutter(diameter=, angle=, cutting_length=)`
+(widest at the tip, the flank `angle` degrees from the tip face),
 `BoringBar(diameter=, bar_diameter=, reach=, insert_length=1)`,
 `Torch(kerf_width=, nozzle_diameter=6, body_diameter=30)` and
 `LaserHead(kerf_width=, nozzle_diameter=3, body_diameter=25)` and
@@ -1278,6 +1435,7 @@ gives the `effective_diameter_mm` it used. camlib does not pick cutting data.
 
 ## Not supported
 
-Undercuts (other than thread
-grooves and the stopped boring bar's shift) and 4/5-axis motion. Surfaces must
-be reachable from above (a part seen as a height map).
+4/5-axis motion. Surface finishing needs surfaces reachable from above (a
+part seen as a height map). Undercuts are cut with `Undercut` on tri-dexel
+stock only; lollipop finishing along an undercut edge (a surface strategy)
+is not supported yet.

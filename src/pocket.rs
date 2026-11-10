@@ -45,6 +45,7 @@ pub enum Operation<G = crate::surface::SurfaceMesh> {
     Parallel(crate::finishing::ParallelOperation<G>),
     Waterline(crate::waterline::WaterlineOperation<G>),
     Trace(crate::trace::TraceOperation),
+    Undercut(crate::undercut::UndercutOperation),
     ThreadMill(crate::holes::ThreadMillOperation),
     Tapping(crate::holes::TappingOperation),
     Reaming(crate::holes::ReamingOperation),
@@ -85,6 +86,7 @@ impl<G> Operation<G> {
             Self::Parallel(op) => Operation::Parallel(op.map_geometry(f)?),
             Self::Waterline(op) => Operation::Waterline(op.map_geometry(f)?),
             Self::Trace(op) => Operation::Trace(op),
+            Self::Undercut(op) => Operation::Undercut(op),
             Self::ThreadMill(op) => Operation::ThreadMill(op),
             Self::Tapping(op) => Operation::Tapping(op),
             Self::Reaming(op) => Operation::Reaming(op),
@@ -112,6 +114,7 @@ impl Operation {
             Self::Parallel(p) => &p.id,
             Self::Waterline(p) => &p.id,
             Self::Trace(p) => &p.id,
+            Self::Undercut(p) => &p.id,
             Self::ThreadMill(p) => &p.id,
             Self::Tapping(p) => &p.id,
             Self::Reaming(p) => &p.id,
@@ -136,6 +139,7 @@ impl Operation {
             Self::Parallel(p) => &p.tool,
             Self::Waterline(p) => &p.tool,
             Self::Trace(p) => &p.tool,
+            Self::Undercut(p) => &p.tool,
             Self::ThreadMill(p) => &p.tool,
             Self::Tapping(p) => &p.tool,
             Self::Reaming(p) => &p.tool,
@@ -161,6 +165,7 @@ impl Operation {
             Self::Parallel(p) => p.limits.as_ref(),
             Self::Waterline(p) => p.limits.as_ref(),
             Self::Trace(p) => p.limits.as_ref(),
+            Self::Undercut(_) => None,
             Self::ThreadMill(p) => p.limits.as_ref(),
             Self::Tapping(p) => p.limits.as_ref(),
             Self::Reaming(p) => p.limits.as_ref(),
@@ -186,6 +191,7 @@ impl Operation {
             Self::Parallel(p) => p.work_offset,
             Self::Waterline(p) => p.work_offset,
             Self::Trace(p) => p.work_offset,
+            Self::Undercut(p) => p.work_offset,
             Self::ThreadMill(p) => p.work_offset,
             Self::Tapping(p) => p.work_offset,
             Self::Reaming(p) => p.work_offset,
@@ -2459,6 +2465,39 @@ impl PocketPlan {
                 bounds.separation(edge_bounds) - guard >= required
                     || segment_distance(a, b, s) - guard >= required
             })
+    }
+    /// [`Self::link_geometry_fits_radius`] for a line or XY arc stroke: the
+    /// exact distance from the whole stroke to every source edge, plus a
+    /// signed query at its midpoint, must leave the cutter, allowance and
+    /// construction uncertainty inside the region.
+    pub(crate) fn stroke_geometry_fits_radius(&self, s: Stroke, radius: f64) -> bool {
+        let Some((c, sweep)) = s.arc else {
+            return self.link_geometry_fits_radius(s.a, s.b, radius);
+        };
+        let p = &self.operation;
+        let start = (s.a[1] - c[1]).atan2(s.a[0] - c[0]) + sweep / 2.;
+        let rho = norm(s.a, c);
+        let middle = [c[0] + rho * start.cos(), c[1] + rho * start.sin()];
+        let Ok(q) = self.source.query(middle) else {
+            return false;
+        };
+        let required = radius + p.radial_allowance_mm + q.uncertainty_mm + 4. * p.tolerance_mm;
+        if q.signed_clearance_mm.is_none_or(|d| d < required) {
+            return false;
+        }
+        let guard = 1024. * f64::EPSILON * self.source_magnitude;
+        let bounds = StrokeBounds::new(s);
+        self.source_edges
+            .iter()
+            .zip(&self.source_bounds)
+            .all(|(&e, &edge_bounds)| {
+                bounds.separation(edge_bounds) - guard >= required
+                    || stroke_distance(s, e) - guard >= required
+            })
+    }
+    /// The prepared source region this plan clears (before cutter offset).
+    pub(crate) fn source_region(&self) -> &PreparedRegion {
+        &self.source
     }
     /// Leave the cut at feed up to the feed height (above all stock), then
     /// rapid to `to_z`. Returns the point reached.

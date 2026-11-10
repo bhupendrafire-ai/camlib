@@ -36,8 +36,9 @@ while the Rust side does the planning and the checking.
      `turning::ops::TurnSession` when the run reaches it. Every move carries its
      exact `TurnDelta`.
 4. **Receive.** `simulation.stock_state()` picks the receiver: `StockState`
-   (height field, validated by native buffer kernels) or
-   `turn_state.TurnStockState` (the native `TurnReceiver`). **Every frame is
+   (height field, validated by native buffer kernels),
+   `turn_state.TurnStockState` (the native `TurnReceiver`) or
+   `dexel_state.DexelStockState` (the native `DexelReceiver`). **Every frame is
    checked against the receiver's own stock before it commits**: cursor,
    attribution, continuity, each changed cell's old value, material only removed.
 5. **Consume.** `Simulation.run_operations()` yields:
@@ -70,6 +71,7 @@ CRC-32), then the payload. Kinds (`src/stream.rs`):
 | 8 | Verification | A check record for a move or a material stage (JSON) |
 | 9 | Control | Typed control events (version 2 runs) |
 | 10 | Turn chunk | One lathe move and its turning stock change |
+| 11 | Dexel chunk | One milling move on tri-dexel stock and the rays it changed |
 
 Every frame carries the run id, revision and manifest digest. A frame from
 another run or revision is refused.
@@ -101,6 +103,24 @@ can say clear, violation or uncertain honestly.
   against the part, bore and chuck, and the holder and rapids against the
   stock.
 
+- **Tri-dexel** (`src/dexel.rs`, `DexelStock`; issue #1): three grids of rays
+  along X, Y and Z, each ray a prism (its cell's rectangle times its line)
+  holding two sorted interval lists: possible material (outside it the
+  cross-section is empty) and certain material (inside it the cross-section
+  is full). It holds undercuts. Grids combine only conservatively: a check is
+  clear when one grid proves it. The sweep kernel (`src/dexel/sweep.rs`)
+  removes the cutting part's sweep conservatively per ray (outer interval
+  from certain, inner from possible) and refuses a move whose neck, shank or
+  holder may meet possible material unless one grid proves that sweep
+  empty. The run keeps a **height view**: per Z ray, the top of the certain
+  material from the stock bottom (lower) and of the possible material
+  (upper). It is a valid height-field bound, so planners, the retract
+  policy, height-field stock contact, the material verifier and the machine
+  replay read it unchanged; its native proof records are added only for moves
+  that pass under no material. Frames carry ray changes; receivers derive
+  the view themselves. Partial moves are swept from the receiver's stock, as
+  for turning.
+
 Stock only loses material. A receiver refuses any change that adds material, or
 whose old value doesn't match its own stock.
 
@@ -108,7 +128,25 @@ whose old value doesn't match its own stock.
 
 - **Per move** (`src/stream_verification.rs`, records of kind 8): scene bodies
   (fixtures, protected parts as prisms), stock contact (rapids and links must not
-  touch stock), machine limits.
+  touch stock), machine limits. On tri-dexel stock, contact the height view
+  leaves uncertain is clear when one ray grid proves the swept assembly misses
+  possible material (`DexelStock::proves_clear`); violations come from the
+  height view's certain material.
+- **Tri-dexel material** (`src/dexel/material.rs`,
+  `DexelStock::compare_solid`, Python `DexelStockState.compare_solid`):
+  dexel stock against a closed triangle mesh of the part with a stated
+  error, undercuts included. Per ray, the part's certain and possible
+  intervals come from the centre line's crossings (exact orientations) and
+  the band where the ray's prism, grown by the error, meets a facet. A point's
+  3D distance never exceeds its distance along a ray, so excess within
+  tolerance along the rays proves the check; a cell counts as possible
+  excess only when all three grids allow it there. A definite finding needs a
+  witness whose exact distance to the mesh, less its error, exceeds the
+  tolerance. In runs, the stream's material stages still compare the height
+  view with `Target`/`SurfaceTarget`. Where two cut faces meet at an edge,
+  every grid's bound spans a whole cell, so the tolerance the rays can
+  prove there is about a cell's diagonal; choose `cell_size_mm` against the
+  comparison tolerance.
 - **Material** (`src/material.rs`, `camlib.material.Verifier`): stock against a
   target (`Target`: planar region and floor; `SurfaceTarget`: mesh). It reports
   leftover material (residual) and over-cut (gouge) as certain and possible

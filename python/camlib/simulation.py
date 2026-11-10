@@ -390,6 +390,30 @@ class InitialStock:
 
 
 @dataclass(frozen=True)
+class DexelStockSpec:
+    """Tri-dexel stock (issue #1): three grids of rays through the stock box,
+    along X, Y and Z, each ray holding its possible and certain material as
+    intervals. It holds undercuts (material below empty space), which the
+    height field of ``StockSpec`` cannot.
+
+    Budgets: ``max_rays`` bounds the three grids together (an uncut box has
+    nx*ny + ny*nz + nz*nx rays; the default is the format invariant, u32 ray
+    indices); ``max_intervals`` bounds the stored intervals (two per uncut
+    ray, more where cuts leave material on both sides of a ray). Memory:
+    about 48 bytes per ray and 16 per interval beyond the first of each
+    list, in the engine."""
+
+    min_mm: tuple
+    max_mm: tuple
+    cell_size_mm: float = 0.1
+    max_rays: int = 0xFFFFFFFF
+    max_intervals: int = 1 << 40
+
+    def to_dict(self):
+        return {"version": 1, "units": "mm", "model": "tri_dexel", **asdict(self)}
+
+
+@dataclass(frozen=True)
 class ToolChangePosition:
     """Where the machine leaves a new tool, in work coordinates: the spindle
     gauge line at ``gauge_z_mm`` (e.g. Z home, where M6 sends it) over
@@ -492,7 +516,7 @@ class Frame:
         if len(raw) < 20:
             raise ProtocolError("truncated frame header")
         magic, version, kind, length, checksum = _HEADER.unpack_from(raw)
-        if magic != b"CAMLSTRM" or version != 1 or kind not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+        if magic != b"CAMLSTRM" or version != 1 or kind not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
             raise ProtocolError("unsupported stream magic/version/kind")
         if not 20 <= limit <= CHECKPOINT_LIMIT or length > limit - 20:
             raise ProtocolError("frame exceeds explicit byte budget")
@@ -520,7 +544,7 @@ class Frame:
         if header is None:
             return None
         magic, version, kind, length, _ = _HEADER.unpack(header)
-        if magic != b"CAMLSTRM" or version != 1 or kind not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+        if magic != b"CAMLSTRM" or version != 1 or kind not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
             raise ProtocolError("unsupported stream header")
         if not 20 <= limit <= CHECKPOINT_LIMIT or length > limit - 20:
             raise ProtocolError("frame exceeds explicit byte budget")
@@ -1408,14 +1432,17 @@ class StockState:
 
 def stock_state(manifest_frame, *, max_cells=0xFFFFFFFF):
     """The committed-stock consumer of a run: a height field (milling,
-    thermal cutting) or turning stock (a lathe run)."""
+    thermal cutting), turning stock (a lathe run) or tri-dexel stock."""
     frame = Frame.checked(manifest_frame)
+    from .dexel_state import DexelStockState, is_dexel
     from .turn_state import TurnStockState, is_turning
 
-    if frame.kind == 3 and is_turning(
-        _parsed_manifest(hashlib.sha256(frame.payload).digest(), frame.payload.tobytes())
-    ):
-        return TurnStockState(frame, max_cells=max_cells)
+    if frame.kind == 3:
+        parsed = _parsed_manifest(hashlib.sha256(frame.payload).digest(), frame.payload.tobytes())
+        if is_turning(parsed):
+            return TurnStockState(frame, max_cells=max_cells)
+        if is_dexel(parsed):
+            return DexelStockState(frame, max_cells=max_cells)
     return StockState(frame, max_cells=max_cells)
 
 
@@ -1646,7 +1673,8 @@ class Simulation:
             self._send(manifest)
             frame = self._next()
             self.manifest_frame = frame
-            self.state = stock_state(frame, max_cells=manifest["stock"]["max_cells"])
+            stock = manifest["stock"]
+            self.state = stock_state(frame, max_cells=stock.get("max_cells", stock.get("max_rays", 0xFFFFFFFF)))
             self._verification = VerificationStream(frame) if "verification" in self.state._manifest else None
             self._last_motion, self.verification_update = None, None
             self._last_motion_frame = None
@@ -1692,7 +1720,7 @@ class Simulation:
                 raise ProtocolError("truncated simulation stream")
             raise _stream_error(self._diagnostic())
         magic, version, kind, length, _ = _HEADER.unpack_from(self._buffer, self._at)
-        if magic != b"CAMLSTRM" or version != 1 or kind not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+        if magic != b"CAMLSTRM" or version != 1 or kind not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
             raise ProtocolError("unsupported stream header")
         if length > FRAME_LIMIT - 20:
             raise ProtocolError("frame exceeds explicit byte budget")
@@ -1709,7 +1737,7 @@ class Simulation:
         if not self._fill(20):
             raise _stream_error(self._diagnostic())
         kind = _HEADER.unpack_from(self._buffer, self._at)[2]
-        if kind not in (1, 10) and not (kind == 8 and checks and self._last_motion_frame is not None):
+        if kind not in (1, 10, 11) and not (kind == 8 and checks and self._last_motion_frame is not None):
             return None
         length = _HEADER.unpack_from(self._buffer, self._at)[3]
         if length > FRAME_LIMIT - 20 or not self._fill(20 + length):

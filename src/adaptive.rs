@@ -24,6 +24,8 @@ pub enum AdaptivePathStrategy {
     #[default]
     DiskFront,
     StockFront,
+    /// Roughing only: grid-steered constant-engagement front following.
+    EngagementFront,
 }
 impl AdaptivePathStrategy {
     pub(crate) fn is_default(&self) -> bool {
@@ -492,6 +494,9 @@ impl AdaptivePlan {
         first_id: u64,
         cancel: &impl CancelSignal,
     ) -> Result<Self, String> {
+        if op.path_strategy == AdaptivePathStrategy::EngagementFront {
+            return Err("path_strategy engagement_front is available for Roughing; use disk_front or stock_front for an adaptive pocket".into());
+        }
         let prepared = tool.prepare()?;
         let r = prepared.cutter().definition().diameter_mm / 2.;
         let (radius, min_radius, bound) = op.validate_parameters(r)?;

@@ -296,6 +296,9 @@ fn profile_height(shape: &CutterShape, d: f64) -> f64 {
             included_angle_rad: a,
             tip_diameter_mm: td,
         } => (d - td / 2.).max(0.) / (a / 2.).tan(),
+        CutterShape::Lollipop | CutterShape::Dovetail { .. } => {
+            unreachable!("the height field refuses narrowing cutters")
+        }
     }
 }
 fn flat_line_height(p: [f64; 2], a: Vec3, b: Vec3, f: f64) -> f64 {

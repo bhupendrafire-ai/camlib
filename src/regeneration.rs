@@ -803,6 +803,9 @@ pub fn run(
     if producer.manifest().turning.is_some() {
         return run_turning(producer, cancel, send);
     }
+    if producer.manifest().stock.dexel().is_some() {
+        return Err("tri-dexel runs have no regeneration cache (it holds height-field stock changes); plan the run without a cache".into());
+    }
     if producer.completed() != 0
         || producer.manifest().version != 1
         || producer.manifest().operations.is_empty()

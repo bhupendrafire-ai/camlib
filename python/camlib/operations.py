@@ -754,44 +754,115 @@ class Flat:
 
 
 @dataclass(frozen=True)
+class DeburrBrokenEdge:
+    """A boundary stretch of a deburr level's faces that is already broken:
+    the face meets the next face tangentially (a fillet), so there is no
+    sharp edge to break. ``points`` is a polyline in XY within ``error_mm``
+    of the edge."""
+
+    points: tuple
+    error_mm: float
+
+    def __post_init__(self):
+        object.__setattr__(self, "points", tuple((float(x), float(y)) for x, y in self.points))
+
+    def to_dict(self):
+        return dict(points=[list(p) for p in self.points], error_mm=float(self.error_mm))
+
+
+@dataclass(frozen=True)
+class DeburrEdge:
+    """One convex edge of a part, for ``Deburr(edges=...)``.
+    ``camlib.cadquery.deburr_edges`` lists them from a solid.
+
+    ``kind`` is ``"horizontal"``, ``"vertical"`` or ``"sloped"``; ``points``
+    a polyline along the edge within ``error_mm`` (the ends of a straight
+    edge); ``normals`` its two faces' outward unit normals at its midpoint,
+    and ``planar`` whether each face is planar."""
+
+    id: str
+    kind: str
+    points: tuple
+    error_mm: float
+    straight: bool
+    normals: tuple
+    planar: tuple
+
+    def __post_init__(self):
+        object.__setattr__(self, "points", tuple(tuple(float(v) for v in p) for p in self.points))
+        object.__setattr__(self, "normals", tuple(tuple(float(v) for v in n) for n in self.normals))
+        object.__setattr__(self, "planar", tuple(bool(p) for p in self.planar))
+
+    def to_dict(self):
+        return dict(
+            id=self.id,
+            kind=self.kind,
+            points=[list(p) for p in self.points],
+            error_mm=float(self.error_mm),
+            straight=bool(self.straight),
+            normals=[list(n) for n in self.normals],
+            planar=list(self.planar),
+        )
+
+
+@dataclass(frozen=True)
 class DeburrLevel:
     """The upward-facing planar faces of a part at one height ``z_mm``, as
-    planar regions (unioned). ``camlib.cadquery.deburr_levels`` makes them
-    from a solid."""
+    planar regions (unioned), and the stretches of their boundaries that are
+    already broken (``DeburrBrokenEdge``: tangent fillets).
+    ``camlib.cadquery.deburr_levels`` makes them from a solid."""
 
     regions: tuple
     z_mm: float
+    broken_edges: tuple = ()
 
     def __post_init__(self):
         object.__setattr__(self, "regions", tuple(self.regions))
+        object.__setattr__(self, "broken_edges", tuple(self.broken_edges))
 
     def to_dict(self):
-        return dict(regions=[r.to_dict() if hasattr(r, "to_dict") else r for r in self.regions], z_mm=float(self.z_mm))
+        result = dict(
+            regions=[r.to_dict() if hasattr(r, "to_dict") else r for r in self.regions], z_mm=float(self.z_mm)
+        )
+        if self.broken_edges:
+            result["broken_edges"] = [e.to_dict() if hasattr(e, "to_dict") else e for e in self.broken_edges]
+        return result
 
 
 @dataclass(frozen=True)
 class Deburr:
-    """Break the horizontal edges of a finished part with a chamfer mill.
+    """Break the edges of a finished part with a chamfer mill, a ball-end
+    mill or a bull-nose mill: the horizontal edges of the ``levels``, and,
+    with ``edges`` (``camlib.cadquery.deburr_edges``), every listed convex
+    edge accounted for in the report, straight sloped edges broken with a
+    ball-end mill.
 
-    Each level's face boundaries are broken ``width_mm`` wide on the face
-    (and the chamfer depth down a vertical wall), with the tool's cone. The
-    rest of the part (``surface``, the finished part as a ``SurfaceMesh``) is
-    proven untouched for the whole tool assembly; a stretch that cannot be
-    proven is not cut and is reported (``unreachable_length_mm``; concave
-    stretches, where a wall rises from the face, in ``concave_length_mm``).
-    The stock must already be machined to the part.
+    Each level's face boundaries are broken ``width_mm`` wide on the face. A
+    chamfer mill's cone leaves a chamfer (the chamfer depth down a vertical
+    wall); a ball-end or bull-nose mill leaves a concave arc of its corner
+    radius with equal legs ``width_mm`` on the face and down a vertical wall.
+    With a ball-end or bull-nose mill the size can be given instead as
+    ``break_radius_mm``, the fillet the break must stay inside (pass
+    ``width_mm=None``). The rest of the part (``surface``, the finished part
+    as a ``SurfaceMesh``) is proven untouched for the whole tool assembly; a
+    stretch that cannot be proven is not cut and is reported
+    (``unreachable_length_mm``; concave stretches, where a wall rises from the
+    face, in ``concave_length_mm``). The stock must already be machined to
+    the part.
     """
 
     id: str
     tool: object
     surface: object
     levels: tuple
-    width_mm: float
+    width_mm: float | None
     clearance_z_mm: float
     tip_clearance_mm: float = 0.5
     cutting_sense: str = "climb"
     boundary_tolerance_mm: float = 0.01
     tolerance_mm: float = 1e-5
+    break_radius_mm: float | None = None
+    edges: tuple = ()
     feed_mm_min: float = field(kw_only=True)
     plunge_mm_min: float = field(kw_only=True)
     spindle_rpm: float = field(kw_only=True)
@@ -804,6 +875,7 @@ class Deburr:
 
     def __post_init__(self):
         object.__setattr__(self, "levels", tuple(self.levels))
+        object.__setattr__(self, "edges", tuple(self.edges))
 
     def to_dict(self):
         result = {field: getattr(self, field) for field in self.__dataclass_fields__}
@@ -812,8 +884,11 @@ class Deburr:
             tool=getattr(self.tool, "id", self.tool),
             surface=self.surface.to_dict() if hasattr(self.surface, "to_dict") else self.surface,
             levels=[level.to_dict() if hasattr(level, "to_dict") else level for level in self.levels],
+            edges=[edge.to_dict() if hasattr(edge, "to_dict") else edge for edge in self.edges],
         )
-        for key in ("retract_z_mm", "feed_z_mm"):
+        if not result["edges"]:
+            result.pop("edges")
+        for key in ("width_mm", "break_radius_mm", "retract_z_mm", "feed_z_mm"):
             if result[key] is None:
                 result.pop(key)
         return result
@@ -1198,6 +1273,11 @@ class AdaptiveClearing:
     path_strategy='stock_front' is a development strategy: it can stream a
     productive prefix but raises if coverage/steering is unresolved. Its
     cutting_sense is 'climb' (default) or 'conventional' with the CW spindle.
+
+    path_strategy='engagement_front' (Roughing only) follows the cut/uncut
+    stock boundary at about max_radial_engagement_mm per step, entering from
+    air or proven-cleared stock and helixing only into enclosed material.
+    Orbit options do not apply to it.
     """
 
     max_radial_engagement_mm: float
@@ -1251,7 +1331,7 @@ class Roughing:
     require_part_at_first_depth: bool = False
     omit_empty_cuts: bool = False
     rest_tolerance_mm: float | None = None
-    # See Pocket.retract_z_mm/feed_z_mm. Raster and offset clearing only.
+    # See Pocket.retract_z_mm/feed_z_mm. Raster, offset and engagement_front.
     retract_z_mm: float | None = None
     feed_z_mm: float | None = None
     # Each layer's protected shadow simplified within this and grown by it
@@ -1259,6 +1339,27 @@ class Roughing:
     # None: a quarter of radial_allowance_mm; 0: off. At most the allowance;
     # leaves at most twice this more stock.
     contour_tolerance_mm: float | None = None
+    # Step-up layers: after each full stepdown, climb back up through its depth
+    # at most this far apart, cutting only a band next to the part.
+    stepup_mm: float | None = None
+    # engagement_front only: a descent into a column the committed sweeps
+    # prove clear for the whole tool is rapid down to this far above the
+    # proven height, then fed. None: rapid descent stops at feed_z_mm.
+    rapid_descent_clearance_mm: float | None = None
+    # engagement_front only: each helical entry starts this far above the
+    # material its bore meets (never above feed_z_mm), so it is already
+    # ramping when it reaches stock. None: the helix starts at that material.
+    ramp_clearance_mm: float | None = None
+    # engagement_front only: stay-down links at depth feed at this rate
+    # (mm/min) where the committed stock bounds prove the cutter clear of
+    # stock; elsewhere links keep feed_mm_min. None: links feed at feed_mm_min.
+    link_feed_mm_min: float | None = None
+    # engagement_front only, with link_feed_mm_min: a link stretch that may
+    # touch stock feeds faster than feed_mm_min by radial chip thinning, from
+    # a proven bound on how close stock lies to its line, so no chip exceeds
+    # the one at feed_mm_min and the clearing's radial engagement; capped at
+    # link_feed_mm_min.
+    link_chip_thinning: bool = False
 
     @classmethod
     def from_solid(cls, id, tool, solid, *, source=None, **parameters):
@@ -1281,9 +1382,18 @@ class Roughing:
             result.pop('clearing_tolerance_mm')
         if not self.require_part_at_first_depth:
             result.pop('require_part_at_first_depth')
-        for key in ('retract_z_mm', 'feed_z_mm'):
+        for key in (
+            'retract_z_mm',
+            'feed_z_mm',
+            'stepup_mm',
+            'rapid_descent_clearance_mm',
+            'ramp_clearance_mm',
+            'link_feed_mm_min',
+        ):
             if result[key] is None:
                 result.pop(key)
+        if not self.link_chip_thinning:
+            result.pop('link_chip_thinning')
         for key in ("target", "clearing", "entry"):
             if hasattr(result[key], "to_dict"):
                 result[key] = result[key].to_dict()
@@ -1673,6 +1783,54 @@ class Trace:
         for key in ('retract_z_mm', 'feed_z_mm'):
             if result[key] is None:
                 result.pop(key)
+        return result
+
+
+@dataclass(frozen=True)
+class Undercut:
+    """Undercut milling with a T-slot, keyseat, lollipop or dovetail cutter:
+    the tool centre follows ``paths`` (``TracePath``) at the tip height
+    ``tip_z_mm``, under material left by earlier operations.
+
+    The tool goes down at ``entry_mm`` and back up at ``exit_mm`` (default:
+    back along each open path to its start, then to the entry): columns that
+    must be open for the whole tool, outside the part or in a cleared pocket.
+    The plan refuses a column it cannot prove open. Needs tri-dexel stock
+    (``DexelStockSpec``): its sweep refuses a move whose neck, shank or
+    holder may touch material.
+    """
+
+    id: str
+    tool: object
+    paths: tuple
+    tip_z_mm: float
+    entry_mm: tuple
+    clearance_z_mm: float
+    exit_mm: tuple | None = None
+    feed_mm_min: float = field(kw_only=True)
+    plunge_mm_min: float = field(kw_only=True)
+    tolerance_mm: float = 1e-5
+    spindle_rpm: float = field(kw_only=True)
+    work_offset: int = 1
+    tool_number: int = field(kw_only=True)
+    length_register: int = field(kw_only=True)
+    coolant: str = field(kw_only=True)
+
+    def __post_init__(self):
+        object.__setattr__(self, "paths", tuple(self.paths))
+
+    def to_dict(self):
+        result = {field: getattr(self, field) for field in self.__dataclass_fields__}
+        result.update(
+            kind="undercut",
+            tool=getattr(self.tool, "id", self.tool),
+            paths=[path.to_dict() if hasattr(path, "to_dict") else path for path in self.paths],
+            entry_mm=[float(v) for v in self.entry_mm],
+        )
+        if self.exit_mm is None:
+            result.pop("exit_mm")
+        else:
+            result["exit_mm"] = [float(v) for v in self.exit_mm]
         return result
 
 
