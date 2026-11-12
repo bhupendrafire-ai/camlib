@@ -467,7 +467,7 @@ move:
   no other allowance is made, and nothing is inferred from samples.
 
 A near-repeat is still refused when it cannot be proven by those certificates
-(#228). A deeper pass offset by even one micrometre from an earlier path is
+(#228). A deeper pass offset by even one nanometre from an earlier path is
 not that path: with a shank as wide as the cutter, its outer edge can extend
 past the earlier nominal sweep. An offset smaller than the two paths' combined
 error does not supply physical clearance. No tolerance is added to admit it,

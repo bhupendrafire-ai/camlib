@@ -778,7 +778,7 @@ mod tests {
             6.,
             B
         ));
-        // #228: an ulp or one micrometre off the line is not an exact repeat.
+        // #228: an ulp or one nanometre off the line is not an exact repeat.
         // Being inside the combined path error does not establish containment.
         for off in [f64::from_bits(y.to_bits() + 1), y + 1e-6, y - 1e-6] {
             let near = line([30., off], [110., off], 1.);
