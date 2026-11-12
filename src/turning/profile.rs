@@ -271,7 +271,13 @@ impl TurnProfile {
             let v = segs[i].start();
             let prev = *out.last().unwrap();
             if len(sub(prev.end(), next.start())) <= 1e-9 {
-                out.push(next);
+                // One represented junction: independently computed tangent
+                // offsets can differ by an ulp and would need an invalid link.
+                out.push(if prev.end() == next.start() {
+                    next
+                } else {
+                    trim(&next, Some(prev.end()), None)?
+                });
             } else if turn > 0. {
                 // Convex corner: round it about the vertex.
                 let a0 = angle_of(v, prev.end());
@@ -715,6 +721,38 @@ mod tests {
                         p[1] >= r + d - 1e-6 || p[0] > -1e-9 || p[0] < -40. + 1e-9,
                         "{p:?} {r}"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_offset_segments_share_the_exact_junction() {
+        // #242: quarter-circle bulges from the Python fixture across libm
+        // implementations. Independent offsets can differ by an ulp at a
+        // tangent join; its connector is too short to be a valid motion.
+        for bulge in [0.41421356237309503, 0.4142135623730951] {
+            let profile = TurnProfile {
+                points: vec![
+                    [0., 0., bulge],
+                    [6., -6., 0.],
+                    [6., -20., -bulge],
+                    [9., -23., 0.],
+                    [14., -23., 0.],
+                    [14., -40., 0.],
+                ],
+            };
+            for radius in [0.8, 0.4, 1.2] {
+                let path = profile.offset(radius).unwrap();
+                for pair in path.windows(2) {
+                    assert_eq!(
+                        pair[0].end(),
+                        pair[1].start(),
+                        "bulge {bulge}, radius {radius}: {pair:?}"
+                    );
+                }
+                for segment in path {
+                    segment.curve().prepare(1e-3).unwrap();
                 }
             }
         }

@@ -1637,7 +1637,9 @@ roughing setup its allowance.
   `thread_lead_word`; dialects without them refuse it.
 - `TurnFinish(allowance_mm)`: the profile from the front face, the nose
   center a nose radius (plus allowance) outside it: rounded at convex
-  corners, trimmed at concave ones. A feature too small for the nose is
+  corners, trimmed at concave ones. Tangent offset segments share one
+  represented endpoint, so rounding at their join does not introduce a tiny
+  connecting move (#242). A feature too small for the nose is
   refused (a concave arc no larger than the nose radius plus allowance
   included). Arcs of that path are planned as arcs and posted as one G2/G3
   block each (G18): the profile's own arcs, offset by the nose radius (a
