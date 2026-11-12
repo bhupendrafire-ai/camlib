@@ -778,9 +778,13 @@ mod tests {
             6.,
             B
         ));
-        // One ulp off the line is not on it, and has no margin either.
-        let off = f64::from_bits(y.to_bits() + 1);
-        assert!(!proven(&s, &line([30., off], [110., off], 1.), 6., B));
+        // #228: an ulp or one micrometre off the line is not an exact repeat.
+        // Being inside the combined path error does not establish containment.
+        for off in [f64::from_bits(y.to_bits() + 1), y + 1e-6, y - 1e-6] {
+            let near = line([30., off], [110., off], 1.);
+            assert!((off - y).abs() < s[0].error + crate::verification::path_error(&near, 1e-5));
+            assert!(!proven(&s, &near, 6., B), "offset {} mm", off - y);
+        }
         // A wider section, or one below the floor.
         assert!(!proven(&s, &line([30., y], [110., y], 1.), 6.000001, B));
         assert!(!proven(&s, &line([30., y], [110., y], 1.), 6., 4.9));
