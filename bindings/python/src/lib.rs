@@ -583,12 +583,39 @@ fn turning_rectangle_holder(
     serde_json::to_string(&holder).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
-/// Check a turning tool (JSON): its outlines, corner, holder and values.
+/// Check a turning tool (JSON): its outlines, corner, holder and values;
+/// with a supplied model (#110), its mesh, placement and insert cross-check.
 #[pyfunction]
-fn turning_validate_tool(tool: &str) -> PyResult<()> {
+fn turning_validate_tool(py: Python<'_>, tool: &str) -> PyResult<()> {
     let tool: camlib::turning::tool::TurningTool =
         serde_json::from_str(tool).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    tool.validate().map_err(PyValueError::new_err)
+    py.detach(|| camlib::turning::ops::validate_tool(&tool))
+        .map_err(PyValueError::new_err)
+}
+
+/// The envelope of a holder model turning about the tool axis (#110):
+/// (z0, z1, radius) cylinders from a mesh (JSON) and its declared placement.
+#[pyfunction]
+fn holder_envelope_from_mesh(
+    py: Python<'_>,
+    mesh: &str,
+    tip_mm: [f64; 3],
+    axis: [f64; 3],
+    z_range_mm: [f64; 2],
+    axial_resolution_mm: f64,
+) -> PyResult<Vec<[f64; 3]>> {
+    let mesh: camlib::surface::SurfaceMesh =
+        serde_json::from_str(mesh).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    py.detach(|| {
+        camlib::turning::model::revolved_envelope(
+            &mesh,
+            tip_mm,
+            axis,
+            z_range_mm,
+            axial_resolution_mm,
+        )
+    })
+    .map_err(PyValueError::new_err)
 }
 
 #[pyfunction]
@@ -2456,14 +2483,17 @@ impl DefaultMotionPost {
                 values.extend([offsets[u], offsets[v]]);
             } else {
                 // A straight vertical move keeps the controller's current XY
-                // when that is within the output tolerance of the source XY
-                // (an arc's representable end may differ by a word): writing
+                // when the block stays within the output tolerance of the
+                // source, its XY offset plus half a word of Z rounding (an
+                // arc's representable end may differ by a few words): writing
                 // the source XY instead would add a sideways step to a move
                 // leaving the surface it touches. The check still compares
                 // the decoded block with the source motion.
                 let vertical = matches!(m.curve, Curve::Line { start, end }
                     if start[0] == end[0] && start[1] == end[1])
-                    && (0..2).all(|k| (position[k] - end[k]).abs() <= self.output_tolerance / 2.);
+                    && (position[0] - end[0]).hypot(position[1] - end[1])
+                        + 0.5 * self.unit * 10f64.powi(-(self.decimals as i32))
+                        <= self.output_tolerance;
                 for &i in &axes {
                     addresses.push_str(&self.axes[i]);
                     values.push(if vertical && i < 2 {
@@ -2691,6 +2721,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(turning_iso_insert_body, module)?)?;
     module.add_function(wrap_pyfunction!(turning_rectangle_holder, module)?)?;
     module.add_function(wrap_pyfunction!(turning_validate_tool, module)?)?;
+    module.add_function(wrap_pyfunction!(holder_envelope_from_mesh, module)?)?;
     module.add_function(wrap_pyfunction!(schedule_motion, module)?)?;
     module.add_function(wrap_pyfunction!(schedule_engagement, module)?)?;
     module.add_function(wrap_pyfunction!(validate_heights, module)?)?;

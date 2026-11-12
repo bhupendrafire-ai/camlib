@@ -1300,9 +1300,15 @@ impl DefaultPost {
         if circular.is_none()
             && let Some(position) = self.position_mm
             && vertical
-            && (0..2).all(|k| (position[k] - end[k]).abs() <= self.machine.tolerance_mm / 2.)
+            && (position[0] - end[0]).hypot(position[1] - end[1])
+                + 0.5 * self.machine.unit() * 10f64.powi(-(self.machine.decimals as i32))
+                <= self.machine.tolerance_mm
         {
-            // A straight vertical move keeps the controller's current XY.
+            // A straight vertical move keeps the controller's current XY (an
+            // arc's representable end may differ by a few words) whenever the
+            // block stays within the tolerance of the source: its XY offset
+            // plus half a word of Z rounding. Writing the source XY would add
+            // a sideways step to a move leaving the surface it touches.
             values = axes
                 .iter()
                 .map(|i| if *i < 2 { position[*i] } else { end[*i] })

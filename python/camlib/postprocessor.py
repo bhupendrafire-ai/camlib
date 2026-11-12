@@ -1567,12 +1567,16 @@ class GCodePost(PostProcessor):
             not isinstance(c, Arc)
             and position is not None
             and vertical
-            and all(abs(position[k] - c.end[k]) <= self.machine.tolerance_mm / 2 for k in (0, 1))
+            and math.hypot(position[0] - c.end[0], position[1] - c.end[1])
+            + 0.5 * (25.4 if self.machine.output_units == 'inch' else 1) * 10**-self.machine.decimals
+            <= self.machine.tolerance_mm
         ):
             # A straight vertical move keeps the controller's current XY (an
-            # arc's representable end may differ by a word): writing the source
-            # XY would add a sideways step to a move leaving the surface it
-            # touches. The decoded block is still checked against the source.
+            # arc's representable end may differ by a few words): writing the
+            # source XY would add a sideways step to a move leaving the surface
+            # it touches. Kept whenever the block stays within tolerance_mm of
+            # the source, its XY offset plus half a word of Z rounding; the
+            # decoded block is still checked against the source.
             values = [position[i] if i < 2 else c.end[i] for i in axes]
         if isinstance(c, Arc):
             # Actual decoded start accounts for earlier rounding.
