@@ -197,7 +197,8 @@ impl PocketPlan {
         if high - low > skin && clear(low + skin)? {
             return Ok(low + skin);
         }
-        for _ in 0..12 {
+        // Deep brackets need more halvings to reach the proof's existing skin.
+        for _ in 0..64 {
             if cancel.is_cancelled() {
                 return Err("committed entry search cancelled".into());
             }
@@ -385,5 +386,115 @@ impl PocketPlan {
         } else {
             (positive, false)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stock::SweepOptions;
+
+    fn deep_cleared_path() -> (PocketPlan, Stock, Stock, Stroke) {
+        let manifest: crate::stream::StreamManifest = serde_json::from_str(include_str!(
+            "../../fixtures/operations/helical-pocket.json"
+        ))
+        .unwrap();
+        let Operation::Pocket(operation) = manifest.operations[0].clone() else {
+            panic!("pocket fixture")
+        };
+        let mut plan = PocketPlan::prepare(
+            operation,
+            &manifest.tools[0],
+            manifest.stock.height().unwrap(),
+            manifest.initial_position_mm,
+            1,
+            &|| false,
+        )
+        .unwrap();
+        let path = *plan.strokes.iter().find(|s| s.arc.is_none()).unwrap();
+        let mut spec = manifest.stock.height().unwrap().clone();
+        spec.max_mm[2] = 100_000.;
+        spec.cell_size_mm = 100.;
+        plan.operation.top_z_mm = spec.max_mm[2];
+        let uncut = Stock::new(spec.clone()).unwrap();
+        let mut cleared = Stock::new(spec).unwrap();
+        // Actual committed cuts clear a tube wider than every part of this
+        // assembly. The coarse cell also holds uncut stock beside the tube.
+        let mut earlier = manifest.tools[0].clone();
+        earlier.cutter.diameter_mm = 16.;
+        earlier.cutter.cutting_length_mm = 100_001.;
+        earlier.cutter.overall_length_mm = 100_010.;
+        earlier.cutter.shank_diameter_mm = 16.;
+        earlier.stickout_mm = 100_005.;
+        earlier.gauge_length_mm = 100_020.;
+        earlier.holders[0].z_min_mm = 100_005.;
+        earlier.holders[0].z_max_mm = 100_020.;
+        earlier.holders[0].radius_min_mm = 8.;
+        earlier.holders[0].radius_max_mm = 8.;
+        let prepared = earlier.prepare().unwrap();
+        let motion = Motion {
+            id: 1,
+            operation: "earlier-clearance".into(),
+            tool: earlier.id.clone(),
+            kind: MoveKind::Cut,
+            curve: path.curve(2.7),
+            feed_mm_min: Some(100.),
+        };
+        let delta = cleared
+            .preview_sweep(&prepared, &motion, 1., SweepOptions::default(), &|| false)
+            .unwrap();
+        cleared.apply_delta(&delta).unwrap();
+        assert_eq!(
+            plan.cell_path_height(&cleared, &[(path.a, path.b)], 0.005),
+            100_000.
+        );
+        (plan, uncut, cleared, path)
+    }
+
+    #[test]
+    fn committed_path_entry_search_converges_with_a_deep_height_bracket() {
+        let (plan, uncut, cleared, path) = deep_cleared_path();
+        let skin = 0.01_f64.max(64. * plan.operation.tolerance_mm);
+        let from = plan
+            .cleared_path_start(&[path], 0., &cleared, &|| false)
+            .unwrap();
+        assert!(from >= 2.7, "unproved entry below the material: {from}");
+        assert!(from <= 2.7 + 2. * skin, "entry unnecessarily high: {from}");
+        assert_eq!(
+            plan.cleared_path_start(&[path], 0., &uncut, &|| false)
+                .unwrap(),
+            plan.operation.top_z_mm
+        );
+        assert!(
+            plan.cleared_path_start(&[path], 0., &cleared, &|| true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rest_ramp_entry_uses_the_committed_floor_instead_of_a_coarse_search_height() {
+        let (mut plan, _, cleared, path) = deep_cleared_path();
+        plan.operation.entry = Some(crate::entry::PocketEntry::Ramp(crate::entry::RampEntry {
+            angle_rad: 3f64.to_radians(),
+            min_length_mm: Some(0.1),
+            feed_mm_min: Some(100.),
+        }));
+        plan.operation.rest_tolerance_mm = Some(0.01);
+        plan.operation.clearance_z_mm = 100_002.;
+        plan.position[2] = 100_002.;
+        let (moves, _) = plan
+            .rest_ramp_moves(path, 0., Some(&cleared), &|| false)
+            .unwrap();
+        let mut highest = f64::NEG_INFINITY;
+        for (curve, _, _) in moves {
+            let (a, b) = (curve.start(), curve.end());
+            let horizontal = norm([a[0], a[1]], [b[0], b[1]]);
+            if a[2] > b[2] && horizontal > 0. {
+                highest = highest.max(a[2]);
+                assert!(a[2] - b[2] <= horizontal * 3f64.to_radians().tan() + 1e-9);
+            }
+        }
+        assert!(highest.is_finite());
+        assert!(highest <= 2.72, "rest ramp starts in proven air: {highest}");
     }
 }
