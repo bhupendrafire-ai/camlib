@@ -213,7 +213,12 @@ def main():
     )
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    job = build_validation_job() if args.validation else build_rest_job() if args.rest else build_job()
+    if args.validation:
+        job = build_validation_job()
+    elif args.rest:
+        job = build_rest_job()
+    else:
+        job = build_job()
     cache = RegenerationCache(args.output / "cache")  # reuses unchanged operations next run
     machine = rest_machine_for(job) if args.rest or args.validation else machine_for(job)
     # The fixture retains writable arcs and explicitly lowers the others to checked lines.
