@@ -27,10 +27,10 @@ to write NC because no physical machine crash model has been declared.
 The option accepts only that missing model for inspection; it does not
 accept a stock-contact finding. Preserve the JSON check results with the NC.
 
-The LinuxCNC interpreter harness in PR #287 can consume this same fixture:
-build it with `build_validation_job()`, use `rest_machine_for(job)`, and
-pass `lowering=LoweringOptions(native_arcs=True)` to the harness's existing
-`run_job`. Interpreter execution is a separate check and needs `rs274`.
+`test_linuxcnc_interpreter.py` passes this same fixture and machine to the
+existing interpreter harness with `LoweringOptions(native_arcs=True)`.
+Interpreter execution is a separate check and needs `rs274`; a skip is not
+an interpreter pass.
 
 ## A result record
 

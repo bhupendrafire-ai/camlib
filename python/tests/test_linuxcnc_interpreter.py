@@ -59,6 +59,13 @@ class LinuxCNCInterpreterTest(unittest.TestCase):
         job = ex.build_rest_job()
         self.assertGreater(self.run_job(job, ex.rest_machine_for(job)), 40)
 
+    def test_the_interpreter_executes_the_fixed_milling_validation_job_as_planned(self):
+        from camlib.post import LoweringOptions
+
+        ex = example("standalone_job")
+        job = ex.build_validation_job()
+        self.assertGreater(self.run_job(job, ex.rest_machine_for(job), lowering=LoweringOptions(native_arcs=True)), 40)
+
     def test_a_pocket_round_an_island_with_arcs(self):
         import test_arc_output_policy as arcs
 
