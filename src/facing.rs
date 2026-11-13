@@ -1,5 +1,5 @@
 //! Lazy whole-stock planar facing. Coverage and exterior entry/link contract:
-//! docs/facing.md. Nominal coverage is separate from stock/model uncertainty.
+//! docs/operations.md. Nominal coverage is separate from stock/model uncertainty.
 use crate::{
     motion::{Coolant, Curve, Event, Motion, MoveKind, SpindleDirection, Vec3},
     pocket::ResidualStatus,
@@ -14,6 +14,7 @@ pub enum TraverseAxis {
     X,
     Y,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FacingMode {
@@ -386,6 +387,10 @@ impl FacingPlan {
         if end == self.position {
             return Ok(None);
         }
+        let next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or("facing motion IDs overflow")?;
         let curve = Curve::Line {
             start: self.position,
             end,
@@ -408,7 +413,7 @@ impl FacingPlan {
             },
         };
         self.position = end;
-        self.next_id += 1;
+        self.next_id = next_id;
         Ok(Some(motion))
     }
     pub fn next_motion_with_stock(
@@ -516,5 +521,51 @@ impl FacingPlan {
                 return Ok(result);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exhausted_motion_ids_refuse_without_advancing_position() {
+        let manifest: crate::stream::StreamManifest =
+            serde_json::from_str(include_str!("../fixtures/operations/facing.json")).unwrap();
+        let crate::pocket::Operation::Facing(operation) = manifest.operations[0].clone() else {
+            panic!("facing fixture")
+        };
+        let assembly = &manifest.tools[0];
+        let mut plan = FacingPlan::prepare(
+            operation,
+            assembly,
+            manifest.stock.height().unwrap(),
+            manifest.initial_position_mm,
+            u64::MAX - 1,
+            &|| false,
+        )
+        .unwrap();
+        let mut stock = Stock::new(manifest.stock.height().unwrap().clone()).unwrap();
+        let motion = plan
+            .next_motion_with_stock(&stock, &|| false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(motion.id, u64::MAX - 1);
+        let delta = stock
+            .preview_sweep(
+                &assembly.prepare().unwrap(),
+                &motion,
+                1.,
+                manifest.sweep,
+                &|| false,
+            )
+            .unwrap();
+        stock.apply_delta(&delta).unwrap();
+        let position = plan.position;
+
+        let error = plan.next_motion_with_stock(&stock, &|| false).unwrap_err();
+        assert!(error.contains("motion IDs overflow"), "{error}");
+        assert_eq!(plan.position, position);
+        assert_eq!(plan.next_id, u64::MAX);
     }
 }

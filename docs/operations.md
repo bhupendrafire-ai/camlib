@@ -86,6 +86,9 @@ outside the stock. Options: `axis` (`"x"`/`"y"`), `mode` (`"zigzag"` or
 `"one_way"`), `entry_air_gap_mm` (1), `edge_overlap_mm` (default 10% of the
 tool diameter), `reverse`. Flat end mills.
 
+The Rust planner refuses exhausted motion IDs before emitting another move or
+changing its position; IDs never wrap to zero during facing.
+
 ## Pocket: `Pocket`, `RestPocket`
 
 Required: `region`, `top_z_mm`, `floor_z_mm`, `stepdown_mm`, `stepover_mm`
