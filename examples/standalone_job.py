@@ -4,6 +4,7 @@ Needs only camlib (no CAD package). Run:
 
     python standalone_job.py output-dir --accept-unchecked-machine  # inspection only
     python standalone_job.py output-dir --rest --accept-unchecked-machine
+    python standalone_job.py output-dir --validation --accept-unchecked-machine
 
 All lengths are millimetres. Z is absolute in the work coordinate system:
 the stock occupies Z 0..6, so its top face is Z 6.
@@ -20,7 +21,7 @@ from camlib.jobs import Job, OperationNode, RegenerationCache, Setup
 from camlib.operations import Facing, Pocket, RestPocket
 from camlib.planar import Boundary, Component, PlanarRegion
 from camlib.playback import Cursor, Player
-from camlib.post import GCodeDialect, Machine, ToolSetting
+from camlib.post import GCodeDialect, LoweringOptions, Machine, ToolSetting
 from camlib.simulation import StockSpec
 from camlib.tools import EndMill, HolderSection, ToolAssembly
 from camlib.verification import StockContactOptions, StreamChecks
@@ -175,10 +176,36 @@ def rest_machine_for(job):
     )
 
 
+def build_validation_job():
+    """Fixed #20 milling fixture: facing, an island pocket and a two-tool rest cut.
+
+    Synthetic declarations only; see docs/post-validation.md before using NC.
+    """
+    job = build_rest_job()
+    setup = job.setups[0]
+    region = PlanarRegion(
+        "validation-pocket",
+        (Component(Boundary.polygon(((4, 4), (28, 4), (28, 20), (4, 20))), (Boundary.circle((16, 12), 2),)),),
+    )
+    return replace(
+        job,
+        id="milling-post-validation",
+        setups=(
+            replace(
+                setup,
+                stock=StockSpec((0, 0, 0), (32, 24, 6), 0.5),
+                operations=(setup.operations[0], *(replace(op, region=region) for op in setup.operations[1:])),
+            ),
+        ),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--rest", action="store_true", help="run the two-tool rest job")
+    variant = parser.add_mutually_exclusive_group()
+    variant.add_argument("--rest", action="store_true", help="run the two-tool rest job")
+    variant.add_argument("--validation", action="store_true", help="run the fixed synthetic milling post fixture (#20)")
     parser.add_argument(
         "--accept-unchecked-machine",
         action="store_true",
@@ -186,10 +213,12 @@ def main():
     )
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    job = build_rest_job() if args.rest else build_job()
+    job = build_validation_job() if args.validation else build_rest_job() if args.rest else build_job()
     cache = RegenerationCache(args.output / "cache")  # reuses unchanged operations next run
-    machine = rest_machine_for(job) if args.rest else machine_for(job)
-    with job.post("top", machine=machine, cache=cache) as posted:
+    machine = rest_machine_for(job) if args.rest or args.validation else machine_for(job)
+    # The fixture retains writable arcs and explicitly lowers the others to checked lines.
+    lowering = {"lowering": LoweringOptions(native_arcs=True)} if args.validation else {}
+    with job.post("top", machine=machine, cache=cache, **lowering) as posted:
         posted.wait()
         # Replay to the end to read final stock and check results.
         player = Player(posted)
