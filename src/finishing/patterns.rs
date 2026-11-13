@@ -148,12 +148,11 @@ pub(crate) fn spiral(
     sagitta: f64,
 ) -> Result<Vec<[f64; 2]>, String> {
     let turns = (outer - inner) / pitch;
-    // Each turn needs at most 2*pi / arc_step(inner) vertices.
-    check_points(
-        (turns + 1.) * TAU / arc_step(inner.max(pitch).min(outer), sagitta) + 2.,
-        "spiral pattern",
-    )?;
     let total = TAU * turns;
+    // Every angular increment is at least the outer radius's step. Bound the
+    // whole interval before allocating, including the start and final point.
+    let max_points = (total / arc_step(outer, sagitta)).ceil() + 2.;
+    check_points(max_points, "spiral pattern")?;
     let sign = if clockwise { -1. } else { 1. };
     let point = |theta: f64| {
         let r = inner + pitch * theta / TAU;
@@ -162,7 +161,8 @@ pub(crate) fn spiral(
             center[1] + r * (sign * theta).sin(),
         ]
     };
-    let mut points = vec![point(0.)];
+    let mut points = Vec::with_capacity(max_points as usize);
+    points.push(point(0.));
     let mut theta = 0.;
     while theta < total {
         let r = inner + pitch * theta / TAU;
@@ -395,6 +395,42 @@ pub(crate) fn clip(points: &[[f64; 2]], lo: [f64; 2], hi: [f64; 2]) -> Vec<Vec<[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spiral_refuses_a_budget_below_its_growing_radius_buffer() {
+        let result = crate::resources::with_memory_budget(50_000, || {
+            spiral([0., 0.], 1., 10., 0.1, true, false, 0.01)
+        });
+        let Err(error) = result else {
+            panic!("over-budget spiral must be refused");
+        };
+        assert!(error.contains("spiral pattern needs"));
+    }
+
+    #[test]
+    fn spiral_reserved_buffer_fits_the_checked_budget() {
+        let points = crate::resources::with_memory_budget(110_000, || {
+            spiral([0., 0.], 1., 10., 0.1, true, false, 0.01)
+        })
+        .unwrap();
+        assert!(points.len() > 1);
+        assert!(points.capacity() * std::mem::size_of::<[f64; 2]>() <= 110_000);
+        assert_eq!(points[0], [1., 0.]);
+        let last = points.last().unwrap();
+        assert!((last[0].hypot(last[1]) - 10.).abs() < 1e-9);
+    }
+
+    #[test]
+    fn short_spiral_checks_only_the_angle_it_traverses() {
+        let points = crate::resources::with_memory_budget(256, || {
+            spiral([0., 0.], 1., 1.001, 0.1, true, false, 0.00001)
+        })
+        .unwrap();
+        assert!(points.len() > 1);
+        assert!(points.capacity() * std::mem::size_of::<[f64; 2]>() <= 256);
+        let last = points.last().unwrap();
+        assert!((last[0].hypot(last[1]) - 1.001).abs() < 1e-9);
+    }
 
     #[test]
     fn spiral_pitch_and_chords() {

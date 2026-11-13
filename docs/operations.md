@@ -1365,6 +1365,10 @@ Patterns are clipped to the stock grown by the cutter radius. Each run
 starts with a vertical plunge onto the surface at `plunge_mm_min` and ends
 with a vertical retract (rows of `Parallel` enter from outside the stock).
 
+The spiral guide's point buffer is checked against the planning memory budget
+before allocation. Its angular sampling gets finer as the radius grows; if
+the complete buffer does not fit, planning refuses with the memory diagnostic.
+
 ### Scallop: `Scallop`
 
 `Scallop(id, tool, surface, floor_z_mm, stepover_mm, clearance_z_mm)` cuts
