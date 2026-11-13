@@ -130,6 +130,21 @@ fn check_points(count: f64, what: &str) -> Result<(), String> {
     crate::resources::check_memory(count as u128 * 16, what)
 }
 
+fn push_spiral_point(
+    points: &mut Vec<[f64; 2]>,
+    point: [f64; 2],
+    limit: usize,
+) -> Result<(), String> {
+    if points.len() >= limit {
+        return Err(
+            "spiral pattern exhausted its checked point buffer; increase pitch or chord tolerance"
+                .into(),
+        );
+    }
+    points.push(point);
+    Ok(())
+}
+
 /// Default outer radius: the farthest corner of the region from the center.
 pub(crate) fn reach(center: [f64; 2], lo: [f64; 2], hi: [f64; 2]) -> f64 {
     [lo[0], hi[0]]
@@ -153,6 +168,7 @@ pub(crate) fn spiral(
     // whole interval before allocating, including the start and final point.
     let max_points = (total / arc_step(outer, sagitta)).ceil() + 2.;
     check_points(max_points, "spiral pattern")?;
+    let max_points = max_points as usize;
     let sign = if clockwise { -1. } else { 1. };
     let point = |theta: f64| {
         let r = inner + pitch * theta / TAU;
@@ -161,13 +177,15 @@ pub(crate) fn spiral(
             center[1] + r * (sign * theta).sin(),
         ]
     };
-    let mut points = Vec::with_capacity(max_points as usize);
-    points.push(point(0.));
+    let mut points = Vec::with_capacity(max_points);
+    push_spiral_point(&mut points, point(0.), max_points)?;
     let mut theta = 0.;
     while theta < total {
         let r = inner + pitch * theta / TAU;
         theta = (theta + arc_step(r, sagitta)).min(total);
-        points.push(point(theta));
+        // Floating-point accumulation can exceed the mathematical count bound.
+        // Never let Vec grow beyond the allocation that passed the preflight.
+        push_spiral_point(&mut points, point(theta), max_points)?;
     }
     if !outward {
         points.reverse();
@@ -395,6 +413,18 @@ pub(crate) fn clip(points: &[[f64; 2]], lo: [f64; 2], hi: [f64; 2]) -> Vec<Vec<[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spiral_checked_buffer_refuses_growth_before_reallocation() {
+        let mut points = Vec::with_capacity(2);
+        push_spiral_point(&mut points, [0., 0.], 2).unwrap();
+        push_spiral_point(&mut points, [1., 0.], 2).unwrap();
+        let capacity = points.capacity();
+        let error = push_spiral_point(&mut points, [2., 0.], 2).unwrap_err();
+        assert!(error.contains("checked point buffer"));
+        assert_eq!(points, [[0., 0.], [1., 0.]]);
+        assert_eq!(points.capacity(), capacity);
+    }
 
     #[test]
     fn spiral_refuses_a_budget_below_its_growing_radius_buffer() {

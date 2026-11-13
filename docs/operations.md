@@ -1368,6 +1368,8 @@ with a vertical retract (rows of `Parallel` enter from outside the stock).
 The spiral guide's point buffer is checked against the planning memory budget
 before allocation. Its angular sampling gets finer as the radius grows; if
 the complete buffer does not fit, planning refuses with the memory diagnostic.
+Generation also refuses before an append could grow beyond that checked buffer,
+including when floating-point stepping exceeds the estimated point count.
 
 ### Scallop: `Scallop`
 
