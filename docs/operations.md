@@ -730,12 +730,8 @@ not that path: with a shank as wide as the cutter, its outer edge can extend
 past the earlier nominal sweep. An offset smaller than the two paths' combined
 error does not supply physical clearance. No tolerance is added to admit it,
 and the planner does not silently snap or change the requested path.
-`engagement::cover::tests::a_path_on_several_collinear_sweeps_is_proven_without_margin`
-pins this limitation: R6 cuts at Z5 on Y = `0.1 + 0.2`, with a section on the
-deeper Z1 pass whose bottom is Z5.1. The exact repeated line passes; the same
-section offset by one ulp or +/-0.000001 mm is an expected refusal. Resolving
-such a job needs a proven path/assembly change, not acceptance of unproven
-clearance.
+Resolving such a job needs a proven path/assembly change, not acceptance of
+unproven clearance.
 
 The same proof decides the stock sweep's cutting-length check and the
 stock-contact verification of the shank, so a move the planner admits is not
