@@ -1291,10 +1291,19 @@ pub(crate) mod testing {
     pub fn prism(polygon: &[P2], y0: f64, y1: f64) -> Vec<[V3; 3]> {
         let n = polygon.len();
         let at = |i: usize, y: f64| [polygon[i % n][0], polygon[i % n][1], y];
+        // An interior cap fan also handles collinear boundary vertices in
+        // an insert outline without generating zero-area surface facets.
+        let center = |y| {
+            [
+                polygon.iter().map(|p| p[0]).sum::<f64>() / n as f64,
+                polygon.iter().map(|p| p[1]).sum::<f64>() / n as f64,
+                y,
+            ]
+        };
         let mut out = vec![];
-        for i in 1..n - 1 {
-            out.push([at(0, y1), at(i, y1), at(i + 1, y1)]);
-            out.push([at(0, y0), at(i + 1, y0), at(i, y0)]);
+        for i in 0..n {
+            out.push([center(y1), at(i, y1), at(i + 1, y1)]);
+            out.push([center(y0), at(i + 1, y0), at(i, y0)]);
         }
         for i in 0..n {
             out.push([at(i, y0), at(i + 1, y0), at(i + 1, y1)]);
