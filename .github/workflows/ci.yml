@@ -200,6 +200,42 @@ jobs:
             bench-report.md
             bench-compare.md
 
+  # Posted LinuxCNC programs (mill, lathe and QtPlasmaC plasma) run in
+  # LinuxCNC's own interpreter (#20): the
+  # standalone interpreter `rs274` of the linuxcnc-uspace package, which
+  # Debian ships and Ubuntu does not, hence the container. It executes each
+  # program and prints the canonical commands it would send to the machine;
+  # python/tests/test_linuxcnc_interpreter.py compares them with the plan.
+  # CAMLIB_REQUIRE_LINUXCNC makes a missing interpreter a failure here,
+  # where everywhere else those tests are skipped.
+  linuxcnc:
+    name: LinuxCNC interpreter (posted programs)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 60
+    steps:
+      - name: Install LinuxCNC, Python and a C toolchain
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            linuxcnc-uspace python3 python3-dev ca-certificates curl git build-essential
+          rs274 2>&1 | head -1 || true
+          dpkg-query -W linuxcnc-uspace
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.100
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the engine and Python extension
+        run: cargo build --release --workspace --all-features
+        env:
+          PYO3_PYTHON: python3
+      - name: Run posted programs in the LinuxCNC interpreter
+        run: python3 -m unittest discover -v -s python/tests -p "test_linuxcnc_interpreter.py"
+        env:
+          PYTHONPATH: python
+          CAMLIB_REQUIRE_LINUXCNC: '1'
+
   windows-wheel:
     name: Windows wheel (installed package)
     needs: changes

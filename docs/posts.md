@@ -546,6 +546,55 @@ state. It does **not** prove the controller's real settings (work offsets, tool
 length table, option parameters, tool-change routine) match the machine
 definition. Those are inputs you supply.
 
+### Checked in LinuxCNC's own interpreter
+
+The decoder that checks a posted program is camlib's reading of the
+controller's manual. For LinuxCNC there is a second, independent reader: the
+controller's own interpreter. CI runs posted LinuxCNC programs through
+`rs274`, the standalone interpreter shipped with LinuxCNC (2.9.4, Debian's
+`linuxcnc-uspace`), which executes a program and prints the canonical
+commands it would send to the machine, and compares those with the plan
+(`python/tests/test_linuxcnc_interpreter.py`):
+
+- every planned motion, in order, is executed by interpreter moves that stay
+  on its curve and end where it ends, within the post's own deviation bound
+  for that motion plus the interpreter's print resolution (0.0001 mm);
+- a rapid is a traverse, anything else a feed at the planned rate;
+- while it feeds, the spindle, the coolant and the tool are the plan's;
+- the interpreter accepts every block and moves nowhere the plan does not.
+
+What runs, and what is compared besides the path:
+
+| | jobs | also compared |
+|---|---|---|
+| Milling (`GCodeDialect.linuxcnc()`) | facing and pockets, arcs, two tools with a tool change, drilling as G81/G83/G73 cycles and as explicit moves, a contour with G41 wear compensation, G33.1 rigid tapping | spindle speed and direction, coolant, tool |
+| Turning (G7 or G8) | facing, roughing, finishing with arcs, grooving and parting off, drilling on the axis, boring, threading outside and inside | X as a diameter or a radius; constant surface speed and its rpm limit (`G96 D S`); feed per revolution (`G95`); each threading pass synchronised (`G33`) with the planned lead |
+| Plasma (QtPlasmaC post) | a plate with holes and a washer at a fixed height and with programmed heights; marking part numbers, then cutting | the torch on for every cut and lead and off for every rapid (`M3 $0 S1`, `M5 $0`); torch height control on and off where planned (`M63 P2`, `M62 P2`); feed hold (`M52 P1`) |
+
+Each group also has tests that change one word of a program (a coordinate
+by 0.01 mm, a surface speed, its limit, a feed, a thread's lead, a torch-off
+removed, height control switched the wrong way) and require the comparison to
+report it.
+
+Limits, so this is not read as more than it is:
+
+- It is the interpreter, not a machine: it says nothing about a real
+  machine's limits, tool table, offsets, kinematics or tool-change routine,
+  and for plasma nothing about QtPlasmaC's own components (probing,
+  piercing, arc-OK, the height controller itself). No post has been run on a
+  real machine ([#20](https://github.com/stevecad/camlib/issues/20)).
+- The interpreter is started at the position the `Machine` declares the
+  tool is at when the program begins (a canned cycle takes its initial plane
+  from there), with a tool table of zero offsets.
+- A rigid tap's lead (the `K` of `G33.1`) is not in the interpreter's
+  output; camlib's decoder checks it.
+- QtPlasmaC changes material with `M190`, a script of its configuration and
+  not a code of the interpreter: the standalone interpreter stops at it
+  (`Unknown m code used: M190`, which a test records). A marking program is
+  therefore run without its `M190` blocks. Which material is selected, and
+  that the cutting material is restored before the cuts, is checked by
+  camlib's decoder only.
+
 The post lifecycle follows FreeCAD CAM's
 [postprocessor](https://github.com/FreeCAD/FreeCAD/blob/920d14763241267340e755f3d3b6ece8ef60fa43/src/Mod/CAM/Path/Post/Processor.py)
 concepts.
