@@ -350,17 +350,26 @@ fn placed(mesh: &SurfaceMesh, placement: &Placement, what: &str) -> Result<Vec<[
         .map_err(|e| format!("{what}: {e}"))?;
     crate::resources::check_memory(mesh.triangles.len() as u128 * 400, "tool model mesh")?;
     let mut out = Vec::with_capacity(mesh.triangles.len());
-    for t in mesh.triangles.iter() {
+    let zero_area = |t: &[V3; 3]| {
+        let edge = |p: V3| std::array::from_fn(|k| p[k] - t[0][k]);
+        cross(edge(t[1]), edge(t[2])).iter().all(|v| *v == 0.)
+    };
+    for (index, t) in mesh.triangles.iter().enumerate() {
         if t.iter().flatten().any(|v| !v.is_finite()) {
             return Err(format!("{what}: a vertex is not finite"));
         }
-        let t = t.map(|p| placement.place(p));
-        if t.iter().flatten().any(|v| v.abs() > 1e4) {
+        let transformed = t.map(|p| placement.place(p));
+        if transformed.iter().flatten().any(|v| v.abs() > 1e4) {
             return Err(format!(
                 "{what}: a vertex lies over 10 m from the nose centre; check the model's units (mm) and its placement"
             ));
         }
-        out.push(t);
+        if zero_area(t) || zero_area(&transformed) {
+            return Err(format!(
+                "{what}: triangle {index} has zero area before or after placement; a tool model needs surface facets: repair or export the model again (camlib does not drop triangles)"
+            ));
+        }
+        out.push(transformed);
     }
     Ok(out)
 }
@@ -1533,6 +1542,130 @@ mod tests {
                 assert!((a[k] - c[k] - 0.05).abs() < 1e-12 && (d[k] - b[k] - 0.05).abs() < 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn a_mesh_derived_milling_holder_is_checked_along_a_facing_job_against_fixtures() {
+        use crate::{
+            facing::FacingPlan,
+            motion::WorkFrame,
+            pocket::Operation,
+            stock::Stock,
+            stream::StreamManifest,
+            tool::HolderSection,
+            verification::{BodyRole, Options, Prism, Representation, Scene, Status, ToolPart},
+        };
+        let mut manifest: StreamManifest =
+            serde_json::from_str(include_str!("../../fixtures/operations/facing.json")).unwrap();
+        let mesh = surface(box_mesh([35., -10., -10.], [60., 10., 10.]), 0.);
+        manifest.tools[0].holders = revolved_envelope(&mesh, [0.; 3], [0., 0., 1.], [35., 60.], 2.)
+            .unwrap()
+            .into_iter()
+            .map(|[z_min_mm, z_max_mm, radius]| HolderSection {
+                z_min_mm,
+                z_max_mm,
+                radius_min_mm: radius,
+                radius_max_mm: radius,
+            })
+            .collect();
+        let prepared_tool = manifest.tools[0].prepare().unwrap();
+        let Operation::Facing(operation) = manifest.operations[0].clone() else {
+            panic!("facing fixture")
+        };
+        for (height, collision) in [(100., false), (45., true)] {
+            let scene = Scene {
+                version: 1,
+                units: "mm".into(),
+                id: "holder-fixture".into(),
+                revision: "1".into(),
+                work_to_machine: WorkFrame::identity(),
+                machine: None,
+                bodies: vec![Prism {
+                    id: "clamp".into(),
+                    role: BodyRole::Fixture,
+                    footprint: crate::planar::PlanarRegion::circle("clamp", [20., 12.], 0.5)
+                        .unwrap(),
+                    z_min_mm: height,
+                    z_max_mm: height + 1.,
+                    z_error_mm: 0.,
+                    representation: Representation::SolidPrism,
+                }],
+            }
+            .prepare(Options::default())
+            .unwrap();
+            let mut plan = FacingPlan::prepare(
+                operation.clone(),
+                &manifest.tools[0],
+                manifest.stock.height().unwrap(),
+                manifest.initial_position_mm,
+                1,
+                &|| false,
+            )
+            .unwrap();
+            let mut stock = Stock::new(manifest.stock.height().unwrap().clone()).unwrap();
+            let mut holder_hits = 0;
+            let mut motions = 0;
+            while let Some(motion) = plan.next_motion_with_stock(&stock, &|| false).unwrap() {
+                let report = scene
+                    .verify_motion(&prepared_tool, &motion, &|| false)
+                    .unwrap();
+                if !collision {
+                    assert_eq!(report.status, Status::Clear);
+                }
+                for finding in report.findings {
+                    assert_eq!(finding.object_id, "clamp");
+                    assert_eq!(finding.part, Some(ToolPart::Holder));
+                    assert_eq!(finding.status, Status::Violation);
+                    holder_hits += 1;
+                }
+                let delta = stock
+                    .preview_sweep(&prepared_tool, &motion, 1., manifest.sweep, &|| false)
+                    .unwrap();
+                stock.apply_delta(&delta).unwrap();
+                motions += 1;
+            }
+            assert!(motions > 0);
+            assert_eq!(holder_hits > 0, collision);
+        }
+    }
+
+    #[test]
+    fn zero_area_model_facets_are_refused_before_reduction_or_revolution() {
+        for triangle in [
+            [[0., 1., -2.]; 3],
+            [[0., 1., -2.], [0., 2., -1.], [0., 3., 0.]],
+        ] {
+            let mut triangles = box_mesh([0., 1., -2.], [10., 4., 3.]);
+            triangles.push(triangle);
+            triangles.push([triangle[2], triangle[1], triangle[0]]);
+            let body = model(triangles.clone(), 0., 1.);
+            for inner in [false, true] {
+                let error = body.pieces("t", inner).unwrap_err();
+                assert!(
+                    error.contains("triangle 12") && error.contains("zero area"),
+                    "{error}"
+                );
+            }
+            let mesh = surface(triangles, 0.);
+            let rotated = Placement {
+                nose_center_mm: [100., 50., 20.],
+                x_axis: [0.6, 0.8, 0.],
+                z_axis: [0., 0., 1.],
+            };
+            assert!(
+                placed(&mesh, &rotated, "rotated model")
+                    .unwrap_err()
+                    .contains("zero area")
+            );
+            let error = revolved_envelope(&mesh, [0.; 3], [0., 0., 1.], [0., 10.], 1.).unwrap_err();
+            assert!(
+                error.contains("triangle 12") && error.contains("zero area"),
+                "{error}"
+            );
+        }
+        // No area tolerance is introduced: thin, nonzero facets remain valid.
+        let mesh = surface(box_mesh([0., 1., -2.], [1e-6, 2., -2. + 1e-6]), 0.);
+        assert_eq!(placed(&mesh, &identity(), "thin model").unwrap().len(), 12);
     }
 
     #[test]

@@ -2577,6 +2577,9 @@ tool.validate()   # the meshes, the placement and the insert cross-check
   - The mesh must be a closed surface. Faces tessellated separately need
     not share vertices: an edge with no face on its other side within
     twice the mesh's error is refused as open; camlib does not repair it.
+    A triangle with zero area before or after placement is refused by its zero-based
+    index, for body and insert models alike. Repair or export that facet
+    again; it is never silently dropped. No area tolerance is added.
   - The stated error is the caller's: `export_surface_mesh` bounds it for
     planar, analytic and B-spline faces and refuses surfaces it cannot bound.
 - The checks run on the slices, not the triangles. A model is reduced once
@@ -2595,7 +2598,9 @@ the model reaches, the mesh's error added), from a mesh such as
 `camlib.cadquery.step_mesh(path, max_error_mm=)` with its declared
 placement (the model point of the tool tip and the unit direction of the
 axis toward the spindle). A model that starts below the declared stickout,
-does not span the range, or is open is refused.
+does not span the range, is open, or contains a zero-area facet is refused.
+The resulting sections use the ordinary assembly, stock and scene checks;
+a mesh-derived milling holder is checked against fixtures on each move too.
 
 A lathe setup posts (`job.post_nc`, `job.post`) with any `Machine` whose `planes` include `"xz"`: arcs
 are written in G18. `GCodeDialect(x_diameter=True)` writes X as a diameter

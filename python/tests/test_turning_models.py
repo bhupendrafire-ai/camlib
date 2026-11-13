@@ -17,6 +17,7 @@ A milling holder's model gives the envelope it sweeps about the tool axis.
 """
 
 import math
+from dataclasses import replace
 import unittest
 
 import camlib
@@ -142,6 +143,16 @@ def grooving(groove_tool):
 
 
 class ModelHolderTest(unittest.TestCase):
+    def test_zero_area_facets_are_refused_in_body_and_insert_models(self):
+        for triangle in (((22, -10, -0.2),) * 3, ((22, -10, -0.2), (23, -9, -0.2), (24, -8, -0.2))):
+            bad = [triangle, tuple(reversed(triangle))]
+            with self.subTest(triangle=triangle), self.assertRaisesRegex(ValueError, "triangle 12.*zero area"):
+                groover(CARRIER + bad, blade_check()).validate()
+        triangles = blade(2, 22, 0.2, 3)
+        bad_insert = replace(blade_check(), insert=mesh(triangles + [(triangles[0][0],) * 3], 2e-4))
+        with self.assertRaisesRegex(ValueError, "insert mesh.*zero area"):
+            groover(CARRIER, bad_insert).validate()
+
     def test_a_mesh_carrier_equal_to_the_rectangle_gives_the_same_checks(self):
         built_in = tool("groove2", camlib.GrooveInsert(2, 22), nose_radius_mm=0.2, width_mm=2, length_mm=60)
         expected = grooving(built_in).plan()
@@ -300,6 +311,47 @@ class ModelBarTest(unittest.TestCase):
 
 
 class MillingHolderEnvelopeTest(unittest.TestCase):
+    def test_a_mesh_holder_in_a_milling_job_checks_clear_and_colliding_fixtures(self):
+        from camlib.planar import Boundary, Component, PlanarRegion
+        from camlib.simulation import Simulation, VerificationUpdate
+        from camlib.verification import Prism, Scene, StreamChecks
+        from support.facing import facing_job
+
+        config = facing_job()
+        sections = holder_sections_from_mesh(
+            camlib.SurfaceMesh(box((-10, -10, 35), (10, 10, 60)), 0.0),
+            tip_mm=(0, 0, 0),
+            axis=(0, 0, 1),
+            stickout_mm=35,
+            gauge_length_mm=60,
+            axial_resolution_mm=2,
+        )
+        tool = replace(config["tools"][0], holders=sections)
+        config.update(tools=(tool,), operations=(replace(config["operations"][0], tool=tool),))
+        region = PlanarRegion("clamp", (Component(Boundary.circle((20, 12), 0.5)),))
+        for height, collision in ((100, False), (45, True)):
+            checks = StreamChecks(Scene("holder-fixture", "1", (Prism("clamp", region, height, height + 1),)))
+            with self.subTest(height=height), Simulation(**config, verification=checks) as sim:
+                reports = [u.check["report"] for u in sim.run_operations() if isinstance(u, VerificationUpdate)]
+                self.assertTrue(sim.state.finished)
+                self.assertGreater(sim.state.completed, 0)
+                findings = [f for report in reports for f in report.get("findings", ())]
+                if not collision:
+                    self.assertTrue(all(report["status"] == "clear" for report in reports))
+                else:
+                    self.assertTrue(findings)
+                    self.assertTrue(all(f["part"] == "holder" and f["object_id"] == "clamp" for f in findings))
+                    self.assertTrue(all(f["status"] == "violation" for f in findings))
+
+    def test_zero_area_facets_are_refused_before_the_holder_envelope(self):
+        triangles = box((-5, -5, 30), (5, 5, 60))
+        for triangle in (((0, 0, 30),) * 3, ((0, 0, 30), (1, 1, 30), (2, 2, 30))):
+            holder = camlib.SurfaceMesh(triangles + [triangle, tuple(reversed(triangle))], 0.0)
+            with self.subTest(triangle=triangle), self.assertRaisesRegex(ValueError, "triangle 12.*zero area"):
+                holder_sections_from_mesh(
+                    holder, tip_mm=(0, 0, 0), axis=(0, 0, 1), stickout_mm=30, gauge_length_mm=60, axial_resolution_mm=2
+                )
+
     def test_the_envelope_is_what_the_holder_sweeps_about_the_axis(self):
         # A holder drawn along the model's +x from the tip at (5, 0, 0): a
         # 20 mm square shank from 30 to 80 mm, a 10 x 12 block out to 26 mm
