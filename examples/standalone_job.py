@@ -22,7 +22,7 @@ from camlib.operations import Facing, HelicalEntry, Pocket, RestPocket
 from camlib.planar import Boundary, Component, PlanarRegion
 from camlib.playback import Cursor, Player
 from camlib.post import GCodeDialect, LoweringOptions, Machine, ToolSetting
-from camlib.simulation import StockSpec
+from camlib.simulation import StockSpec, SweepOptions
 from camlib.tools import EndMill, HolderSection, ToolAssembly
 from camlib.verification import StockContactOptions, StreamChecks
 
@@ -195,6 +195,7 @@ def build_validation_job():
             replace(
                 setup,
                 stock=StockSpec((0, 0, 0), (32, 24, 6), 0.5),
+                sweep=SweepOptions(tolerance_mm=1e-6, chord_error_mm=1e-6),
                 operations=(
                     setup.operations[0],
                     *(replace(op, region=region, entry=entry) for op in setup.operations[1:]),

@@ -13,7 +13,9 @@ both assemblies have a declared 60 mm gauge length. Feed is 600 mm/min,
 plunge 150 mm/min, spindle 12000 rpm, flood coolant; clearance is Z8.
 The pocket and rest cut explicitly declare `HelicalEntry(angle_deg=3,
 feed_mm_min=150)`; the existing fitter chooses an entry radius that fits the
-region and preceding stock. The regression checks descents against the live
+region and preceding stock. The fixture declares a 1e-6 mm stock-sweep
+tolerance and chord error, keeping its helical sweep bounds tight enough for
+the existing analytic height controls. The regression checks descents against the live
 stock and checks the helical slope and feed, alongside the existing island,
 floor and posted-output checks. These are reproducible test inputs, not
 recommended cutting data. A helix can be followed by full-width cutting:
