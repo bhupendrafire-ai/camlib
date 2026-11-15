@@ -34,7 +34,7 @@ See [Operations](operations.md) for parameters. Summary:
 | Morph, flow | Passes between two guide curves; CAD face parameter lines (CadQuery) followed with Project |
 | V-carve | Maximal inscribed disks along the outline, sharp corners, overcut-checked between samples |
 | Machining limits | Avoid areas (clamps, fixtures) with a top height and containment regions, for every operation: region operations plan around them, profiles lift over them, finishing leaves out what is not proven allowed, holes/slots are refused; rapids and links checked |
-| Drilling, pecking | Tip or full-diameter depth; full-retract or chip-break pecks; dwell at depth (G4 or G82); canned cycles G81/G82/G83/G73, decoded and checked move by move |
+| Drilling, pecking | Tip or full-diameter depth; full-retract or chip-break pecks; dwell at depth (G4 or G82); canned cycles G81/G82/G83/G73, decoded and checked move by move; opt-in bounded hole ordering from declared dynamics, with fixed final hole and unchanged clearance travel |
 | Reaming, boring | Feed out (G85), dwell (G89), spindle stop and rapid out (G86) or fine boring with an oriented stop and shift (G76, or M19 and explicit moves), as canned cycles where declared; pilot hole proven open first; every shift proven inside the bore |
 | Bore milling | Helical full-hole clearing |
 | Trochoidal slot | Straight slots, or along a centreline of lines and arcs; width between 1x and 2x tool diameter |

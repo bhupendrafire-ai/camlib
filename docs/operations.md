@@ -870,6 +870,49 @@ has no default.
 
 ## Drilling: `Drilling`
 
+### Optional hole ordering
+
+Given center order is preserved by default. For a pattern with no precedence
+inside the operation, opt in with `ordering=HoleOrdering(machine, max_work=...)`
+(`HoleOrdering` is exported from `camlib`). The supplied `Machine` must have an
+explicit `MotionPolicy`. Its existing dynamics settings, including axis-speed
+limits and work-to-machine frame, score nominal exact-stop XY rapid travel.
+This does not change the machine's posting or feed-scheduling configuration.
+
+```python
+from dataclasses import replace
+from camlib import HoleOrdering
+
+# machine and drilling already declare this setup, tools and cutting data.
+# machine.motion_policy must explicitly declare acceleration and rapid speed.
+drilling = replace(drilling, ordering=HoleOrdering(
+    machine, max_work=4 * len(drilling.centers_mm) + 100_000,
+))
+```
+
+The bounded first-improvement 2-opt search keeps the last supplied center fixed,
+so its exit pose and the next operation's entry do not change. It preserves
+every center, including duplicates, with no changes to depths, pecks, dwells,
+feeds or clearance-plane travel. It works with explicit and declared canned
+cycles. Operation/tool/pilot dependencies remain the caller's ordered operations;
+request ordering only where the centers themselves have no precedence.
+
+The report's `ordering` gives the original-index permutation, `given_seconds`,
+`ordered_seconds`, `work`, `max_work` and `work_limit_reached`. The given route
+is retained unless the complete candidate scores strictly lower; equal-cost
+choices do not move. Work counts model evaluations and route summation. At least
+four units per center are required, otherwise preparation refuses before motion.
+A search that reaches its budget returns its complete best route and says so;
+cancellation refuses without publishing a result. This is a heuristic nominal
+time estimate, not a global optimum, controller timing or a clearance proof.
+All existing stock, fixture, machine and decoded-output checks still run.
+
+Reference: G. A. Croes, [A Method for Solving Traveling-Salesman Problems](https://doi.org/10.1287/opre.6.6.791)
+(1958); the fixed-endpoint 2-opt slice requested in #23/#29. Further R-plane,
+pecking and general pass-order optimization remain separate work.
+
+### Depths and cycles
+
 Required: `centers_mm` (list of (x, y)), `depth_z_mm`, `clearance_z_mm`.
 `depth_reference="tip"` (default) means `depth_z_mm` is the tip;
 `"full_diameter"` means it is where the drill reaches full diameter. `peck_mm`

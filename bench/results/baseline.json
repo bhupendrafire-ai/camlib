@@ -2993,6 +2993,96 @@
      "native": 46508.0
     }
    }
+  },
+  {
+   "name": "drilling-given-order",
+   "family": "mill",
+   "description": "Six-hole given-order control with fixed final hole",
+   "operations": {
+    "holes": {
+     "toolpath": "Drilling",
+     "issue": 29,
+     "moves": 60,
+     "cut_mm": 186.0,
+     "rapid_mm": 163.836,
+     "air_cut_mm": 140.952,
+     "link_mm": 44.952,
+     "plunges": 18,
+     "retracts": 18,
+     "removed_mm3": 524.502,
+     "cycle_seconds_exact_stop": 35.027,
+     "cycle_seconds_tangent": 34.986,
+     "engine_seconds": 0.003
+    }
+   },
+   "toolpath": {
+    "moves": 60,
+    "cycle_seconds_exact_stop": 35.027,
+    "cycle_seconds_tangent": 34.986,
+    "posted_blocks": 83,
+    "post_error": null,
+    "removed_mm3": [
+     524.502,
+     652.518
+    ],
+    "material": null
+   },
+   "engine": {
+    "run_seconds": 0.0298,
+    "first_move_seconds": 0.0268,
+    "post_seconds": 0.0036,
+    "repeats": 3,
+    "engagement_measure_seconds": null,
+    "peak_rss_kib": {
+     "python": 47328.0,
+     "native": 5024.0
+    }
+   }
+  },
+  {
+   "name": "drilling-ordered",
+   "family": "mill",
+   "description": "Same six-hole pattern with bounded dynamics-aware 2-opt",
+   "operations": {
+    "holes": {
+     "toolpath": "Drilling",
+     "issue": 29,
+     "moves": 60,
+     "cut_mm": 186.0,
+     "rapid_mm": 84.924,
+     "air_cut_mm": 140.952,
+     "link_mm": 44.952,
+     "plunges": 18,
+     "retracts": 18,
+     "removed_mm3": 524.502,
+     "cycle_seconds_exact_stop": 34.23,
+     "cycle_seconds_tangent": 34.188,
+     "engine_seconds": 0.0045
+    }
+   },
+   "toolpath": {
+    "moves": 60,
+    "cycle_seconds_exact_stop": 34.23,
+    "cycle_seconds_tangent": 34.188,
+    "posted_blocks": 83,
+    "post_error": null,
+    "removed_mm3": [
+     524.502,
+     652.518
+    ],
+    "material": null
+   },
+   "engine": {
+    "run_seconds": 0.0841,
+    "first_move_seconds": 0.0801,
+    "post_seconds": 0.0024,
+    "repeats": 3,
+    "engagement_measure_seconds": null,
+    "peak_rss_kib": {
+     "python": 46848.0,
+     "native": 5040.0
+    }
+   }
   }
  ],
  "failures": {},
@@ -3000,5 +3090,8 @@
   "sample_deg": 0.5,
   "over_deg": 1.0,
   "step_per_radius": 0.1
- }
+ },
+ "baseline_notes": [
+  "Only `drilling-given-order` and `drilling-ordered` were introduced by #317 on macOS 26.5.1 arm64, Python 3.12.14, Rust 1.99.1, from three sequential repeats with the declared benchmark dynamics (6000 mm/min rapid, 1000 mm/s\u00b2 acceleration). The existing 44 workload records and their original host provenance are unchanged. Engine wall times from different hosts must not be compared."
+ ]
 }

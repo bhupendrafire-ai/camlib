@@ -136,6 +136,9 @@ def render(data):
         lines += ["", "## Failed workloads", ""]
         for name, message in data["failures"].items():
             lines.append(f"- `{name}`: {' '.join(message)}")
+    if data.get("baseline_notes"):
+        lines += ["", "## Baseline provenance", ""]
+        lines.extend(f"- {note}" for note in data["baseline_notes"])
     return "\n".join(lines) + "\n"
 
 

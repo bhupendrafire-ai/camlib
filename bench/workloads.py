@@ -63,6 +63,26 @@ def _support(name):
     return importlib.import_module(f"support.{name}")
 
 
+def _drilling_order(optimized):
+    """The independent motion/stock/post regression's six-hole pattern."""
+
+    def build():
+        from camlib import HoleOrdering, OperationNode
+        from camlib.dynamics import MotionPolicy
+        from test_hole_ordering import fixture
+
+        given, _, machine = fixture()
+        if not optimized:
+            return _options(given)
+        # The same declared scalar dynamics as bench/run.py's timing model.
+        machine = replace(machine, motion_policy=MotionPolicy(1000, 6000))
+        setup = given.setups[0]
+        operation = replace(setup.operations[0].operation, ordering=HoleOrdering(machine, 10_000))
+        return _options(replace(given, setups=(replace(setup, operations=(OperationNode(operation, sources=()),)),)))
+
+    return build
+
+
 def _solid(module, name="cadquery_target"):
     def target():
         shape = getattr(_support(module), name)()
@@ -753,6 +773,20 @@ WORKLOADS = (
         {"pilot": ("Drilling", 29), "finish-holes": ("Bore", 30)},
         _holes,
         _solid("holes"),
+    ),
+    Workload(
+        "drilling-given-order",
+        "mill",
+        "Six-hole given-order control with fixed final hole",
+        {"holes": ("Drilling", 29)},
+        _drilling_order(False),
+    ),
+    Workload(
+        "drilling-ordered",
+        "mill",
+        "Same six-hole pattern with bounded dynamics-aware 2-opt",
+        {"holes": ("Drilling", 29)},
+        _drilling_order(True),
     ),
     Workload(
         "reaming", "mill", "Drill then ream two holes", {"drill": ("Drilling", 29), "bore": ("Reaming", 31)}, _reaming

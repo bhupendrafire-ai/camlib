@@ -82,6 +82,7 @@ pub mod material;
 pub mod motion;
 pub mod nesting;
 pub mod operation;
+pub mod ordering;
 pub mod planar;
 #[cfg(feature = "profile-planning")]
 pub mod planning_profile;

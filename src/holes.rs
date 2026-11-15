@@ -34,6 +34,8 @@ pub struct DrillingOperation {
     pub id: String,
     pub tool: String,
     pub centers_mm: Vec<Point>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ordering: Option<crate::ordering::HoleOrdering>,
     pub depth_z_mm: f64,
     pub depth_reference: DepthReference,
     pub peck_mm: Option<f64>,
@@ -105,6 +107,8 @@ pub struct DrillingReport {
     pub strategy: &'static str,
     pub geometric_residual_status: ResidualStatus,
     pub holes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ordering: Option<crate::ordering::OrderingReport>,
     pub depth_reference: DepthReference,
     pub tip_target_z_mm: f64,
     pub full_diameter_z_mm: f64,
@@ -502,8 +506,32 @@ impl DrillingPlan {
                 ),
             ],
         )?;
-        let core = core!(op, spec, initial, first_id);
+        let mut core = core!(op, spec, initial, first_id);
         core.validate(assembly, radius, cancel)?;
+        let ordering = op
+            .ordering
+            .as_ref()
+            .map(|options| {
+                crate::ordering::holes(
+                    &core.centers,
+                    initial,
+                    core.clearance,
+                    core.tol,
+                    options,
+                    cancel,
+                )
+            })
+            .transpose()?;
+        if let Some(report) = &ordering {
+            let mut centers = Vec::with_capacity(core.centers.len());
+            for (i, &index) in report.order.iter().enumerate() {
+                if i % 256 == 0 && cancel.is_cancelled() {
+                    return Err("hole ordering cancelled; no result committed".into());
+                }
+                centers.push(core.centers[index]);
+            }
+            core.centers = centers;
+        }
         let pecks = ((spec.max_mm[2] - target) / peck).ceil() as usize;
         if pecks == 0 {
             return Err("drilling needs at least one peck".into());
@@ -512,6 +540,7 @@ impl DrillingPlan {
             strategy: "drilling",
             geometric_residual_status: ResidualStatus::Pending,
             holes: core.centers.len(),
+            ordering,
             depth_reference: op.depth_reference,
             tip_target_z_mm: target,
             full_diameter_z_mm: target + point_height,

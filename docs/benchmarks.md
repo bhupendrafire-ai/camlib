@@ -77,6 +77,8 @@ comparable only on the same machine; CI runs the same benchmark on every push.
 | Roughing | [#27](https://github.com/stevecad/camlib/issues/27) | `roughing-raster` (rough) | 2169 | 27414 | 21241 (77%) | 614 | 13 | 24 | 5803 | 7932.3 / 7931.6 | 0.074 |
 | Contour | [#28](https://github.com/stevecad/camlib/issues/28) | `chamfer` (rough-profile) | 40 | 358 | 0 (0%) | 148 | 8 | 8 | 2243 | 55.8 / 55.7 | 0.011 |
 | Contour | [#28](https://github.com/stevecad/camlib/issues/28) | `contour` (profile) | 40 | 358 | 0 (0%) | 148 | 8 | 8 | 2192 | 55.8 / 55.7 | 0.007 |
+| Drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `drilling-given-order` (holes) | 60 | 186 | 141 (76%) | 164 | 18 | 18 | 525 | 35.0 / 35.0 | 0.003 |
+| Drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `drilling-ordered` (holes) | 60 | 186 | 141 (76%) | 85 | 18 | 18 | 525 | 34.2 / 34.2 | 0.004 |
 | Drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `holes` (pilot) | 20 | 62 | 46 (74%) | 36 | 6 | 6 | 111 | 11.8 / 11.8 | 0.001 |
 | Drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `reaming` (drill) | 8 | 44 | 23 (52%) | 25 | 2 | 2 | 313 | 11.3 / 11.3 | 0.003 |
 | Drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `tapping` (drill) | 8 | 44 | 23 (52%) | 25 | 2 | 2 | 313 | 11.3 / 11.3 | 0.003 |
@@ -210,3 +212,9 @@ limit the cutter actually runs, measured from the streamed moves alone
 | `lathe-thread` | Turn and single-point thread M30 x 2 | 77 | 124.5 / 124.5 | 109 | 0.9 / 194.2 | 0.0 / 0.0 | 0.039 | 0.008 | 0.010 | 45 |
 | `lathe-bore` | Drill on the axis, rough and finish bore | 29 | 63.8 / 63.8 | 61 | 9596.7 / 10035.8 | 0.0 / 0.0 | 0.025 | 0.007 | 0.005 | 46 |
 | `lathe-face-groove` | Face and cut a face groove | 35 | 83.3 / 83.3 | 66 | 3122.0 / 3254.7 | 0.0 / 0.0 | 0.019 | 0.009 | 0.005 | 45 |
+| `drilling-given-order` | Six-hole given-order control with fixed final hole | 60 | 35.0 / 35.0 | 83 | – | – | 0.030 | 0.027 | 0.004 | 5 |
+| `drilling-ordered` | Same six-hole pattern with bounded dynamics-aware 2-opt | 60 | 34.2 / 34.2 | 83 | – | – | 0.084 | 0.080 | 0.002 | 5 |
+
+## Baseline provenance
+
+- Only `drilling-given-order` and `drilling-ordered` were introduced by #317 on macOS 26.5.1 arm64, Python 3.12.14, Rust 1.99.1, from three sequential repeats with the declared benchmark dynamics (6000 mm/min rapid, 1000 mm/s² acceleration). The existing 44 workload records and their original host provenance are unchanged. Engine wall times from different hosts must not be compared.

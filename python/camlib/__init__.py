@@ -50,6 +50,7 @@ _EXPORTS = {
             "DeburrBrokenEdge",
             "DeburrEdge",
             "Drilling",
+            "HoleOrdering",
             "Bore",
             "TrochoidalSlot",
             "Parallel",

@@ -52,6 +52,121 @@ fn commit(stock: &mut Stock, m: &Motion) {
     stock.apply_delta(&d).unwrap();
 }
 
+fn ordering(max_work: usize) -> camlib::ordering::HoleOrdering {
+    use camlib::dynamics::{JunctionMode, Policy, Settings};
+    camlib::ordering::HoleOrdering {
+        settings: Settings {
+            policy: Policy {
+                tangential_accel_mm_s2: 100.,
+                rapid_feed_mm_min: 6000.,
+                junction_mode: JunctionMode::ExactStop,
+                feed_reserve_fraction: 0.,
+            },
+            max_feed_mm_min: 6000.,
+            max_normal_accel_mm_s2: None,
+            max_axis_feed_mm_min: None,
+            work_to_machine: WorkFrame::identity(),
+            feed_quantum_mm_min: 0.001,
+            adjust_feeds: false,
+        },
+        max_work,
+    }
+}
+
+#[test]
+fn bounded_drilling_order_changes_only_clearance_travel_and_keeps_stock_and_exit() {
+    let centers = vec![[34., 18.], [6., 6.], [34., 6.], [6., 18.], [20., 6.], [20., 18.]];
+    for canned in [false, true] {
+        let run = |ordered: bool| {
+            let mut op = drilling();
+            op.centers_mm = centers.clone();
+            op.canned_cycle = canned;
+            op.reentry_clearance_mm = 0.254;
+            op.chip_break_lift_mm = 0.254;
+            op.ordering = ordered.then(|| ordering(10_000));
+            let mut plan = drill_plan(op).unwrap();
+            let mut stock = Stock::new(fixture().stock.height().unwrap().clone()).unwrap();
+            let mut paths = Vec::new();
+            while let Some(motion) = plan.next_motion_with_stock(&stock, &AtomicBool::new(false)).unwrap() {
+                commit(&mut stock, &motion);
+                paths.push(motion);
+            }
+            plan.finish_report(&AtomicBool::new(false)).unwrap();
+            (plan, stock, paths)
+        };
+        let (given, old_stock, old_moves) = run(false);
+        let (ordered, new_stock, new_moves) = run(true);
+        let report = ordered.report().ordering.as_ref().unwrap();
+        assert!(given.report().ordering.is_none());
+        assert!(report.ordered_seconds < 0.8 * report.given_seconds);
+        assert_eq!(*report.order.last().unwrap(), centers.len() - 1);
+        let mut permutation = report.order.clone();
+        permutation.sort_unstable();
+        assert_eq!(permutation, (0..centers.len()).collect::<Vec<_>>());
+        assert!(report.work <= 10_000 && !report.work_limit_reached);
+        assert_eq!(old_moves.last().unwrap().curve.end(), new_moves.last().unwrap().curve.end());
+        assert_eq!(given.report().cut_pecks, ordered.report().cut_pecks);
+        assert_eq!(given.report().completed_holes, ordered.report().completed_holes);
+        for (a, b) in old_stock.cells().iter().zip(new_stock.cells()) {
+            assert_eq!((a.lower_mm, a.upper_mm), (b.lower_mm, b.upper_mm));
+        }
+        // Compare the actual fed paths independently, without the ordering report.
+        let cutting = |moves: &[Motion]| {
+            let mut result: Vec<_> = moves.iter().filter(|m| !m.kind.is_rapid()).map(|m| {
+                let a = m.curve.start(); let b = m.curve.end();
+                assert_eq!([a[0], a[1]], [b[0], b[1]]);
+                serde_json::to_string(&(m.kind, &m.curve, m.feed_mm_min)).unwrap()
+            }).collect();
+            result.sort();
+            result
+        };
+        assert_eq!(cutting(&old_moves), cutting(&new_moves));
+        let rapid_time = |moves: &[Motion]| -> f64 {
+            moves.iter().filter(|m| m.kind.is_rapid() && m.curve.start()[..2] != m.curve.end()[..2]).map(|m| {
+                let a=m.curve.start(); let b=m.curve.end();
+                if a[..2] != b[..2] {
+                    assert!(a[2] >= 12. && b[2] >= 12.);
+                }
+                let length = (0..3).map(|k| (b[k]-a[k]).powi(2)).sum::<f64>().sqrt();
+                // Independent exact-stop triangle/trapezoid, v=100 mm/s, a=100 mm/s².
+                if length <= 100. { 2. * (length / 100.).sqrt() } else { 2. + (length - 100.) / 100. }
+            }).sum()
+        };
+        assert!(rapid_time(&new_moves) < 0.8 * rapid_time(&old_moves));
+    }
+}
+
+#[test]
+fn drilling_order_budget_settings_ties_and_cancellation_are_explicit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CancelAfter(AtomicUsize);
+    impl CancelSignal for CancelAfter {
+        fn is_cancelled(&self) -> bool { self.0.fetch_add(1, Ordering::Relaxed) >= 12 }
+    }
+    let mut op=drilling();
+    op.centers_mm=vec![[34.,18.],[6.,6.],[34.,6.],[6.,18.],[20.,6.],[20.,18.]];
+    op.ordering=Some(ordering(24));
+    let plan=drill_plan(op.clone()).unwrap();
+    let report=plan.report().ordering.as_ref().unwrap();
+    assert_eq!(report.order, (0..6).collect::<Vec<_>>());
+    assert!(report.work_limit_reached && report.work == 24);
+    op.ordering=Some(ordering(23));
+    assert!(drill_plan(op.clone()).err().unwrap().contains("max_work"));
+    op.ordering=Some(ordering(10000));
+    let f=fixture();
+    let result=DrillingPlan::prepare(op.clone(), &f.tools[0], f.stock.height().unwrap(), f.initial_position_mm, 1, &CancelAfter(AtomicUsize::new(0)));
+    assert!(result.err().unwrap().contains("cancelled"));
+    op.ordering.as_mut().unwrap().settings.policy.tangential_accel_mm_s2=f64::NAN;
+    assert!(drill_plan(op.clone()).is_err());
+    op.ordering=Some(ordering(10000));
+    op.centers_mm=vec![[10.,12.],[10.,12.],[28.,12.]];
+    let a=drill_plan(op.clone()).unwrap(); let b=drill_plan(op).unwrap();
+    let a=a.report().ordering.as_ref().unwrap(); let b=b.report().ordering.as_ref().unwrap();
+    assert_eq!(a.order, vec![0,1,2]);
+    assert_eq!(a.order,b.order);
+    assert_eq!(a.given_seconds,a.ordered_seconds);
+}
+
 #[test]
 fn drilling_tip_shoulder_peck_modes_and_whole_cell_cone_oracle_agree() {
     let cancel = AtomicBool::new(false);

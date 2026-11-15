@@ -1013,6 +1013,27 @@ def _freeze_hole_centers(values):
 
 
 @dataclass(frozen=True)
+class HoleOrdering:
+    """Opt-in bounded drilling order from a Machine's explicit motion policy.
+
+    Keeps the last supplied center fixed. The budget counts model evaluations
+    and route summation; at least four work units per center are required.
+    """
+
+    machine: object
+    max_work: int
+
+    def to_dict(self):
+        from .dynamics import MotionPolicy, _settings
+
+        if not isinstance(self.machine.motion_policy, MotionPolicy):
+            raise ValueError("hole ordering requires an explicit Machine.motion_policy")
+        if type(self.max_work) is not int or self.max_work <= 0:
+            raise ValueError("hole ordering max_work must be a positive integer")
+        return {"settings": _settings(self.machine, False), "max_work": self.max_work}
+
+
+@dataclass(frozen=True)
 class Drilling:
     """Explicit axial moves; depth_z_mm is tip Z unless full_diameter is chosen."""
 
@@ -1046,6 +1067,7 @@ class Drilling:
     # reentry_clearance_mm / chip_break_lift_mm must equal the controller's
     # return amount (LinuxCNC: 0.254 mm).
     canned_cycle: bool = False
+    ordering: HoleOrdering | None = field(default=None, kw_only=True)
 
     def __post_init__(self):
         object.__setattr__(self, "centers_mm", _freeze_hole_centers(self.centers_mm))
@@ -1057,6 +1079,10 @@ class Drilling:
             del result["dwell_s"]
         if not result["canned_cycle"]:
             del result["canned_cycle"]
+        if self.ordering is None:
+            del result["ordering"]
+        else:
+            result["ordering"] = self.ordering.to_dict()
         return result
 
 
