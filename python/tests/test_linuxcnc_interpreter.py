@@ -8,6 +8,7 @@ import importlib.util
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from support import linuxcnc_interpreter as linuxcnc
 
@@ -28,6 +29,52 @@ def operations_of(setup):
         operation = getattr(entry, "operation", entry)
         found[operation.id] = operation
     return found
+
+
+class InterpreterComparisonTest(unittest.TestCase):
+    def compare_line(self, commands, feed=600):
+        start, end = (13.0, 12.0, 4.0), (12.0, 12.0, 4.0)
+        planned = [
+            dict(
+                curve=dict(kind="line", start=start, end=end),
+                kind="feed",
+                tolerance=0,
+                where="line after a repeated endpoint",
+                state=dict(feed=float(feed)),
+            )
+        ]
+        with patch.object(linuxcnc, "interpret", return_value=commands):
+            moves = linuxcnc._interpreted("", (), start)
+        return linuxcnc._match(self, planned, moves)
+
+    def test_a_repeated_endpoint_does_not_shift_the_next_feed_comparison(self):
+        # The fixed fixture emits G1 X13 Y12 Z4 F150 after its island arc,
+        # then G1 X12 Y12 Z4 F600. Its decoded plan omits the no-motion block.
+        self.assertEqual(
+            self.compare_line(
+                [
+                    ("SET_FEED_RATE", ["150"]),
+                    ("STRAIGHT_FEED", ["13", "12", "4"]),
+                    ("SET_FEED_RATE", ["600"]),
+                    ("STRAIGHT_FEED", ["12", "12", "4"]),
+                ]
+            ),
+            1,
+        )
+
+    def test_the_next_actual_move_still_requires_the_planned_feed(self):
+        with self.assertRaisesRegex(AssertionError, "feed at line"):
+            self.compare_line(
+                [
+                    ("SET_FEED_RATE", ["150"]),
+                    ("STRAIGHT_FEED", ["13", "12", "4"]),
+                    ("STRAIGHT_FEED", ["12", "12", "4"]),
+                ]
+            )
+
+    def test_a_nonzero_straight_move_is_retained_even_below_print_resolution(self):
+        machine = linuxcnc.Machine((0, 0, 0))
+        self.assertEqual(len(machine.apply("STRAIGHT_FEED", ["0.00001", "0", "0"])), 1)
 
 
 class LinuxCNCInterpreterTest(unittest.TestCase):
