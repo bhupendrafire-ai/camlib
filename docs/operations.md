@@ -2835,10 +2835,13 @@ tool.validate()   # the meshes, the placement and the insert cross-check
   declared one (ISO code, outline or blade, with its thickness, clearance
   and seat): its exact outline is what cuts, and a mesh known only to its
   error cannot certify a contact at the cutting edge more closely than that
-  error. Insert material left in `body` meets the stock at the edge and is
-  refused there ("the holder would hit the stock"): name the insert's
-  solids in `insert_solids`. An insert fused with its holder in one solid
-  cannot be told apart; split the solid in CAD.
+  error. Before any move, its body enclosure must exclude the declared
+  insert's nose centre on the cutting face. A complete insert fused into
+  the body is refused by name: split it in CAD and name its solids in
+  `insert_solids`. This is an enclosure conflict, not automatic recognition
+  or subtraction of CAD features; for a separate body check its placement
+  or refine `axial_resolution_mm`. The ordinary stock check still refuses
+  other non-cutting body contact.
 - **Placing a model.** A maker's model has its origin and axes anywhere, so
   the placement is declared and nothing is assumed or fitted:
   `TurningModelPlacement(nose_center_mm=, x_axis=, z_axis=)` gives the
@@ -2876,6 +2879,13 @@ tool.validate()   # the meshes, the placement and the insert cross-check
   compared: `without_insert_reason=` (`TurningModelWithoutInsert(reason=)`)
   states where its placement comes from, and the check is then the
   caller's.
+  The projected outline of the **whole insert** is also compared in both
+  directions, including its mesh error. Its allowance propagates the same
+  declared position and edge-angle bounds to the full insert's extent
+  (`position_tolerance_mm + 2 R sin(edge_angle_tolerance_deg / 2)`). Nothing
+  is fitted. Round inserts need no straight edges; a sharp corner uses the
+  whole declared body to locate its cutting-face plane before the same
+  corner/radius/position checks.
 - **The errors a model adds**, all on the safe side (the checked body
   contains the real one; a tight fit may be refused, never passed):
   - `surface_error_mm`: every point of the real surface lies within it of
@@ -2896,8 +2906,30 @@ tool.validate()   # the meshes, the placement and the insert cross-check
     A triangle with zero area before or after placement is refused by its zero-based
     index, for body and insert models alike. Repair or export that facet
     again; it is never silently dropped. No area tolerance is added.
+    Seam mating is continuous: each sub-edge's two endpoints must lie in
+    one reverse edge's radius-`2 surface_error_mm` capsule, whose convexity
+    proves the whole sub-edge covered. Isolated samples never certify a
+    seam. Unresolved floating-point or excessively fragmented cases refuse
+    and need a watertight re-export.
   - The stated error is the caller's: `export_surface_mesh` bounds it for
     planar, analytic and B-spline faces and refuses surfaces it cannot bound.
+  - Optional `max_hull_error_mm` opts into bounded slice hulls. The engine
+    retains at most 32 original hull vertices, computes the largest distance
+    of the original hull to that inner polygon, and grows it by a square
+    that contains that distance's disk. The result contains the exact hull
+    and adds at most the declared outward error (independently of the
+    existing axial enclosure); its mesh error is grown on top. The final
+    section has at most 36 vertices, or 72 per prism. A budget too small
+    refuses; omit it to retain exact hulls. Bounds include this additional
+    error, operation reports record `max_model_hull_error_mm`, and the
+    option/mesh remain in saved runs. All prisms and collision checks stay.
+
+    Measure this tradeoff with the Release driver using
+    `python bench/model_bodies.py --output /path/to/result.json --repeat 3`.
+    It uses the existing bore workload, runs controls sequentially on the
+    same host and requires identical motions and stock. It reports total
+    time separately from bore-operation cost per move; results describe
+    those inputs and that host, not a timing guarantee.
 - The checks run on the slices, not the triangles. A model is reduced once
   (and kept: a run asks for a tool's body at every operation); consecutive
   slices of one section are one prism, so a straight bar is a single piece

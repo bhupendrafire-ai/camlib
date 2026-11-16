@@ -323,6 +323,40 @@ class MachineLatheAndPersistenceTest(unittest.TestCase):
         report = check(base)
         self.assertEqual(report['status'], 'clear', report)
         self.assertTrue(report['complete'])
+        # A supplied holder block reaches far beyond the milling proxy.
+        # It clears this stand, but meets a fixture only the real model can
+        # reach while facing. The decoded-program machine check must use it.
+        from test_turning import cnmg
+        from test_turning_models import PLACEMENT, box, mesh
+
+        body = camlib.TurningToolModel(
+            body=mesh(box((55, -2, 1), (60, 2, 20))),
+            placement=PLACEMENT,
+            axial_resolution_mm=0.5,
+            insert_check=camlib.TurningModelWithoutInsert(reason='synthetic declared cutting-point frame'),
+            max_hull_error_mm=0.05,
+        )
+        supplied = replace(cnmg(), holder=camlib.TurningHolder.from_model(body))
+        model_plan = job(
+            initial_position_mm=(100, 100),
+            tools=(camlib.TurnToolSetting(supplied, 1, 1),),
+            operations=(camlib.TurnFace('face', 'cnmg', 0, feed_mm_rev=0.15, rpm=1000),),
+        ).plan()
+        model_machine = replace(lathe(model_plan), crash_model=base)
+        with model_plan.job.post('lathe', machine=model_machine) as run:
+            clear = run.check_machine()
+            self.assertEqual(clear['status'], 'clear', clear)
+            self.assertTrue(clear['complete'])
+        clamp = MachineBody('model-holder-clamp', 'fixture', 'fixed', (Box((56, -1, 4), (57, 1, 5)),), {})
+        collided = replace(model_machine, crash_model=replace(base, bodies=(*base.bodies, clamp)))
+        with model_plan.job.post('lathe', machine=collided) as run:
+            failed = run.check_machine()
+            self.assertNotEqual(failed['status'], 'clear', failed)
+            self.assertTrue(
+                any(set(f['bodies']) == {'@tool', 'model-holder-clamp'} for f in failed['findings']), failed
+            )
+            with self.assertRaises(ExportRefused):
+                run.export()
         # A long auxiliary tool on the turret hits a tailstock at the beginning.
         other = MachineBody('other', 'other_tools', 'head', (Box((-2, -2, -5), (2, 2, 5)),), {})
         tail = MachineBody('tailstock', 'tailstock', 'fixed', (Box((98, -1, 98), (102, 1, 102)),), {})

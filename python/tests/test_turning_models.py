@@ -143,6 +143,22 @@ def grooving(groove_tool):
 
 
 class ModelHolderTest(unittest.TestCase):
+    def test_a_body_containing_the_insert_is_refused_before_any_move(self):
+        fused = CARRIER + blade(2, 22, 0.2, 3)
+        for check in (blade_check(), camlib.TurningModelWithoutInsert(reason="maker's cutting-point frame")):
+            with self.subTest(check=type(check).__name__):
+                with self.assertRaisesRegex(ValueError, "body.*insert.*split"):
+                    groover(fused, check).validate()
+                with self.assertRaisesRegex(camlib.SimulationError, "body.*insert.*split"):
+                    grooving(groover(fused, check)).plan()
+
+    def test_the_whole_insert_is_compared_not_only_its_reference_corner(self):
+        # Same first corner, radius, placement and nearby edges; the far
+        # end is 1 mm wider than the declared 2 mm blade.
+        wider = replace(blade_check(), insert=mesh(blade(3, 22, 0.2, 3), 2e-4))
+        with self.assertRaisesRegex(ValueError, "whole insert outline"):
+            groover(CARRIER, wider).validate()
+
     def test_zero_area_facets_are_refused_in_body_and_insert_models(self):
         for triangle in (((22, -10, -0.2),) * 3, ((22, -10, -0.2), (23, -9, -0.2), (24, -8, -0.2))):
             bad = [triangle, tuple(reversed(triangle))]
@@ -237,14 +253,15 @@ class ModelHolderTest(unittest.TestCase):
             ).validate()
 
 
-def bored(body):
+def bored(body, *, mesh_error_mm=0.0, max_hull_error_mm=None):
     """The boring tests' job, its bar's holder given as ``body`` (triangles
     in lathe coordinates from the nose centre)."""
     model = camlib.TurningToolModel(
-        body=mesh(body),
+        body=mesh(body, mesh_error_mm),
         placement=PLACEMENT,
         axial_resolution_mm=0.5,
         insert_check=camlib.TurningModelWithoutInsert(reason="synthetic test bar drawn about its nose centre"),
+        max_hull_error_mm=max_hull_error_mm,
     )
     insert = camlib.TurningInsert.iso(
         included_angle_deg=55, approach_angle_deg=95, edge_length_mm=6, nose_radius_mm=0.4
@@ -278,6 +295,58 @@ class ModelBarTest(unittest.TestCase):
     # The bar of the boring tests: 10 mm across, its top 1 mm under the nose
     # centre (toward the axis), 1.5 mm below the face to 1 above, 80 long.
     BAR = box((-11, -1.5, 0), (-1, 1, 80))
+
+    def test_bounded_dense_models_keep_motions_stock_and_explicit_error_in_reports(self):
+        from support.tool_models import dense_bar_mesh
+
+        surface = dense_bar_mesh(512)
+        options = dict(mesh_error_mm=surface.surface_error_mm)
+        expected = boring().plan()
+        for budget in [None, 0.1]:
+            with self.subTest(budget=budget):
+                made = bored(surface.triangles, max_hull_error_mm=budget, **options)
+                model = made.job.setups[0].tools[1].tool.holder.model
+                self.assertEqual(model.to_dict().get("max_hull_error_mm"), budget)
+                plan = made.plan()
+                self.assertEqual(plan.program.events, expected.program.events)
+                self.assertEqual(plan.stock, expected.stock)
+                for report in plan.reports[1:]:
+                    self.assertEqual(report.get("max_model_hull_error_mm"), budget)
+        with self.assertRaisesRegex(camlib.SimulationError, "max_hull_error_mm"):
+            bored(surface.triangles, max_hull_error_mm=1e-6, **options).plan()
+
+    def test_model_mesh_and_error_survive_journal_checkpoints_save_and_reopen(self):
+        import json
+        import tempfile
+        from camlib.playback import Cursor, Player, RecordedRun
+
+        made = bored(self.BAR, max_hull_error_mm=0.05)
+        expected = made.plan().stock["cells"]
+        with tempfile.TemporaryDirectory() as directory:
+            with made.job.record("lathe", rapid_mm_min=6000, checkpoint_every=8, directory=directory) as run:
+                run.wait()
+                total = run.status()["available"]
+                self.assertGreater(run.status()["checkpoints"], 2)
+                player = Player(run)
+                player.seek(Cursor(total // 2))
+                player.seek(Cursor(total))
+                self.assertEqual(player.state.stock()["cells"], expected)
+                original = player.state.manifest["turning"]["tools"][1]["tool"]["body"]["model"]
+                self.assertEqual(original["max_hull_error_mm"], 0.05)
+                self.assertEqual(
+                    original["body"],
+                    json.loads(json.dumps(made.job.setups[0].tools[1].tool.holder.model.body.to_dict())),
+                )
+                saved = run.save(f"{directory}/saved")
+            reopened = RecordedRun.open(saved)
+            try:
+                player = Player(reopened)
+                player.seek(Cursor(total // 2))
+                player.seek(Cursor(total))
+                self.assertEqual(player.state.stock()["cells"], expected)
+                self.assertEqual(player.state.manifest["turning"]["tools"][1]["tool"]["body"]["model"], original)
+            finally:
+                reopened.close()
 
     def test_a_mesh_bar_is_checked_in_its_bore_like_the_rectangle(self):
         expected = boring().plan()

@@ -15,9 +15,10 @@
 //! outline, with its thickness, clearance and seat): its exact outline is
 //! what cuts, and a mesh known only to `surface_error_mm` cannot certify a
 //! contact at the cutting edge more closely than that error. A model that
-//! contains the insert's own material in `body` therefore meets the stock at
-//! the edge and is refused there; give the insert as the separate
-//! `InsertCheck::Model` mesh.
+//! contains the complete insert also has its nose centre in the body's
+//! enclosure and is refused before motion; give the insert as the separate
+//! `InsertCheck::Model` mesh. An enclosure conflict is not CAD feature
+//! recognition: a separate holder may need corrected placement/finer slices.
 //!
 //! Placement is declared, never fitted (`Placement`): the model point that
 //! is the nose centre, and the model directions of the lathe's +X (radial,
@@ -96,6 +97,10 @@
 //! The work per move depends on the number of prism vertices (the facets
 //! round each distinct section), not on the triangles along the body; a
 //! model is reduced once and its pieces kept (`REDUCED`).
+//! Optional `max_hull_error_mm` additionally bounds conservative reduction
+//! to 32 retained vertices plus their square Minkowski sum (at most 36
+//! section vertices). The argument is in `reduced_hull`; exact hulls remain
+//! the default, and no error budget is silently increased.
 use super::body::Pieces3;
 use crate::surface::SurfaceMesh;
 use serde::{Deserialize, Serialize};
@@ -152,6 +157,11 @@ pub struct ModelBody {
     /// over-estimated along Z by less than this.
     pub axial_resolution_mm: f64,
     pub insert_check: InsertCheck,
+    /// Opt-in additional outward error of a slice hull (mm). At most 32
+    /// original vertices are retained, then grown to contain the full hull.
+    /// None keeps the exact hull; a budget too small for reduction is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_hull_error_mm: Option<f64>,
 }
 
 fn same_mesh(a: &SurfaceMesh, b: &SurfaceMesh) -> bool {
@@ -191,6 +201,7 @@ impl PartialEq for ModelBody {
     fn eq(&self, other: &Self) -> bool {
         self.placement == other.placement
             && self.axial_resolution_mm == other.axial_resolution_mm
+            && self.max_hull_error_mm == other.max_hull_error_mm
             && self.insert_check == other.insert_check
             && same_mesh(&self.body, &other.body)
     }
@@ -318,6 +329,16 @@ fn outside(p: P2, polygon: &[P2]) -> f64 {
     }
 }
 
+/// Euclidean distance to a convex polygon (zero in its interior).
+fn distance_to_hull(p: P2, polygon: &[P2]) -> f64 {
+    if outside(p, polygon) <= 0. {
+        return 0.;
+    }
+    (0..polygon.len())
+        .map(|k| outside(p, &[polygon[k], polygon[(k + 1) % polygon.len()]]))
+        .fold(f64::INFINITY, f64::min)
+}
+
 /// Whether `p` is certainly within `reach` of a convex counterclockwise
 /// polygon (of the lines of the triangle of its fan from vertex 0 that `p`
 /// falls in: a sufficient test, in O(log n); a point it does not accept may
@@ -342,6 +363,95 @@ fn near(p: P2, polygon: &[P2], reach: f64) -> bool {
     off(polygon[lo], polygon[lo + 1]) <= reach
         && off(polygon[0], polygon[1]) <= reach
         && off(polygon[n - 1], polygon[0]) <= reach
+}
+
+/// Retain at most 32 vertices, then enclose the original hull in their
+/// square Minkowski sum. Distance to a convex set is convex, so the
+/// maximum distance from H to the retained hull Q is attained at a vertex
+/// of H. If it is d, H is in Q + disk(d), hence in Q + square(d).
+/// Q is in H, so every new point is within sqrt(2)*d of H. The caller's
+/// budget bounds that additional outward error; mesh error is separate.
+fn reduced_hull(hull: &[P2], budget: Option<f64>) -> Result<(Vec<P2>, f64), String> {
+    let Some(budget) = budget.filter(|_| hull.len() > 32) else {
+        return Ok((hull.to_vec(), 0.));
+    };
+    let retained = hull2((0..32).map(|k| hull[k * hull.len() / 32]).collect());
+    let scale = hull.iter().flatten().fold(1., |m: f64, x| m.max(x.abs()));
+    let growth = hull
+        .iter()
+        .map(|p| distance_to_hull(*p, &retained))
+        .fold(0., f64::max)
+        + 64. * f64::EPSILON * scale;
+    let outward = std::f64::consts::SQRT_2 * growth;
+    if outward > budget {
+        return Err(format!(
+            "32-vertex slice-hull reduction needs an additional outward error of {outward:.9} mm, beyond max_hull_error_mm {budget}; increase the declared budget or omit it to keep the exact hull"
+        ));
+    }
+    Ok((retained, growth))
+}
+
+/// Prove the whole edge is covered by oppositely directed edge capsules.
+/// A capsule is convex: containing both ends contains the entire segment.
+/// Bisection only partitions that proof; isolated sample matches never
+/// establish coverage. Ambiguous or excessively fragmented seams refuse.
+fn edge_covered(a: V3, b: V3, reach: f64, candidates: impl Fn(V3) -> Vec<[V3; 2]>) -> bool {
+    let within = |p: V3, edge: &[V3; 2]| {
+        let [c, e] = *edge;
+        let f = std::array::from_fn(|k| e[k] - c[k]);
+        let w = std::array::from_fn(|k| p[k] - c[k]);
+        let s = (dot(w, f) / dot(f, f)).clamp(0., 1.);
+        let g: V3 = std::array::from_fn(|k| w[k] - s * f[k]);
+        g[0].hypot(g[1]).hypot(g[2]) <= reach
+    };
+    let mut stack = vec![(a, b, 0)];
+    let mut work = 0;
+    while let Some((a, b, depth)) = stack.pop() {
+        work += 1;
+        let edges = candidates(a);
+        if edges.iter().any(|e| within(a, e) && within(b, e)) {
+            continue;
+        }
+        if work >= 4096 || depth >= 48 || !edges.iter().any(|e| within(a, e)) {
+            return false;
+        }
+        let mid = std::array::from_fn(|k| a[k] + 0.5 * (b[k] - a[k]));
+        if mid == a || mid == b {
+            return false;
+        }
+        stack.extend([(a, mid, depth + 1), (mid, b, depth + 1)]);
+    }
+    true
+}
+
+/// A complete insert fused into the supplied holder also contains its
+/// declared nose centre on the cutting face. The authoritative body
+/// enclosure must exclude this point before any move. This deliberately
+/// reports an enclosure conflict, not an inferred CAD feature: a separate
+/// body may instead need corrected placement or finer axial slices.
+pub(crate) fn check_separate_insert(id: &str, pieces: &Pieces3, inner: bool) -> Result<(), String> {
+    for piece in pieces {
+        let axis = if inner { 0 } else { 2 };
+        let lo = piece.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min);
+        let hi = piece
+            .iter()
+            .map(|p| p[axis])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let scale = piece.iter().flatten().fold(1., |m: f64, x| m.max(x.abs()));
+        let guard = 64. * f64::EPSILON * scale;
+        let section = hull2(
+            piece
+                .iter()
+                .map(|p| if inner { [p[1], p[2]] } else { [p[0], p[1]] })
+                .collect(),
+        );
+        if lo <= guard && hi >= -guard && outside([0., 0.], &section) <= guard {
+            return Err(format!(
+                "turning tool {id:?}: its model's body enclosure includes the insert's nose centre on its cutting face; split a fused insert from the holder and supply it only as insert_check, or correct the placement/refine axial_resolution_mm for a separate holder (camlib does not subtract insert material)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A mesh's triangles placed in the checks' frame (u, v, y), validated.
@@ -450,23 +560,19 @@ fn check_closed(triangles: &[[V3; 3]], error: f64, what: &str) -> Result<(), Str
     let mut first = None;
     for (a, b, triangle) in &open {
         let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let mated = [0., 0.25, 0.5, 0.75, 1.].iter().all(|t| {
-            let p = [a[0] + t * d[0], a[1] + t * d[1], a[2] + t * d[2]];
+        let scale = lo.iter().chain(&hi).fold(1., |m: f64, x| m.max(x.abs()));
+        let proven_reach = (reach - 64. * f64::EPSILON * scale).max(0.);
+        let mated = edge_covered(*a, *b, proven_reach, |p| {
             grid.get(&index(p))
                 .into_iter()
                 .flatten()
                 .chain(&long)
-                .any(|&j| {
+                .filter_map(|&j| {
                     let (c, e, other) = open[j];
-                    let f = [e[0] - c[0], e[1] - c[1], e[2] - c[2]];
-                    if other == *triangle || dot(d, f) >= 0. {
-                        return false;
-                    }
-                    let w = [p[0] - c[0], p[1] - c[1], p[2] - c[2]];
-                    let s = (dot(w, f) / dot(f, f)).clamp(0., 1.);
-                    let g = [w[0] - s * f[0], w[1] - s * f[1], w[2] - s * f[2]];
-                    dot(g, g).sqrt() <= reach + 1e-12
+                    let f = std::array::from_fn(|k| e[k] - c[k]);
+                    (other != *triangle && dot(d, f) < 0.).then_some([c, e])
                 })
+                .collect()
         });
         if !mated {
             unmatched += 1;
@@ -484,7 +590,7 @@ fn check_closed(triangles: &[[V3; 3]], error: f64, what: &str) -> Result<(), Str
 struct Reduced {
     digest: [u8; 32],
     triangles: std::sync::Arc<Vec<[V3; 3]>>,
-    values: (Placement, [f64; 2], bool, u32, String),
+    values: (Placement, [f64; 3], bool, u32, String),
     pieces: std::sync::Arc<Pieces3>,
 }
 static REDUCED: std::sync::Mutex<std::collections::VecDeque<Reduced>> =
@@ -501,6 +607,14 @@ impl ModelBody {
         {
             return Err(format!(
                 "{what}: its model needs axial_resolution_mm (0.001..1000): the width of the slices across Z its body is checked in (the body is over-estimated along Z by less than one slice)"
+            ));
+        }
+        if self
+            .max_hull_error_mm
+            .is_some_and(|v| !v.is_finite() || v <= 0. || v > 1e3)
+        {
+            return Err(format!(
+                "{what}: max_hull_error_mm must be finite and in (0, 1000]; omit it to keep exact slice hulls"
             ));
         }
         match &self.insert_check {
@@ -545,7 +659,11 @@ impl ModelBody {
         // and tool change, so the last few are kept.
         let values = (
             self.placement.clone(),
-            [self.axial_resolution_mm, self.body.surface_error_mm],
+            [
+                self.axial_resolution_mm,
+                self.body.surface_error_mm,
+                self.max_hull_error_mm.unwrap_or(0.),
+            ],
             inner,
             self.body.version,
             self.body.units.clone(),
@@ -573,6 +691,7 @@ impl ModelBody {
                         self.axial_resolution_mm,
                         self.body.surface_error_mm,
                         inner,
+                        self.max_hull_error_mm,
                     )
                     .map_err(|e| format!("{what}: {e}"))?,
                 )
@@ -597,15 +716,19 @@ impl ModelBody {
     fn digest(&self, inner: bool) -> [u8; 32] {
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new();
-        hash.update(b"camlib turning model pieces v1");
+        hash.update(b"camlib turning model pieces v2");
         hash.update([inner as u8]);
         hash.update(self.body.version.to_le_bytes());
         hash.update(self.body.units.as_bytes());
-        let numbers = [self.axial_resolution_mm, self.body.surface_error_mm]
-            .into_iter()
-            .chain(self.placement.nose_center_mm)
-            .chain(self.placement.x_axis)
-            .chain(self.placement.z_axis);
+        let numbers = [
+            self.axial_resolution_mm,
+            self.body.surface_error_mm,
+            self.max_hull_error_mm.unwrap_or(0.),
+        ]
+        .into_iter()
+        .chain(self.placement.nose_center_mm)
+        .chain(self.placement.x_axis)
+        .chain(self.placement.z_axis);
         for v in numbers {
             hash.update(v.to_bits().to_le_bytes());
         }
@@ -688,7 +811,14 @@ impl ModelBody {
         // centre and two more of its body's vertices that has the whole
         // body on one side, facing +y (the seat tilts it; of a sharp
         // corner's planes, the one facing +y most).
-        let near_corner: Vec<V3> = declared.iter().filter(|p| inside(p)).copied().collect();
+        // A sharp corner may be the only declared vertex in the small
+        // corner region. Use the whole declared body to find its face's
+        // plane; the model comparison itself keeps the requested region.
+        let near_corner: Vec<V3> = declared
+            .iter()
+            .filter(|p| nose_radius_mm == 0. || inside(p))
+            .copied()
+            .collect();
         let mut normal: Option<V3> = None;
         for (i, a) in near_corner.iter().enumerate() {
             for b in &near_corner[i + 1..] {
@@ -938,6 +1068,31 @@ impl ModelBody {
                 d[0]
             ));
         }
+        // The entire projected insert, not only the reference corner.
+        // For convex hulls the Hausdorff distance is bounded by the largest
+        // vertex-to-opposite-hull distance in both directions. Include the
+        // model's declared mesh error; do not infer or fit another insert.
+        let projected = hull2(triangles.iter().flatten().map(|p| face(*p)).collect());
+        let mismatch = projected
+            .iter()
+            .map(|p| distance_to_hull(*p, &outline))
+            .chain(outline.iter().map(|p| distance_to_hull(*p, &projected)))
+            .fold(0., f64::max)
+            + insert.surface_error_mm;
+        let extent = declared
+            .iter()
+            .map(|p| dot(*p, *p).sqrt())
+            .fold(0., f64::max);
+        // Preserve the declared position/angle contract: rotating a point
+        // at radius R within the edge angle moves it at most 2R sin(a/2).
+        // This is an error bound, never a fitted alignment.
+        let allowed = *position_tolerance_mm
+            + 2. * extent * (edge_angle_tolerance_deg.to_radians() / 2.).sin();
+        if mismatch > allowed {
+            return Err(format!(
+                "{tool}: its model's whole insert outline differs by up to {mismatch:.4} mm (mesh error included), beyond the declared corner position/edge angle bounds ({allowed:.4} mm at the full insert's extent); check every corner and edge, or supply the matching insert model (camlib does not fit it)"
+            ));
+        }
         missing.map_or(Ok(()), Err)
     }
 }
@@ -999,7 +1154,13 @@ fn slice_range(lo: f64, hi: f64, width: f64, count: usize, k: usize) -> [f64; 2]
 }
 
 /// The convex pieces of a placed surface (see `ModelBody::pieces`).
-fn slices(triangles: &[[V3; 3]], width: f64, error: f64, inner: bool) -> Result<Pieces3, String> {
+fn slices(
+    triangles: &[[V3; 3]],
+    width: f64,
+    error: f64,
+    inner: bool,
+    max_hull_error: Option<f64>,
+) -> Result<Pieces3, String> {
     // Per slice: its points in the plane that matters ((v, y) inside a
     // bore, (u, v) outside), kept as their hull once they are many, and its
     // extent in y.
@@ -1022,11 +1183,13 @@ fn slices(triangles: &[[V3; 3]], width: f64, error: f64, inner: bool) -> Result<
     extent.resize(count, [f64::INFINITY, f64::NEG_INFINITY]);
     let hulls: Vec<Vec<P2>> = points.into_iter().map(hull2).collect();
     // Grown by the mesh's error: a square of that half-size at each vertex.
-    let grown = |hull: &[P2]| {
+    let grown = |hull: &[P2]| -> Result<Vec<P2>, String> {
+        let (hull, growth) = reduced_hull(hull, max_hull_error)?;
+        let error = error + growth;
         if error == 0. {
-            return hull.to_vec();
+            return Ok(hull);
         }
-        hull2(
+        Ok(hull2(
             hull.iter()
                 .flat_map(|p| {
                     [
@@ -1037,7 +1200,7 @@ fn slices(triangles: &[[V3; 3]], width: f64, error: f64, inner: bool) -> Result<
                     ]
                 })
                 .collect(),
-        )
+        ))
     };
     let mut pieces: Pieces3 = vec![];
     if !inner {
@@ -1047,7 +1210,7 @@ fn slices(triangles: &[[V3; 3]], width: f64, error: f64, inner: bool) -> Result<
             }
             let [y0, y1] = [extent[k][0] - error, extent[k][1] + error];
             pieces.push(
-                grown(hull)
+                grown(hull)?
                     .into_iter()
                     .flat_map(|p| [[p[0], p[1], y0], [p[0], p[1], y1]])
                     .collect(),
@@ -1079,7 +1242,7 @@ fn slices(triangles: &[[V3; 3]], width: f64, error: f64, inner: bool) -> Result<
             all.extend(&hulls[end]);
             end += 1;
         }
-        let section = grown(&hull2(all));
+        let section = grown(&hull2(all))?;
         let (u0, u1) = (
             slice_range(lo, hi, width, count, k)[0] - error,
             slice_range(lo, hi, width, count, end - 1)[1] + error,
@@ -1352,6 +1515,7 @@ pub(crate) mod testing {
             body: surface(triangles, error),
             placement: identity(),
             axial_resolution_mm: resolution,
+            max_hull_error_mm: None,
             insert_check: InsertCheck::NotModelled {
                 reason: "synthetic test body".into(),
             },
@@ -1363,6 +1527,100 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::*;
     use super::*;
+
+    #[test]
+    fn seam_coverage_proves_intervals_instead_of_five_samples() {
+        let a = [0., 0., 0.];
+        let b = [1., 0., 0.];
+        let edge = |lo, hi| [[hi, 0., 0.], [lo, 0., 0.]];
+        let patches = vec![
+            edge(0., 0.05),
+            edge(0.20, 0.30),
+            edge(0.45, 0.55),
+            edge(0.70, 0.80),
+            edge(0.95, 1.),
+        ];
+        // The old guard's five samples all find a reverse edge, but the
+        // uncovered intervals are much wider than twice the mesh error.
+        assert!(
+            [0., 0.25, 0.5, 0.75, 1.]
+                .into_iter()
+                .all(|x| { patches.iter().any(|[hi, lo]| lo[0] <= x && x <= hi[0]) })
+        );
+        assert!(!edge_covered(a, b, 0.002, |_| patches.clone()));
+        assert!(edge_covered(a, b, 0.002, |_| vec![
+            edge(0., 0.5),
+            edge(0.5, 1.)
+        ]));
+        assert!(!edge_covered(a, b, 0.002, |_| vec![[
+            [1., 0.003, 0.],
+            [0., 0.003, 0.]
+        ]]));
+    }
+
+    #[test]
+    fn bounded_slice_hulls_contain_the_body_and_keep_the_declared_error() {
+        let triangles = revolved([0., 0.], &[[1., 3.], [2., 4.], [3., 5.]], 512, 512);
+        let exact = model(triangles.clone(), 0.01, 0.5);
+        let mut reduced = exact.clone();
+        reduced.max_hull_error_mm = Some(0.1);
+        assert_ne!(exact.digest(true), reduced.digest(true));
+        for inner in [false, true] {
+            let pieces = reduced.pieces("bounded", inner).unwrap();
+            assert!(pieces.iter().all(|p| p.len() <= 72));
+            let section = |p: V3| if inner { [p[1], p[2]] } else { [p[0], p[1]] };
+            let axis = if inner { 0 } else { 2 };
+            let hulls: Vec<_> = pieces
+                .iter()
+                .map(|p| hull2(p.iter().map(|p| section(*p)).collect()))
+                .collect();
+            for p in samples(&triangles, 2) {
+                assert!(
+                    pieces.iter().zip(&hulls).any(|(piece, hull)| {
+                        let lo = piece.iter().map(|p| p[axis]).fold(f64::INFINITY, f64::min);
+                        let hi = piece
+                            .iter()
+                            .map(|p| p[axis])
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        lo <= p[axis] && p[axis] <= hi && outside(section(p), hull) <= 1e-9
+                    }),
+                    "source point {p:?} escaped the reduced enclosure"
+                );
+            }
+            assert_eq!(pieces, reduced.pieces("bounded", inner).unwrap());
+        }
+        let circle: Vec<_> = (0..512)
+            .map(|k| {
+                let angle = std::f64::consts::TAU * k as f64 / 512.;
+                [5. * angle.cos(), 5. * angle.sin()]
+            })
+            .collect();
+        let (q, growth) = reduced_hull(&hull2(circle), Some(0.1)).unwrap();
+        assert!(q.len() <= 32);
+        for p in q {
+            for dx in [-growth, growth] {
+                for dy in [-growth, growth] {
+                    assert!((p[0] + dx).hypot(p[1] + dy) <= 5.1);
+                }
+            }
+        }
+        reduced.max_hull_error_mm = Some(1e-6);
+        assert!(
+            reduced
+                .pieces("tight", true)
+                .unwrap_err()
+                .contains("max_hull_error_mm")
+        );
+        for invalid in [0., -1., f64::INFINITY, f64::NAN] {
+            reduced.max_hull_error_mm = Some(invalid);
+            assert!(
+                reduced
+                    .validate("invalid")
+                    .unwrap_err()
+                    .contains("max_hull_error_mm")
+            );
+        }
+    }
 
     /// Points of every triangle (a barycentric grid), in (u, v, y).
     fn samples(triangles: &[[V3; 3]], n: usize) -> Vec<V3> {
@@ -1473,9 +1731,9 @@ mod tests {
         let a = clock.elapsed();
         check_closed(&placed, 1e-4, "t").unwrap();
         let b = clock.elapsed();
-        let inner = slices(&placed, 0.25, 1e-4, true).unwrap();
+        let inner = slices(&placed, 0.25, 1e-4, true, None).unwrap();
         let c = clock.elapsed();
-        let outer = slices(&placed, 0.25, 1e-4, false).unwrap();
+        let outer = slices(&placed, 0.25, 1e-4, false, None).unwrap();
         let d = clock.elapsed();
         let count = |p: &Pieces3| (p.len(), p.iter().map(Vec::len).sum::<usize>());
         println!(

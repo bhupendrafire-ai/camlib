@@ -1421,6 +1421,7 @@ def tool_body_from_shape(
     nose_radius_tolerance_mm=None,
     edge_angle_tolerance_deg=None,
     without_insert_reason=None,
+    max_hull_error_mm=None,
     source=None,
     cancel=None,
 ):
@@ -1485,6 +1486,7 @@ def tool_body_from_shape(
         placement=placement,
         axial_resolution_mm=axial_resolution_mm,
         insert_check=check,
+        max_hull_error_mm=max_hull_error_mm,
     )
 
 

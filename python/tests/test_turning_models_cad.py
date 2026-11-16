@@ -90,6 +90,25 @@ class StepToolBodyTest(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
 
+    def test_a_freeform_holder_is_tessellated_to_its_error_and_validated(self):
+        shape = cq.Workplane("XY").ellipse(3, 4).workplane(offset=10).ellipse(4, 2).loft().translate((55, 0, 20))
+        self.assertIn("BSPLINE", {face.geomType() for face in shape.val().Faces()})
+        model = tool_body_from_shape(
+            shape,
+            max_error_mm=0.01,
+            placement=camlib.TurningModelPlacement(nose_center_mm=(0, 0, 0), x_axis=(1, 0, 0), z_axis=(0, 0, 1)),
+            axial_resolution_mm=0.5,
+            insert_solids=(),
+            without_insert_reason="synthetic declared nose frame",
+            max_hull_error_mm=0.1,
+        )
+        self.assertLessEqual(model.body.surface_error_mm, 0.01)
+        self.assertEqual(model.max_hull_error_mm, 0.1)
+        from test_turning import cnmg
+        from dataclasses import replace
+
+        replace(cnmg(), holder=camlib.TurningHolder.from_model(model)).validate()
+
     def test_a_step_holder_gives_the_same_checks_as_the_equivalent_mesh(self):
         path = write_step(
             self.directory.name,

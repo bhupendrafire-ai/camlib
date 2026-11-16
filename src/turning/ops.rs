@@ -386,6 +386,9 @@ pub struct TurnReport {
     pub min_part_clearance_mm: f64,
     /// Least clearance of the holder from the stock.
     pub min_holder_clearance_mm: f64,
+    /// Caller-declared additional outward slice-hull error, when opted in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_model_hull_error_mm: Option<f64>,
 }
 
 /// The exact stock change of one move: changed cells (ascending index) and
@@ -736,6 +739,9 @@ pub(crate) fn tool_geometry(
         let drill = matches!(t.insert, super::tool::Insert::Drill { .. });
         model.check_insert(&t.id, &insert_body, t.nose_radius_mm, drill)?;
         holder_body = model.pieces(&t.id, boring || drill)?;
+        if !drill {
+            super::model::check_separate_insert(&t.id, &holder_body, boring)?;
+        }
     }
     let nominal_body = body
         .nominal_insert
@@ -2148,6 +2154,12 @@ impl<'a> TurnSession<'a> {
             cut_length_mm: 0.,
             min_part_clearance_mm: f64::INFINITY,
             min_holder_clearance_mm: f64::INFINITY,
+            max_model_hull_error_mm: setting
+                .tool
+                .body
+                .as_ref()
+                .and_then(|b| b.model.as_ref())
+                .and_then(|m| m.max_hull_error_mm),
         };
         if active.as_deref() != Some(tool_id.as_str()) {
             if active.is_some() {
@@ -3379,6 +3391,12 @@ impl TurnReplay {
                 cut_length_mm: 0.,
                 min_part_clearance_mm: f64::INFINITY,
                 min_holder_clearance_mm: f64::INFINITY,
+                max_model_hull_error_mm: setting
+                    .tool
+                    .body
+                    .as_ref()
+                    .and_then(|b| b.model.as_ref())
+                    .and_then(|m| m.max_hull_error_mm),
             };
             // Program point to nose center: a translation, the arc's center
             // with it.
@@ -6917,6 +6935,25 @@ test_tool("groove_in".into(), Insert::Groove { width_mm: 3.,
         }
 
         #[test]
+        fn a_fused_insert_is_refused_before_any_move() {
+            let j = job();
+            let tool = &j.tools[0].tool;
+            let (lo, hi) = bounds(&geometry(tool).holder_body);
+            let insert = insert_model(tool, [0.; 3], 0.);
+            let mut fused = box_mesh(lo, hi);
+            fused.extend(insert.clone());
+            for model in [checked(fused.clone(), insert), model(fused, 0., 0.5)] {
+                let j = with_model(&j, 0, model);
+                let error = validate_tool(&j.tools[0].tool).unwrap_err();
+                assert!(
+                    error.contains("body enclosure includes the insert") && error.contains("split"),
+                    "{error}"
+                );
+                assert!(plan(&j).err().unwrap().contains("split"));
+            }
+        }
+
+        #[test]
         fn a_model_equal_to_the_holder_gives_the_same_checks() {
             // Inside a bore and outside: the built-in holder's own box as a
             // mesh, with the insert's model for the cross-check.
@@ -7005,74 +7042,170 @@ test_tool("groove_in".into(), Insert::Groove { width_mm: 3.,
         }
 
         #[test]
-        fn a_tilted_seat_is_part_of_the_cross_check() {
-            // A negative insert on a seat of -6 degrees rake and
-            // inclination: the declared body is tilted about its nose, and
-            // the model must be the tilted insert, not the flat one.
-            let mut job = job();
-            {
-                let body = job.tools[0].tool.body.as_mut().unwrap();
-                let insert = body.insert.as_mut().unwrap();
-                insert.insert_clearance_deg = 0.;
-                insert.rake_deg = -6.;
-                insert.inclination_deg = -6.;
-            }
-            let tool = &job.tools[0].tool;
-            let (lo, hi) = bounds(&geometry(tool).holder_body);
-            let flat = insert_model(tool, [0.; 3], 0.);
-            // The seat, written out here independently (ISO 3002-1): the
-            // rake about the major edge (5 degrees from +x toward +z in the
-            // tool frame, x radial), then the inclination about the
-            // in-plane direction across it, both about the nose centre.
-            // The checks' frame is (u, v) = (z, x).
-            let e = [5f64.to_radians().cos(), 5f64.to_radians().sin()];
-            // Across the edge into the insert: toward its centroid (of
-            // its area; the mean of the face polygon's vertices is not
-            // inside this wedge's side of the nose center, its nose arc
-            // having some fifty of them).
-            let face = &geometry(tool).insert[0];
-            let middle = (0..face.len()).fold([0., 0.], |m, i| {
-                let (p, n) = (face[i], face[(i + 1) % face.len()]);
-                let w = p[0] * n[1] - n[0] * p[1];
-                [m[0] + w * (p[1] + n[1]), m[1] + w * (p[0] + n[0])]
-            });
-            let area = (0..face.len()).fold(0., |a, i| {
-                let (p, n) = (face[i], face[(i + 1) % face.len()]);
-                a + p[0] * n[1] - n[0] * p[1]
-            });
-            let middle = [middle[0] / area, middle[1] / area];
-            let mut q = [-e[1], e[0]];
-            if q[0] * middle[0] + q[1] * middle[1] < 0. {
-                q = [-q[0], -q[1]];
-            }
-            let lambda = (-6f64).to_radians();
-            let gamma = ((-6f64).to_radians().tan() * lambda.cos()).atan();
-            let seat = |p: V3| {
-                let (x, z, y) = (p[1], p[0], p[2]);
-                let (a, b) = (x * e[0] + z * e[1], x * q[0] + z * q[1]);
-                let (b, c) = (
-                    b * (-gamma).cos() - y * (-gamma).sin(),
-                    b * (-gamma).sin() + y * (-gamma).cos(),
-                );
-                // A negative inclination raises the edge away from the
-                // nose: a rotation by its negative.
-                let (a, c) = (
-                    a * lambda.cos() + c * lambda.sin(),
-                    -a * lambda.sin() + c * lambda.cos(),
-                );
-                [a * e[1] + b * q[1], a * e[0] + b * q[0], c]
+        fn the_cross_check_covers_round_and_sharp_inserts() {
+            let mut tool = job().tools[0].tool.clone();
+            tool.insert = Insert::Outline {
+                outline: super::super::super::tool::Outline {
+                    start_mm: [1., 0.],
+                    segments: vec![super::super::super::tool::Segment::Arc {
+                        center_mm: [0., 0.],
+                        radius_mm: 1.,
+                        start_deg: 0.,
+                        end_deg: 360.,
+                    }],
+                },
+                corner: 0,
+                cutting: vec![0],
+                programming_point_mm: [-1., -1.],
             };
-            let tilted: Vec<[V3; 3]> = flat.iter().map(|t| t.map(seat)).collect();
-            let with = |insert: Vec<[V3; 3]>| {
-                let j = with_model(&job, 0, checked(box_mesh(lo, hi), insert));
-                validate_tool(&j.tools[0].tool)
-            };
-            assert_eq!(with(tilted), Ok(()));
-            let err = with(flat).unwrap_err();
+            tool.nose_radius_mm = 1.;
+            let original = tool.clone();
+            for shift in [[0.; 3], [0.5, 0., 0.], [0., 0., 0.5]] {
+                tool.body.as_mut().unwrap().model = Some(checked(
+                    box_mesh([2., 3., -3.], [4., 5., 0.]),
+                    insert_model(&original, shift, 0.),
+                ));
+                let result = validate_tool(&tool);
+                if shift == [0.; 3] {
+                    result.unwrap();
+                } else {
+                    assert!(result.unwrap_err().contains("cutting corner"));
+                }
+            }
+            tool.body.as_mut().unwrap().model = None;
+            tool.insert = Insert::iso_turning(80., 95., 12., 0.).unwrap();
+            tool.nose_radius_mm = 0.;
+            let insert = insert_model(&tool, [0.; 3], 0.);
+            tool.body.as_mut().unwrap().model =
+                Some(checked(box_mesh([2., 3., -3.], [4., 5., 0.]), insert));
+            validate_tool(&tool).unwrap();
+            let mut misplaced = tool.clone();
+            misplaced.body.as_mut().unwrap().model = None;
+            let wrong = insert_model(&misplaced, [0.5, 0., 0.], 0.);
+            misplaced.body.as_mut().unwrap().model =
+                Some(checked(box_mesh([2., 3., -3.], [4., 5., 0.]), wrong));
             assert!(
-                err.contains("camlib does not fit a model to its insert"),
-                "{err}"
+                validate_tool(&misplaced)
+                    .unwrap_err()
+                    .contains("cutting corner")
             );
+            tool.body
+                .as_mut()
+                .unwrap()
+                .model
+                .as_mut()
+                .unwrap()
+                .insert_check = InsertCheck::NotModelled {
+                reason: "synthetic measured cutting-point frame".into(),
+            };
+            validate_tool(&tool).unwrap();
+        }
+
+        #[test]
+        fn a_different_far_corner_is_refused_even_when_the_reference_corner_matches() {
+            let job = groove_job();
+            let (index, setting) = job
+                .tools
+                .iter()
+                .enumerate()
+                .find(|(_, s)| matches!(s.tool.insert, Insert::Groove { .. }))
+                .unwrap();
+            let mut other = setting.tool.clone();
+            let Insert::Groove { width_mm, depth_mm } = other.insert else {
+                unreachable!()
+            };
+            other.insert = Insert::Groove {
+                width_mm: width_mm + 1.,
+                depth_mm,
+            };
+            let (lo, hi) = bounds(&geometry(&setting.tool).holder_body);
+            let mut model = checked(box_mesh(lo, hi), insert_model(&other, [0.; 3], 0.));
+            if let InsertCheck::Model {
+                corner_region_mm, ..
+            } = &mut model.insert_check
+            {
+                *corner_region_mm = 1.;
+            }
+            let j = with_model(&job, index, model);
+            let error = validate_tool(&j.tools[index].tool).unwrap_err();
+            assert!(error.contains("whole insert outline"), "{error}");
+        }
+
+        #[test]
+        fn a_tilted_seat_is_part_of_the_cross_check() {
+            for (rake, inclination) in [(-6f64, -6f64), (8., -12.), (-12., 8.), (0., 0.)] {
+                // A negative insert on a seat of -6 degrees rake and
+                // inclination: the declared body is tilted about its nose, and
+                // the model must be the tilted insert, not the flat one.
+                let mut job = job();
+                {
+                    let body = job.tools[0].tool.body.as_mut().unwrap();
+                    let insert = body.insert.as_mut().unwrap();
+                    insert.insert_clearance_deg = 0.;
+                    insert.rake_deg = rake;
+                    insert.inclination_deg = inclination;
+                }
+                let tool = &job.tools[0].tool;
+                let (lo, hi) = bounds(&geometry(tool).holder_body);
+                let flat = insert_model(tool, [0.; 3], 0.);
+                // The seat, written out here independently (ISO 3002-1): the
+                // rake about the major edge (5 degrees from +x toward +z in the
+                // tool frame, x radial), then the inclination about the
+                // in-plane direction across it, both about the nose centre.
+                // The checks' frame is (u, v) = (z, x).
+                let e = [5f64.to_radians().cos(), 5f64.to_radians().sin()];
+                // Across the edge into the insert: toward its centroid (of
+                // its area; the mean of the face polygon's vertices is not
+                // inside this wedge's side of the nose center, its nose arc
+                // having some fifty of them).
+                let face = &geometry(tool).insert[0];
+                let middle = (0..face.len()).fold([0., 0.], |m, i| {
+                    let (p, n) = (face[i], face[(i + 1) % face.len()]);
+                    let w = p[0] * n[1] - n[0] * p[1];
+                    [m[0] + w * (p[1] + n[1]), m[1] + w * (p[0] + n[0])]
+                });
+                let area = (0..face.len()).fold(0., |a, i| {
+                    let (p, n) = (face[i], face[(i + 1) % face.len()]);
+                    a + p[0] * n[1] - n[0] * p[1]
+                });
+                let middle = [middle[0] / area, middle[1] / area];
+                let mut q = [-e[1], e[0]];
+                if q[0] * middle[0] + q[1] * middle[1] < 0. {
+                    q = [-q[0], -q[1]];
+                }
+                let lambda = inclination.to_radians();
+                let gamma = (rake.to_radians().tan() * lambda.cos()).atan();
+                let seat = |p: V3| {
+                    let (x, z, y) = (p[1], p[0], p[2]);
+                    let (a, b) = (x * e[0] + z * e[1], x * q[0] + z * q[1]);
+                    let (b, c) = (
+                        b * (-gamma).cos() - y * (-gamma).sin(),
+                        b * (-gamma).sin() + y * (-gamma).cos(),
+                    );
+                    // A negative inclination raises the edge away from the
+                    // nose: a rotation by its negative.
+                    let (a, c) = (
+                        a * lambda.cos() + c * lambda.sin(),
+                        -a * lambda.sin() + c * lambda.cos(),
+                    );
+                    [a * e[1] + b * q[1], a * e[0] + b * q[0], c]
+                };
+                let tilted: Vec<[V3; 3]> = flat.iter().map(|t| t.map(seat)).collect();
+                let with = |insert: Vec<[V3; 3]>| {
+                    let j = with_model(&job, 0, checked(box_mesh(lo, hi), insert));
+                    validate_tool(&j.tools[0].tool)
+                };
+                assert_eq!(with(tilted), Ok(()));
+                if rake == 0. && inclination == 0. {
+                    assert_eq!(with(flat), Ok(()));
+                } else {
+                    let err = with(flat).unwrap_err();
+                    assert!(
+                        err.contains("camlib does not fit a model to its insert"),
+                        "{err}"
+                    );
+                }
+            }
         }
 
         #[test]
