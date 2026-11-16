@@ -3308,6 +3308,156 @@
      "native": 6960.0
     }
    }
+  },
+  {
+   "name": "drilling-preparation-manual",
+   "family": "holes",
+   "description": "Explicit spot, pilot and final stages without preparation metadata",
+   "operations": {
+    "spot": {
+     "toolpath": "drilling",
+     "issue": 29,
+     "moves": 8,
+     "cut_mm": 7.072,
+     "rapid_mm": 25.314,
+     "air_cut_mm": 4.536,
+     "link_mm": 0.0,
+     "plunges": 2,
+     "retracts": 2,
+     "removed_mm3": 0.45,
+     "cycle_seconds_exact_stop": 2.053,
+     "cycle_seconds_tangent": 2.053,
+     "engine_seconds": 0.0017
+    },
+    "pilot": {
+     "toolpath": "drilling",
+     "issue": 29,
+     "moves": 8,
+     "cut_mm": 13.456,
+     "rapid_mm": 26.0,
+     "air_cut_mm": 7.728,
+     "link_mm": 0.0,
+     "plunges": 2,
+     "retracts": 2,
+     "removed_mm3": 8.201,
+     "cycle_seconds_exact_stop": 3.656,
+     "cycle_seconds_tangent": 3.656,
+     "engine_seconds": 0.0008
+    },
+    "holes": {
+     "toolpath": "drilling",
+     "issue": 29,
+     "moves": 8,
+     "cut_mm": 30.0,
+     "rapid_mm": 26.0,
+     "air_cut_mm": 16.0,
+     "link_mm": 0.0,
+     "plunges": 2,
+     "retracts": 2,
+     "removed_mm3": 175.271,
+     "cycle_seconds_exact_stop": 7.792,
+     "cycle_seconds_tangent": 7.792,
+     "engine_seconds": 0.0024
+    }
+   },
+   "toolpath": {
+    "moves": 24,
+    "cycle_seconds_exact_stop": 13.501,
+    "cycle_seconds_tangent": 13.501,
+    "posted_blocks": 63,
+    "post_error": null,
+    "removed_mm3": [
+     183.922,
+     208.489
+    ],
+    "material": null
+   },
+   "engine": {
+    "run_seconds": 0.0149,
+    "first_move_seconds": 0.0086,
+    "post_seconds": 0.002,
+    "repeats": 3,
+    "engagement_measure_seconds": null,
+    "peak_rss_kib": {
+     "python": 49104.0,
+     "native": 6832.0
+    }
+   }
+  },
+  {
+   "name": "drilling-preparation-bound",
+   "family": "holes",
+   "description": "The same stages with checked source-bound preparation",
+   "operations": {
+    "spot": {
+     "toolpath": "drilling",
+     "issue": 29,
+     "moves": 8,
+     "cut_mm": 7.072,
+     "rapid_mm": 25.314,
+     "air_cut_mm": 4.536,
+     "link_mm": 0.0,
+     "plunges": 2,
+     "retracts": 2,
+     "removed_mm3": 0.45,
+     "cycle_seconds_exact_stop": 2.053,
+     "cycle_seconds_tangent": 2.053,
+     "engine_seconds": 0.0033
+    },
+    "pilot": {
+     "toolpath": "drilling",
+     "issue": 29,
+     "moves": 8,
+     "cut_mm": 13.456,
+     "rapid_mm": 26.0,
+     "air_cut_mm": 7.728,
+     "link_mm": 0.0,
+     "plunges": 2,
+     "retracts": 2,
+     "removed_mm3": 8.201,
+     "cycle_seconds_exact_stop": 3.656,
+     "cycle_seconds_tangent": 3.656,
+     "engine_seconds": 0.0008
+    },
+    "holes": {
+     "toolpath": "drilling",
+     "issue": 29,
+     "moves": 8,
+     "cut_mm": 30.0,
+     "rapid_mm": 26.0,
+     "air_cut_mm": 16.0,
+     "link_mm": 0.0,
+     "plunges": 2,
+     "retracts": 2,
+     "removed_mm3": 175.271,
+     "cycle_seconds_exact_stop": 7.792,
+     "cycle_seconds_tangent": 7.792,
+     "engine_seconds": 0.0017
+    }
+   },
+   "toolpath": {
+    "moves": 24,
+    "cycle_seconds_exact_stop": 13.501,
+    "cycle_seconds_tangent": 13.501,
+    "posted_blocks": 63,
+    "post_error": null,
+    "removed_mm3": [
+     183.922,
+     208.489
+    ],
+    "material": null
+   },
+   "engine": {
+    "run_seconds": 0.0199,
+    "first_move_seconds": 0.0139,
+    "post_seconds": 0.0023,
+    "repeats": 3,
+    "engagement_measure_seconds": null,
+    "peak_rss_kib": {
+     "python": 48832.0,
+     "native": 6976.0
+    }
+   }
   }
  ],
  "failures": {},
@@ -3318,6 +3468,7 @@
  },
  "baseline_notes": [
   "Only `drilling-given-order` and `drilling-ordered` were introduced by #317 on macOS 26.5.1 arm64, Python 3.12.14, Rust 1.99.1, from three sequential repeats with the declared benchmark dynamics (6000 mm/min rapid, 1000 mm/s\u00b2 acceleration). The existing 44 workload records and their original host provenance are unchanged. Engine wall times from different hosts must not be compared.",
-  "Only the five #320 controls (drilling-clearance-pecks, drilling-r-plane-pecks, drilling-decreasing-pecks, drilling-g98 and drilling-g99) were added on macOS 26.5.1 arm64, Python 3.12.14, Rust 1.99.1, with three sequential repeats and the declared benchmark dynamics. All 46 inherited records and their host provenance are unchanged. Every new control retains scene and stock checks. Engine wall times from different hosts must not be compared."
+  "Only the five #320 controls (drilling-clearance-pecks, drilling-r-plane-pecks, drilling-decreasing-pecks, drilling-g98 and drilling-g99) were added on macOS 26.5.1 arm64, Python 3.12.14, Rust 1.99.1, with three sequential repeats and the declared benchmark dynamics. All 46 inherited records and their host provenance are unchanged. Every new control retains scene and stock checks. Engine wall times from different hosts must not be compared.",
+  "Only the two #321 controls (drilling-preparation-manual and drilling-preparation-bound) were added on macOS 26.5.1 arm64, Python 3.12.14, Rust 1.99.1, from three sequential repeats with the declared benchmark dynamics. All 51 inherited records and their host provenance are unchanged. Preparation grants no clearance credit and retains scene/stock checks. Engine wall times from different hosts must not be compared."
  ]
 }
