@@ -58,11 +58,14 @@ class DrillingOptionsTest(unittest.TestCase):
                     new, stock, report, checks = run(fixture(canned_cycle=canned, r_plane_travel=True, **pecks))
                     self.assertEqual(old_stock, stock)
                     self.assertEqual(old[-1]["curve"]["end"], new[-1]["curve"]["end"])
-                    plunges = lambda rows: sorted(
-                        (tuple(m["curve"]["start"]), tuple(m["curve"]["end"]), m["feed_mm_min"])
-                        for m in rows
-                        if m["kind"] == "plunge"
-                    )
+
+                    def plunges(rows):
+                        return sorted(
+                            (tuple(m["curve"]["start"]), tuple(m["curve"]["end"]), m["feed_mm_min"])
+                            for m in rows
+                            if m["kind"] == "plunge"
+                        )
+
                     self.assertEqual(plunges(old), plunges(new))
                     low = [
                         m
