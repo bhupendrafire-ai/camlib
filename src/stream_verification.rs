@@ -329,6 +329,7 @@ pub struct Binding {
     target_sha256: Vec<String>,
     proof_source_error_mm: Vec<f64>,
     raw_stock: bool,
+    r_plane_operations: HashMap<String, ()>,
 }
 impl Binding {
     pub fn new(manifest: &StreamManifest) -> Result<Self, String> {
@@ -374,6 +375,16 @@ impl Binding {
                 })
                 .collect(),
             raw_stock: manifest.initial_stock.is_none(),
+            r_plane_operations: manifest
+                .operations
+                .iter()
+                .filter_map(|op| match op {
+                    crate::pocket::Operation::Drilling(d) if d.r_plane_travel => {
+                        Some((d.id.clone(), ()))
+                    }
+                    _ => None,
+                })
+                .collect(),
             config,
             run: manifest.run.clone(),
             stock: manifest.stock.view()?,
@@ -500,6 +511,18 @@ impl Binding {
                 stock_contact,
             } => {
                 let m = motion.ok_or("motion verification needs the committed source motion")?;
+                if self.r_plane_operations.contains_key(&m.operation)
+                    && m.kind.is_rapid()
+                    && m.curve.start()[..2] != m.curve.end()[..2]
+                    && (report
+                        .as_ref()
+                        .is_none_or(|r| r.status != verification::Status::Clear)
+                        || stock_contact
+                            .as_ref()
+                            .is_none_or(|r| r.status != verification::Status::Clear))
+                {
+                    return Err("R-plane drilling XY travel is not proven Clear against both scene and stock; use clearance travel or correct the declared scene/stock and proof budget".into());
+                }
                 if !self.config.motion_checks()
                     || report.is_some() != self.config.scene.is_some()
                     || stock_contact.is_some() != self.config.stock_contact.is_some()

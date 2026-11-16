@@ -51,6 +51,7 @@ _EXPORTS = {
             "DeburrEdge",
             "Drilling",
             "HoleOrdering",
+            "PeckSchedule",
             "Bore",
             "TrochoidalSlot",
             "Parallel",

@@ -82,6 +82,18 @@ class LinuxCNCInterpreterTest(unittest.TestCase):
                 job = drills.job(**options)
                 self.assertGreaterEqual(self.run_job(job, drills.linuxcnc(job)), 8)
 
+    def test_r_plane_and_decreasing_pecks(self):
+        import test_drilling_options as drilling
+
+        for options in (
+            {"r_plane_travel": True},
+            {"r_plane_travel": True, "peck_mm": 1.5},
+            {"r_plane_travel": True, "peck_mm": 1.5, "peck_mode": "chip_break"},
+            {"canned_cycle": False, "peck_schedule": drilling.PeckSchedule(3, 1, 1)},
+        ):
+            source = drilling.fixture(**options)
+            self.assertGreaterEqual(self.run_job(source, drilling.linuxcnc(source)), 8)
+
     def test_contour_with_wear_compensation(self):
         import test_cutter_compensation as comp
 

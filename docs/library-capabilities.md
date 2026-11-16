@@ -34,7 +34,7 @@ See [Operations](operations.md) for parameters. Summary:
 | Morph, flow | Passes between two guide curves; CAD face parameter lines (CadQuery) followed with Project |
 | V-carve | Maximal inscribed disks along the outline, sharp corners, overcut-checked between samples |
 | Machining limits | Avoid areas (clamps, fixtures) with a top height and containment regions, for every operation: region operations plan around them, profiles lift over them, finishing leaves out what is not proven allowed, holes/slots are refused; rapids and links checked |
-| Drilling, pecking | Tip or full-diameter depth; full-retract or chip-break pecks; dwell at depth (G4 or G82); canned cycles G81/G82/G83/G73, decoded and checked move by move; opt-in bounded hole ordering from declared dynamics, with fixed final hole and unchanged clearance travel |
+| Drilling, pecking | Tip or full-diameter depth; full-retract or chip-break pecks; bounded caller-declared decreasing explicit pecks; dwell at depth (G4 or G82); canned G81/G82/G83/G73 with G98 or opt-in G99; R-plane XY travel requires scene and stock Clear before commit; bounded hole ordering with fixed final hole; original final clearance exit and export gates |
 | Reaming, boring | Feed out (G85), dwell (G89), spindle stop and rapid out (G86) or fine boring with an oriented stop and shift (G76, or M19 and explicit moves), as canned cycles where declared; pilot hole proven open first; every shift proven inside the bore |
 | Bore milling | Helical full-hole clearing |
 | Trochoidal slot | Straight slots, or along a centreline of lines and arcs; width between 1x and 2x tool diameter |
@@ -233,7 +233,7 @@ controller parameters, real offsets) is outside what camlib can check.
 | --- | --- |
 | Arcs and helices | G2/G3 where the controller declares them and the rounded words stay within tolerance (spiral mismatch included); otherwise checked line segments |
 | Dwell | G4 with the controller's unit and resolution, never shorter |
-| Drilling and boring cycles | G81/G82/G83/G73, G85/G89/G86, G76 (with G98, G80); decoded back into moves and checked |
+| Drilling and boring cycles | G81/G82/G83/G73 with G98 or G99; G85/G89/G86 and G76 with G98; G80 cancellation, decoded back into moves and checked |
 | Rigid tapping | G33.1 (M3 right, M4 left), or G84 / G74 with feed or lead word; SINUMERIK 808D native `CYCLE84` (signed lead) |
 | Lathe threading | G33 K<lead> or G32 F<lead> (spindle-synchronized), decoded back |
 | Plasma and laser marking | `ThermalMark`: caller-supplied lines and arcs (part numbers, bend lines) traced with the beam in the machine's marking process, before the cut; marking feed, height, power and line width declared by the caller; every mark proven inside its part (or explicitly allowed on the scrap), parts with marks not yet cut, sheet left whole under a mark (the stock refuses a mark over cut sheet) |

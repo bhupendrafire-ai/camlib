@@ -125,6 +125,7 @@ _DEFAULT_COMMANDS = tuple(
 _CYCLE_EFFECTS = frozenset(
     (
         'tap_cycle',
+        'cycle_return_r',
         'tap_cycle_left',
         'fine_bore_cycle',
         'spindle_orient',
@@ -141,6 +142,7 @@ _CYCLE_EFFECTS = frozenset(
 # feed per revolution (G95; Centroid/FANUC lathes G99, with G98 per minute).
 _LATHE_EFFECTS = frozenset(('css_on', 'css_limit', 'feed_per_rev'))
 _GROUPS = {
+    **dict.fromkeys(('cycle_return_initial', 'cycle_return_r'), 'cycle_return'),
     **dict.fromkeys(('css_on', 'rpm_mode'), 'speed_mode'),
     **dict.fromkeys(('feed_per_rev', 'feed_per_minute'), 'feed_mode'),
     **dict.fromkeys(
@@ -215,6 +217,7 @@ _STATE_ONLY = (
             'frame_reset',
             'exact_stop',
             'cycle_return_initial',
+            'cycle_return_r',
         )
     )
     | _OPTIONAL_EFFECTS
@@ -551,7 +554,7 @@ class GCodeDialect:
     def linuxcnc(cls, **changes):
         """The LinuxCNC 2.9 dialect (RS274NGC words, G54-G59, M6/G43, arc
         tolerances from its documented defaults), with optional changes."""
-        return replace(cls(), **changes)
+        return replace(cls().with_commands(cycle_return_r='G99'), **changes)
 
     def radius_accepts(self, r1, r2, error=None):
         """Whether the controller accepts circular words whose start and end
@@ -1585,14 +1588,15 @@ class GCodePost(PostProcessor):
         self.emit(d.code('dwell'), d.dwell_word + f'{ticks * step:.{digits}f}'.rstrip('0'))
 
     def on_cycle(self, event):
-        """One cycle block per hole (G98 once), or nothing when the dialect
+        """One cycle block per hole (declared G98/G99 return), or nothing when the dialect
         declares no code for this cycle: the moves then follow explicitly."""
         d = self.machine.dialect
         effect = _DRILL_CYCLES[event.cycle]
         if getattr(self, '_feed_rev', None):
             raise ValueError('canned cycles are written with feeds per minute: return to G94 first')
         # A cycle needs its own code, G98 return and G80 cancel.
-        if not {effect, 'cycle_return_initial', 'cycles_off'} <= {c.effect for c in d.commands}:
+        return_effect = 'cycle_return_r' if event.return_to_r else 'cycle_return_initial'
+        if not {effect, return_effect, 'cycles_off'} <= {c.effect for c in d.commands}:
             return []
         for kind, source, machine, name in (
             ('peck', event.reentry_mm, d.peck_reentry_mm, 'reentry_clearance_mm'),
@@ -1604,11 +1608,17 @@ class GCodePost(PostProcessor):
                     f'{d.code(effect)} return amount {machine} mm: set {name}={machine}'
                 )
         self.cycle_plane()
-        if getattr(self, '_cycle_open', False) and getattr(self, '_cycle_initial', None) != event.initial_z_mm:
+        if (
+            not event.return_to_r
+            and getattr(self, '_cycle_open', False)
+            and getattr(self, '_cycle_initial', None) != event.initial_z_mm
+        ):
             # FANUC keeps the initial level from where the cycle mode began.
             self.emit(d.code('cycles_off'))
-        self._cycle_initial = event.initial_z_mm
-        if word := self.modal('cycle_return', d.code('cycle_return_initial')):
+            self._cycle_open = False
+        if not getattr(self, '_cycle_open', False):
+            self._cycle_initial = event.initial_z_mm
+        if word := self.modal('cycle_return', d.code(return_effect)):
             self.emit(word)
         addresses = [d.axes[0], d.axes[1], d.axes[2], 'R']
         values = [*event.center_mm, event.z_mm, event.r_mm]
@@ -1875,6 +1885,7 @@ class GCodeDecoder(_TransactionCopy):
         self.direction = 'cw'
         self.tap_return = None
         self.cycle_active = False
+        self.cycle_returned_to_r = False
         # Lathe modes: constant surface speed (m/min, rpm limit), its G50
         # limit, and the feed per revolution in effect.
         self.css = None
@@ -2024,7 +2035,7 @@ class GCodeDecoder(_TransactionCopy):
             return [self._thread(values, context)]
         if len(effects) == 1 and effects[0] in _DRILL_CYCLES.values():
             return self._drill_cycle(effects[0], values, context)
-        if self.cycle_active and effects != ['cycles_off']:
+        if self.cycle_active and effects not in (['cycles_off'], ['cycle_return_initial'], ['cycle_return_r']):
             raise ValueError('canned cycle still active: cancel it (G80) first')
         if 'css_on' in effects:
             return self._surface_speed(effects, values)
@@ -2079,6 +2090,9 @@ class GCodeDecoder(_TransactionCopy):
                 if self.feed_rev is not None:
                     self.feed_rev = None
                     output.append(FeedPerRev(0))
+            elif effect in ('cycle_return_initial', 'cycle_return_r'):
+                self.ready.difference_update(('cycle_return_initial', 'cycle_return_r'))
+                self.ready.add(effect)
             elif effect in state_only:
                 self.ready.add(effect)
             elif isinstance(effect, tuple):
@@ -2344,7 +2358,7 @@ class GCodeDecoder(_TransactionCopy):
         return [SurfaceSpeed(m_min, limit, self.direction)]
 
     def _drill_cycle(self, effect, values, context):
-        """Expand a drilling/boring cycle block (G98 return) into the moves
+        """Expand a drilling/boring cycle block (G98/G99 return) into the moves
         and spindle/dwell effects the controller makes, from its actual words
         (LinuxCNC interp_cycles.cc; FANUC 0i-MB 13.1; Centroid 12.28)."""
         d = self.machine.dialect
@@ -2360,8 +2374,9 @@ class GCodeDecoder(_TransactionCopy):
             raise ValueError('NC drilling cycle with unknown tool/length/offset')
         if self.feed_rev is not None:
             raise ValueError('drilling cycle in feed per revolution mode')
-        if 'cycle_return_initial' not in self.ready:
-            raise ValueError('drilling cycle without G98 initial-level return')
+        if not {'cycle_return_initial', 'cycle_return_r'} & self.ready:
+            raise ValueError('drilling cycle without G98/G99 return mode')
+        return_to_r = 'cycle_return_r' in self.ready
         if any(w not in values for w in used):
             raise ValueError('drilling cycle needs X Y Z R F')
         x, y, z = (values[a] * self.units for a in d.axes)
@@ -2371,11 +2386,11 @@ class GCodeDecoder(_TransactionCopy):
         z0 = start[2]
         if not (z < r <= z0) or feed <= 0:
             raise ValueError('drilling cycle needs Z < R <= the initial level and a positive feed')
-        if self.cycle_active and z0 != self.cycle_initial:
+        if not return_to_r and self.cycle_active and z0 != self.cycle_initial and not self.cycle_returned_to_r:
             # FANUC keeps the initial level from where the cycle mode began.
             raise ValueError('a chained canned cycle must start at the same initial level (cancel with G80 first)')
         boring = effect in _BORE_CYCLES
-        if boring and z0 != r:
+        if boring and (z0 != r or return_to_r or self.cycle_active and z0 != self.cycle_initial):
             raise ValueError('boring cycles are written from the R plane (initial level = R)')
         dwell = None
         if effect in _DWELL_CYCLES:
@@ -2442,7 +2457,8 @@ class GCodeDecoder(_TransactionCopy):
             ]
         elif boring:
             items.append(((x, y, r), feed, False))
-        items.append(((x, y, z0), None, True))
+        return_z = r if return_to_r else self.cycle_initial if self.cycle_active else z0
+        items.append(((x, y, return_z), None, True))
         queue = []
         position = start
         for item in items:
@@ -2452,8 +2468,10 @@ class GCodeDecoder(_TransactionCopy):
                 queue.append(item)
                 position = item[0]
         self.cycle_queue = queue
+        if not self.cycle_active:
+            self.cycle_initial = z0
         self.cycle_active = True
-        self.cycle_initial = z0
+        self.cycle_returned_to_r = return_to_r
         return []
 
     def _cycle_effect(self, context):

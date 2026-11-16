@@ -201,7 +201,8 @@ pub(crate) const DEFAULT_EFFECTS: [&str; 41] = [
     "bore_stop_cycle",
     "tap_synchronized",
 ];
-pub(crate) const CYCLE_EFFECTS: [&str; 9] = [
+pub(crate) const CYCLE_EFFECTS: [&str; 10] = [
+    "cycle_return_r",
     "tap_cycle",
     "tap_cycle_left",
     "fine_bore_cycle",

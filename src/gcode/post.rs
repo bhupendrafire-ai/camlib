@@ -1106,6 +1106,7 @@ impl DefaultPost {
             z_mm,
             r_mm,
             initial_z_mm,
+            return_to_r,
             feed_mm_min,
             peck_mm,
             dwell_s,
@@ -1164,7 +1165,12 @@ impl DefaultPost {
             );
         }
         // A cycle needs its own code, G98 return and G80 cancel.
-        if !(d.declares(effect) && d.declares("cycle_return_initial") && d.declares("cycles_off")) {
+        let return_effect = if *return_to_r {
+            "cycle_return_r"
+        } else {
+            "cycle_return_initial"
+        };
+        if !(d.declares(effect) && d.declares(return_effect) && d.declares("cycles_off")) {
             return Ok(());
         }
         for (kind, source, machine, name) in [
@@ -1196,12 +1202,15 @@ impl DefaultPost {
             }
         }
         self.cycle_plane()?;
-        if self.cycle_open && self.cycle_initial != Some(*initial_z_mm) {
+        if !return_to_r && self.cycle_open && self.cycle_initial != Some(*initial_z_mm) {
             // FANUC keeps the initial level from where the cycle mode began.
             self.emit(&[d.code("cycles_off")?])?;
+            self.cycle_open = false;
         }
-        self.cycle_initial = Some(*initial_z_mm);
-        if let Some(word) = self.modal("cycle_return", d.code("cycle_return_initial")?) {
+        if !self.cycle_open {
+            self.cycle_initial = Some(*initial_z_mm);
+        }
+        if let Some(word) = self.modal("cycle_return", d.code(return_effect)?) {
             self.emit(&[&word])?;
         }
         let addresses = [

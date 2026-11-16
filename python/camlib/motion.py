@@ -209,7 +209,7 @@ class Cycle:
     the controller's canned cycle: drill (G81), dwell (G82), peck (G83),
     chip_break (G73), bore (G85), bore_dwell (G89), bore_stop (G86) or
     fine_bore (G76, shift ``shift_mm`` at the bottom), returning to
-    ``initial_z_mm`` (G98). A post may write them as one cycle block or as the
+    ``initial_z_mm`` (G98), or R when ``return_to_r`` (G99). A post may write them as one cycle block or as the
     explicit moves."""
 
     cycle: str
@@ -224,12 +224,15 @@ class Cycle:
     reentry_mm: float | None = None
     lift_mm: float | None = None
     shift_mm: float | None = None
+    return_to_r: bool = False
 
     def to_dict(self):
         data = {"kind": "cycle", **asdict(self), "center_mm": tuple(self.center_mm)}
         for key in ("peck_mm", "dwell_s", "reentry_mm", "lift_mm", "shift_mm"):
             if data[key] is None:
                 del data[key]
+        if not self.return_to_r:
+            del data["return_to_r"]
         return data
 
 

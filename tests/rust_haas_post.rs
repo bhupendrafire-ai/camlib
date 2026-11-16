@@ -187,6 +187,7 @@ fn missing_peck_return_distance_is_refused_without_nan() {
             z_mm: 4.,
             r_mm: 11.,
             initial_z_mm: 12.,
+            return_to_r: false,
             feed_mm_min: 150.,
             peck_mm: Some(1.5),
             dwell_s: None,

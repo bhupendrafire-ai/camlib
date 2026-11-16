@@ -21,6 +21,42 @@ fn fixture() -> Value {
 }
 
 #[test]
+fn g99_and_g98_keep_the_cycle_series_initial_plane_until_cancelled() {
+    let mut input = fixture();
+    input["machine"]["dialect"]["commands"].as_array_mut().unwrap().push(
+        serde_json::json!({"effect":"cycle_return_r","code":"G99"})
+    );
+    for tool in input["machine"]["tools"].as_array_mut().unwrap() {
+        tool["position_after_mm"] = serde_json::json!([0,0,12]);
+    }
+    let number = input["machine"]["tools"][0]["number"].as_u64().unwrap();
+    let length = input["machine"]["tools"][0]["length_register"].as_u64().unwrap();
+    let machine: Machine = serde_json::from_value(input["machine"].clone()).unwrap();
+    let mut decoder = Decoder::new(&machine, [0.,0.,12.], Default::default()).unwrap();
+    let mut prelude: Vec<String> = ["G21","G90","G91.1","G17","G94","G97","G40","G49","G80","G92.1","G61.1","M5","M9","G54"].iter().map(|s| s.to_string()).collect();
+    prelude.extend([format!("T{number}"), "M6".into(), format!("G43 H{length}"), "M3 S6000".into(), "M8".into()]);
+    decoder.read(&prelude, None).unwrap();
+    decoder.validate_initialized().unwrap();
+    let mut id = 1;
+    for (mode, x, end_z, kinds) in [
+        ("G99",8.,11.,vec![MoveKind::Rapid,MoveKind::Rapid,MoveKind::Plunge,MoveKind::Rapid]),
+        ("G98",20.,12.,vec![MoveKind::Rapid,MoveKind::Plunge,MoveKind::Rapid]),
+        ("G99",8.,11.,vec![MoveKind::Rapid,MoveKind::Rapid,MoveKind::Plunge,MoveKind::Rapid]),
+    ] {
+        decoder.read(&[mode.into(),format!("G81 X{x} Y8 Z4 R11 F150")],None).unwrap();
+        let mut last = None;
+        for kind in kinds {
+            let events = decoder.read(&[], Some(&Context {id,operation:"holes".into(),kind})).unwrap();
+            let camlib::motion::Event::Motion {motion} = &events[0] else {panic!("cycle motion")};
+            last = Some(motion.curve.end());
+            id += 1;
+        }
+        assert_eq!(last,Some([x,8.,end_z]));
+    }
+    decoder.read(&["G80".into()],None).unwrap();
+}
+
+#[test]
 fn posts_the_python_program_byte_for_byte() {
     let report = post(&fixture()).unwrap();
     assert_eq!(report["released"], true);

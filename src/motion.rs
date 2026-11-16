@@ -642,6 +642,9 @@ pub enum Event {
         r_mm: f64,
         /// Return level (G98: the Z where the cycle starts).
         initial_z_mm: f64,
+        /// G99 returns to R instead of the cycle's actual initial Z.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        return_to_r: bool,
         feed_mm_min: f64,
         /// Q: peck depth (peck and chip-break cycles).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1403,6 +1406,7 @@ impl ProgramValidator {
                     z_mm,
                     r_mm,
                     initial_z_mm,
+                    return_to_r,
                     feed_mm_min,
                     peck_mm,
                     dwell_s,
@@ -1436,7 +1440,15 @@ impl ProgramValidator {
                                 && positive(shift_mm)
                                 && r_mm == initial_z_mm
                         }
-                    } && (shift_mm.is_none() || *cycle == DrillCycle::FineBore)
+                    } && (!*return_to_r
+                        || matches!(
+                            cycle,
+                            DrillCycle::Drill
+                                | DrillCycle::Dwell
+                                | DrillCycle::Peck
+                                | DrillCycle::ChipBreak
+                        ))
+                        && (shift_mm.is_none() || *cycle == DrillCycle::FineBore)
                         && (reentry_mm.is_none() || *cycle == DrillCycle::Peck)
                         && (lift_mm.is_none() || *cycle == DrillCycle::ChipBreak);
                     if !shape
@@ -1457,7 +1469,7 @@ impl ProgramValidator {
                         return Err(error("canned cycles cannot nest"));
                     }
                     if position[2] != *initial_z_mm {
-                        return Err(error("a canned cycle starts at its return level"));
+                        return Err(error("a canned cycle starts at its declared initial level"));
                     }
                     covered = *covers;
                 }

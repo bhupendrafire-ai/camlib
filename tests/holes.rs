@@ -774,6 +774,103 @@ fn stock_position(_: &Stock, initial: Vec3) -> Vec3 {
     [c[0], c[1], d.clearance_z_mm]
 }
 
+fn checked_drill(op: DrillingOperation) -> (DrillingPlan, Stock, Vec<Motion>) {
+    let cancel = AtomicBool::new(false);
+    let f = fixture();
+    let tool = f.tools[0].prepare().unwrap();
+    let mut stock = Stock::new(f.stock.height().unwrap().clone()).unwrap();
+    stock.enable_contact_queries(&cancel).unwrap();
+    let mut plan = drill_plan(op).unwrap();
+    let mut moves = Vec::new();
+    while let Some(m) = plan.next_motion_with_stock(&stock, &cancel).unwrap() {
+        if m.kind.is_rapid() && m.curve.start()[..2] != m.curve.end()[..2] {
+            let proof = camlib::stock_contact::check(&stock, &tool, &m, Default::default(), &cancel).unwrap();
+            assert_eq!(proof.status, camlib::verification::Status::Clear);
+        }
+        commit(&mut stock, &m);
+        moves.push(m);
+    }
+    plan.finish_report(&cancel).unwrap();
+    (plan, stock, moves)
+}
+
+#[test]
+fn r_plane_drilling_keeps_plunges_stock_and_exit_and_uses_checked_low_rapids() {
+    for canned in [false, true] {
+        for mode in [PeckMode::FullRetract, PeckMode::ChipBreak] {
+            let mut op = drilling();
+            op.canned_cycle = canned;
+            op.peck_mode = mode;
+            let (_, old, before) = checked_drill(op.clone());
+            op.r_plane_travel = true;
+            let (plan, new, after) = checked_drill(op);
+            assert_eq!(before.last().unwrap().curve.end(), after.last().unwrap().curve.end());
+            let plunges = |rows: &[Motion]| rows.iter().filter(|m| m.kind == MoveKind::Plunge)
+                .map(|m| serde_json::to_string(&(&m.curve, m.feed_mm_min)).unwrap()).collect::<Vec<_>>();
+            assert_eq!(plunges(&before), plunges(&after));
+            for (a, b) in old.cells().iter().zip(new.cells()) {
+                assert_eq!((a.lower_mm, a.upper_mm), (b.lower_mm, b.upper_mm));
+            }
+            let report = plan.report().r_plane_travel.as_ref().unwrap();
+            assert_eq!(report.candidate_links, 1);
+            assert_eq!(report.z_mm, 11.);
+        }
+    }
+}
+
+#[test]
+fn decreasing_pecks_keep_full_depth_and_stock_in_both_retract_modes() {
+    for mode in [PeckMode::FullRetract, PeckMode::ChipBreak] {
+        let mut op = drilling();
+        op.peck_mode = mode;
+        op.peck_mm = Some(1.);
+        let (_, old, _) = checked_drill(op.clone());
+        op.peck_mm = None;
+        op.peck_schedule = Some(PeckSchedule { first_mm: 3., decrement_mm: 1., minimum_mm: 1., max_pecks: 10 });
+        let (plan, new, moves) = checked_drill(op.clone());
+        assert_eq!(moves.iter().filter(|m| m.kind == MoveKind::Plunge).map(|m| m.curve.end()[2]).collect::<Vec<_>>(), vec![7.,5.,4.,7.,5.,4.]);
+        assert_eq!(plan.report().pecks_per_hole, 3);
+        assert_eq!(plan.report().peck_returns, 4);
+        for (a, b) in old.cells().iter().zip(new.cells()) {
+            assert_eq!((a.lower_mm, a.upper_mm), (b.lower_mm, b.upper_mm));
+        }
+        op.peck_schedule = Some(PeckSchedule { first_mm: 4., decrement_mm: 1., minimum_mm: 3., max_pecks: 10 });
+        let (_, _, moves) = checked_drill(op);
+        assert_eq!(moves.iter().filter(|m| m.kind == MoveKind::Plunge).map(|m| m.curve.end()[2]).collect::<Vec<_>>(), vec![6.,4.,6.,4.]);
+    }
+}
+
+#[test]
+fn peck_schedules_are_bounded_validated_and_cancellable_before_motion() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct CancelAfter(AtomicUsize);
+    impl CancelSignal for CancelAfter {
+        fn is_cancelled(&self) -> bool { self.0.fetch_add(1, Ordering::Relaxed) >= 2 }
+    }
+    let mut op = drilling();
+    op.peck_mm = None;
+    for schedule in [
+        PeckSchedule { first_mm: 1., decrement_mm: 0., minimum_mm: 1., max_pecks: 2 },
+        PeckSchedule { first_mm: 1., decrement_mm: -1., minimum_mm: 1., max_pecks: 10 },
+        PeckSchedule { first_mm: 1., decrement_mm: 0., minimum_mm: 2., max_pecks: 10 },
+    ] {
+        op.peck_schedule = Some(schedule);
+        assert!(drill_plan(op.clone()).is_err());
+    }
+    op.peck_schedule = Some(PeckSchedule { first_mm: 1., decrement_mm: 0., minimum_mm: 1., max_pecks: 10 });
+    let f = fixture();
+    let prepare = |op| DrillingPlan::prepare(op, &f.tools[0], f.stock.height().unwrap(), f.initial_position_mm, 1, &CancelAfter(AtomicUsize::new(0)));
+    assert!(prepare(op.clone()).err().unwrap().contains("peck schedule cancelled"));
+    op.canned_cycle = true;
+    assert!(drill_plan(op.clone()).err().unwrap().contains("explicit drilling"));
+    op.peck_schedule = None;
+    op.peck_mm = Some(0.001);
+    assert!(prepare(op.clone()).err().unwrap().contains("canned peck schedule cancelled"));
+    op.tolerance_mm = 1e-7;
+    op.peck_mm = Some(0.000002);
+    assert!(drill_plan(op).err().unwrap().contains("covered-event limit"));
+}
+
 fn boring_bar(f: &StreamManifest) -> camlib::tool::ToolAssembly {
     // 6 mm bore, 3 mm bar 20 mm long (inside the 4 mm pilot), 10 mm shank.
     let mut t = f.tools[1].clone();

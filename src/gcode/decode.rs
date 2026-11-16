@@ -62,7 +62,7 @@ const DRILL_EFFECTS: [&str; 8] = [
     "bore_stop_cycle",
     "fine_bore_cycle",
 ];
-const STATE_ONLY: [&str; 19] = [
+const STATE_ONLY: [&str; 20] = [
     "units_mm",
     "units_inch",
     "absolute",
@@ -78,6 +78,7 @@ const STATE_ONLY: [&str; 19] = [
     "frame_reset",
     "exact_stop",
     "cycle_return_initial",
+    "cycle_return_r",
     "language_native",
     "compression_off",
     "lathe_diameter_mode",
@@ -88,6 +89,7 @@ fn group(effect: &str) -> &str {
     match effect {
         "css_on" | "rpm_mode" => "speed_mode",
         "feed_per_rev" | "feed_per_minute" => "feed_mode",
+        "cycle_return_initial" | "cycle_return_r" => "cycle_return",
         "rapid"
         | "linear"
         | "arc_cw"
@@ -161,6 +163,7 @@ pub struct Decoder {
     direction: SpindleDirection,
     tap_return: Option<(Vec3, Vec3, f64)>,
     cycle_active: bool,
+    cycle_returned_to_r: bool,
     css: Option<(f64, f64)>,
     css_max: Option<f64>,
     feed_rev: Option<f64>,
@@ -255,6 +258,7 @@ impl Decoder {
             direction: SpindleDirection::Cw,
             tap_return: None,
             cycle_active: false,
+            cycle_returned_to_r: false,
             css: None,
             css_max: None,
             feed_rev: None,
@@ -589,7 +593,11 @@ impl Decoder {
             self.drill_cycle(&effect, &values, context)?;
             return Ok(vec![]);
         }
-        if self.cycle_active && !only("cycles_off") {
+        if self.cycle_active
+            && !only("cycles_off")
+            && !only("cycle_return_initial")
+            && !only("cycle_return_r")
+        {
             return Err("canned cycle still active: cancel it (G80) first".into());
         }
         if named.contains(&"css_on") {
@@ -702,6 +710,11 @@ impl Decoder {
                         self.feed_rev = None;
                         output.push(Event::FeedPerRev { mm_rev: 0. });
                     }
+                }
+                "cycle_return_initial" | "cycle_return_r" => {
+                    self.ready.remove("cycle_return_initial");
+                    self.ready.remove("cycle_return_r");
+                    self.ready.insert(name.into());
                 }
                 _ if STATE_ONLY.contains(&name) => {
                     self.ready.insert(name.into());
@@ -1192,9 +1205,10 @@ impl Decoder {
         if self.feed_rev.is_some() {
             return Err("drilling cycle in feed per revolution mode".into());
         }
-        if !self.ready.contains("cycle_return_initial") {
-            return Err("drilling cycle without G98 initial-level return".into());
+        if !self.ready.contains("cycle_return_initial") && !self.ready.contains("cycle_return_r") {
+            return Err("drilling cycle without G98/G99 return mode".into());
         }
+        let return_to_r = self.ready.contains("cycle_return_r");
         let get = |w: &str| {
             values
                 .iter()
@@ -1219,7 +1233,11 @@ impl Decoder {
                 "drilling cycle needs Z < R <= the initial level and a positive feed".into(),
             );
         }
-        if self.cycle_active && Some(z0) != self.cycle_initial {
+        if !return_to_r
+            && self.cycle_active
+            && Some(z0) != self.cycle_initial
+            && !self.cycle_returned_to_r
+        {
             return Err(
                 "a chained canned cycle must start at the same initial level (cancel with G80 first)".into(),
             );
@@ -1231,7 +1249,8 @@ impl Decoder {
             "fine_bore_cycle",
         ]
         .contains(&effect);
-        if boring && z0 != r {
+        if boring && (z0 != r || return_to_r || self.cycle_active && Some(z0) != self.cycle_initial)
+        {
             return Err("boring cycles are written from the R plane (initial level = R)".into());
         }
         let dwell_value = |used: &mut BTreeSet<char>| -> Result<f64, String> {
@@ -1332,7 +1351,14 @@ impl Decoder {
         } else if boring {
             items.push(CycleItem::Move([x, y, r], Some(feed), false));
         }
-        items.push(CycleItem::Move([x, y, z0], None, true));
+        let return_z = if return_to_r {
+            r
+        } else {
+            self.cycle_initial
+                .filter(|_| self.cycle_active)
+                .unwrap_or(z0)
+        };
+        items.push(CycleItem::Move([x, y, return_z], None, true));
         let mut queue = VecDeque::new();
         let mut position = start;
         for item in items {
@@ -1346,8 +1372,11 @@ impl Decoder {
             }
         }
         self.cycle_queue = queue;
+        if !self.cycle_active {
+            self.cycle_initial = Some(z0);
+        }
         self.cycle_active = true;
-        self.cycle_initial = Some(z0);
+        self.cycle_returned_to_r = return_to_r;
         Ok(())
     }
 

@@ -1,5 +1,5 @@
 //! Explicit drilling/peck and full-interior bore milling. No canned-cycle dialect
-//! assumptions. Depth/coverage/reentry contract is in docs/holes.md.
+//! assumptions. Depth/coverage/reentry contract is in docs/operations.md.
 use crate::{
     Point,
     motion::{Coolant, Curve, DrillCycle, Event, Motion, MoveKind, Plane, SpindleDirection, Vec3},
@@ -27,6 +27,64 @@ pub enum DepthReference {
 pub enum PeckMode {
     FullRetract,
     ChipBreak,
+}
+/// Decreasing pecks, as Haas G83 I/J/K, emitted explicitly rather than
+/// assuming a controller supports that optional canned representation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeckSchedule {
+    pub first_mm: f64,
+    pub decrement_mm: f64,
+    pub minimum_mm: f64,
+    pub max_pecks: usize,
+}
+impl PeckSchedule {
+    fn depths(
+        &self,
+        top: f64,
+        target: f64,
+        tolerance: f64,
+        cancel: &impl CancelSignal,
+    ) -> Result<Vec<f64>, String> {
+        if ![self.first_mm, self.decrement_mm, self.minimum_mm]
+            .iter()
+            .all(|v| v.is_finite())
+            || self.minimum_mm <= 16. * tolerance
+            || self.first_mm < self.minimum_mm
+            || self.decrement_mm < 0.
+            || !(1..=1_000_000).contains(&self.max_pecks)
+        {
+            return Err("peck_schedule needs finite first_mm >= minimum_mm > 16*tolerance_mm, decrement_mm >= 0 and max_pecks in 1..1000000".into());
+        }
+        let mut depths = Vec::new();
+        let mut depth = top;
+        while depth > target {
+            if cancel.is_cancelled() {
+                return Err("peck schedule cancelled; no motion committed".into());
+            }
+            if depths.len() == self.max_pecks {
+                return Err(
+                    "peck_schedule max_pecks exhausted; increase the budget or the peck depths"
+                        .into(),
+                );
+            }
+            let step =
+                (self.first_mm - depths.len() as f64 * self.decrement_mm).max(self.minimum_mm);
+            let next = (depth - step).max(target);
+            if next >= depth {
+                return Err("peck_schedule cannot make representable depth progress".into());
+            }
+            depths.push(next);
+            depth = next;
+        }
+        Ok(depths)
+    }
+}
+#[derive(Debug, Serialize)]
+pub struct RPlaneTravelReport {
+    pub z_mm: f64,
+    pub candidate_links: usize,
+    pub scope: &'static str,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +121,12 @@ pub struct DrillingOperation {
     /// announced by a cycle event, so a post can write one cycle block.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub canned_cycle: bool,
+    /// Opt-in G99-style return/travel; the stream requires scene and stock
+    /// proofs for every XY rapid. The operation still ends at clearance.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub r_plane_travel: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peck_schedule: Option<PeckSchedule>,
     /// Containment and avoid areas (clamps, fixtures, features to leave alone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<crate::limits::Limits>,
@@ -107,6 +171,10 @@ pub struct DrillingReport {
     pub strategy: &'static str,
     pub geometric_residual_status: ResidualStatus,
     pub holes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r_plane_travel: Option<RPlaneTravelReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peck_schedule: Option<PeckSchedule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ordering: Option<crate::ordering::OrderingReport>,
     pub depth_reference: DepthReference,
@@ -370,8 +438,11 @@ enum DrillPhase {
     PeckReturn,
     Reenter,
     Finish,
+    FinalLift,
     Done,
 }
+type CoveredDrillMove = (Vec3, MoveKind, bool);
+
 pub struct DrillingPlan {
     core: Core,
     op: DrillingOperation,
@@ -379,11 +450,12 @@ pub struct DrillingPlan {
     hole: usize,
     peck: usize,
     peck_size: f64,
+    peck_depths: Option<Vec<f64>>,
     last_depth: f64,
     report: DrillingReport,
     events: Vec<Event>,
     /// Canned-cycle mode: the rest of the current hole (end, kind, dwell after).
-    queue: std::collections::VecDeque<(Vec3, MoveKind, bool)>,
+    queue: std::collections::VecDeque<CoveredDrillMove>,
 }
 impl DrillingPlan {
     /// Events due after the last motion handed out (a dwell at full depth).
@@ -414,6 +486,9 @@ impl DrillingPlan {
         let peck = op.peck_mm.unwrap_or(spec.max_mm[2] - target);
         let plane = op.retract_z_mm.unwrap_or(spec.max_mm[2] + 1.);
         let guard = 16. * op.tolerance_mm;
+        if op.peck_schedule.is_some() && (op.peck_mm.is_some() || op.canned_cycle) {
+            return Err("peck_schedule needs explicit drilling: omit peck_mm and set canned_cycle=false; a varying schedule cannot be represented as fixed Q".into());
+        }
         crate::heights::require(
             "drilling",
             [
@@ -508,6 +583,9 @@ impl DrillingPlan {
         )?;
         let mut core = core!(op, spec, initial, first_id);
         core.validate(assembly, radius, cancel)?;
+        if op.canned_cycle && op.peck_mm.is_some() && ((plane - target) / peck).ceil() > 333_332. {
+            return Err("canned pecks exceed the 1000000 covered-event limit; increase peck_mm or split the operation".into());
+        }
         let ordering = op
             .ordering
             .as_ref()
@@ -532,7 +610,15 @@ impl DrillingPlan {
             }
             core.centers = centers;
         }
-        let pecks = ((spec.max_mm[2] - target) / peck).ceil() as usize;
+        let peck_depths = op
+            .peck_schedule
+            .as_ref()
+            .map(|s| s.depths(spec.max_mm[2], target, core.tol, cancel))
+            .transpose()?;
+        let pecks = peck_depths.as_ref().map_or_else(
+            || ((spec.max_mm[2] - target) / peck).ceil() as usize,
+            Vec::len,
+        );
         if pecks == 0 {
             return Err("drilling needs at least one peck".into());
         }
@@ -540,6 +626,8 @@ impl DrillingPlan {
             strategy: "drilling",
             geometric_residual_status: ResidualStatus::Pending,
             holes: core.centers.len(),
+            r_plane_travel: op.r_plane_travel.then_some(RPlaneTravelReport { z_mm: plane, candidate_links: 0, scope: "candidate R-plane links; scene and stock must both prove every XY rapid Clear before commit" }),
+            peck_schedule: op.peck_schedule.clone(),
             ordering,
             depth_reference: op.depth_reference,
             tip_target_z_mm: target,
@@ -553,7 +641,11 @@ impl DrillingPlan {
             completed_holes: 0,
             cut_pecks: 0,
             peck_returns: 0,
-            reentry_policy: if op.canned_cycle {
+            reentry_policy: if op.r_plane_travel && op.canned_cycle {
+                "canned G99 returns to R; every XY rapid requires scene and stock Clear; final exit at clearance"
+            } else if op.r_plane_travel {
+                "fed same-axis reentry; every R-plane XY rapid requires scene and stock Clear; final exit at clearance"
+            } else if op.canned_cycle {
                 "canned cycle: pecks from the R plane, rapid retract and re-entry as the controller's G83/G73; XY rapids only at clearance"
             } else {
                 "fed same-axis reentry; XY rapids only at clearance; nominal wall tangency is not a strict clearance certificate"
@@ -567,6 +659,7 @@ impl DrillingPlan {
             hole: 0,
             peck: 0,
             peck_size: peck,
+            peck_depths,
             last_depth: spec.max_mm[2],
             events: vec![],
             queue: Default::default(),
@@ -574,7 +667,7 @@ impl DrillingPlan {
         };
         if canned {
             plan.report.pecks_per_hole = plan
-                .canned_moves([0.; 2])
+                .canned_moves([0.; 2], cancel)?
                 .0
                 .iter()
                 .filter(|m| m.1 == MoveKind::Plunge)
@@ -583,7 +676,7 @@ impl DrillingPlan {
             // is due before any motion when no lift is needed.
             if plan.core.position[2] == plan.core.clearance {
                 plan.phase = DrillPhase::Traverse;
-                plan.start_hole();
+                plan.start_hole(cancel)?;
             }
         }
         Ok(plan)
@@ -591,9 +684,17 @@ impl DrillingPlan {
     /// The canned-cycle moves of one hole from the clearance level, exactly
     /// as the controller runs them (LinuxCNC interp_cycles.cc, FANUC and
     /// Centroid G81/G82/G83/G73 with G98), and the cycle type.
-    fn canned_moves(&self, c: Point) -> (Vec<(Vec3, MoveKind, bool)>, DrillCycle) {
+    fn canned_moves(
+        &self,
+        c: Point,
+        cancel: &impl CancelSignal,
+    ) -> Result<(Vec<CoveredDrillMove>, DrillCycle), String> {
         let (z0, r, z) = (
-            self.core.clearance,
+            if self.op.r_plane_travel {
+                self.core.position[2]
+            } else {
+                self.core.clearance
+            },
             self.report.retract_plane_z_mm,
             self.report.tip_target_z_mm,
         );
@@ -611,6 +712,9 @@ impl DrillingPlan {
         if let Some(q) = self.op.peck_mm {
             let mut depth = r - q;
             while depth > z {
+                if moves.len().is_multiple_of(256) && cancel.is_cancelled() {
+                    return Err("canned peck schedule cancelled; no motion committed".into());
+                }
                 moves.push((at(depth), MoveKind::Plunge, false));
                 if cycle == DrillCycle::Peck {
                     moves.push((at(r), MoveKind::Rapid, false));
@@ -630,16 +734,23 @@ impl DrillingPlan {
             }
         }
         moves.push((at(z), MoveKind::Plunge, self.op.dwell_s.is_some()));
-        moves.push((at(z0), MoveKind::Rapid, false));
-        (moves, cycle)
+        moves.push((
+            at(if self.op.r_plane_travel { r } else { z0 }),
+            MoveKind::Rapid,
+            false,
+        ));
+        Ok((moves, cycle))
     }
     /// Queue the current hole's canned-cycle moves and announce the cycle.
-    fn start_hole(&mut self) {
+    fn start_hole(&mut self, cancel: &impl CancelSignal) -> Result<(), String> {
         let c = self.core.centers[self.hole];
-        let (moves, cycle) = self.canned_moves(c);
+        let (moves, cycle) = self.canned_moves(c, cancel)?;
         let mut position = self.core.position;
         self.queue.clear();
         for m in moves {
+            if self.queue.len().is_multiple_of(256) && cancel.is_cancelled() {
+                return Err("canned peck schedule cancelled; no motion committed".into());
+            }
             if m.0 != position {
                 position = m.0;
                 self.queue.push_back(m);
@@ -652,6 +763,7 @@ impl DrillingPlan {
             z_mm: self.report.tip_target_z_mm,
             r_mm: self.report.retract_plane_z_mm,
             initial_z_mm: self.core.position[2],
+            return_to_r: self.op.r_plane_travel,
             feed_mm_min: self.core.feed,
             peck_mm: self.op.peck_mm,
             dwell_s: self.op.dwell_s,
@@ -660,6 +772,7 @@ impl DrillingPlan {
             shift_mm: None,
             covers: covers as u32,
         });
+        Ok(())
     }
     fn next_canned(
         &mut self,
@@ -671,6 +784,20 @@ impl DrillingPlan {
             self.core.drained = true;
             return Ok(None);
         }
+        if self.phase == DrillPhase::FinalLift {
+            let p = self.core.position;
+            let m = self.core.emit(
+                self.core.line([p[0], p[1], self.core.clearance]),
+                MoveKind::Rapid,
+                self.core.feed,
+                stock,
+            )?;
+            self.phase = DrillPhase::Done;
+            if m.is_none() {
+                self.core.drained = true;
+            }
+            return Ok(m);
+        }
         if self.phase == DrillPhase::Lift {
             let p = self.core.position;
             let m = self.core.emit(
@@ -680,14 +807,16 @@ impl DrillingPlan {
                 stock,
             )?;
             self.phase = DrillPhase::Traverse;
-            self.start_hole();
+            self.start_hole(cancel)?;
             return Ok(m);
         }
         let (end, kind, dwell) = self.queue.pop_front().ok_or("canned cycle queue empty")?;
         let rising = end[2] > self.core.position[2];
+        let start = self.core.position;
         let m = self
             .core
             .emit(self.core.line(end), kind, self.core.feed, stock)?;
+        self.record_r_plane_link(start, end, kind);
         if kind == MoveKind::Plunge {
             self.report.cut_pecks += 1;
         } else if rising && !self.queue.is_empty() {
@@ -701,15 +830,28 @@ impl DrillingPlan {
             self.report.completed_holes += 1;
             self.hole += 1;
             if self.hole == self.core.centers.len() {
-                self.phase = DrillPhase::Done;
+                self.phase = if self.op.r_plane_travel {
+                    DrillPhase::FinalLift
+                } else {
+                    DrillPhase::Done
+                };
             } else {
-                self.start_hole();
+                self.start_hole(cancel)?;
             }
         }
         Ok(m)
     }
     pub fn report(&self) -> &DrillingReport {
         &self.report
+    }
+    fn record_r_plane_link(&mut self, start: Vec3, end: Vec3, kind: MoveKind) {
+        if kind.is_rapid()
+            && start[..2] != end[..2]
+            && start[2] == self.report.retract_plane_z_mm
+            && let Some(report) = &mut self.report.r_plane_travel
+        {
+            report.candidate_links += 1;
+        }
     }
     pub fn prefix_events(&self) -> Vec<Event> {
         self.core.prefix()
@@ -755,7 +897,15 @@ impl DrillingPlan {
                     DrillPhase::Traverse,
                 ),
                 DrillPhase::Traverse => (
-                    [c[0], c[1], self.core.clearance],
+                    [
+                        c[0],
+                        c[1],
+                        if self.op.r_plane_travel && self.hole > 0 {
+                            self.report.retract_plane_z_mm
+                        } else {
+                            self.core.clearance
+                        },
+                    ],
                     MoveKind::Rapid,
                     self.core.feed,
                     DrillPhase::Approach,
@@ -770,8 +920,13 @@ impl DrillingPlan {
                     [
                         c[0],
                         c[1],
-                        (top - (self.peck + 1) as f64 * self.peck_size)
-                            .max(self.report.tip_target_z_mm),
+                        self.peck_depths.as_ref().map_or_else(
+                            || {
+                                (top - (self.peck + 1) as f64 * self.peck_size)
+                                    .max(self.report.tip_target_z_mm)
+                            },
+                            |depths| depths[self.peck],
+                        ),
                     ],
                     MoveKind::Plunge,
                     self.core.feed,
@@ -803,15 +958,25 @@ impl DrillingPlan {
                     DrillPhase::Cut,
                 ),
                 DrillPhase::Finish => (
-                    [c[0], c[1], self.core.clearance],
+                    [
+                        c[0],
+                        c[1],
+                        if self.op.r_plane_travel && self.hole + 1 < self.core.centers.len() {
+                            self.report.retract_plane_z_mm
+                        } else {
+                            self.core.clearance
+                        },
+                    ],
                     MoveKind::Retract,
                     self.core.retract_feed,
                     DrillPhase::Traverse,
                 ),
-                DrillPhase::Done => unreachable!(),
+                DrillPhase::Done | DrillPhase::FinalLift => unreachable!(),
             };
             let phase = self.phase;
+            let start = self.core.position;
             let m = self.core.emit(self.core.line(end), kind, feed, stock)?;
+            self.record_r_plane_link(start, end, kind);
             self.phase = next;
             if phase == DrillPhase::Cut {
                 self.peck += 1;

@@ -387,6 +387,7 @@ impl ReamingPlan {
             z_mm: self.op.depth_z_mm,
             r_mm: r,
             initial_z_mm: r,
+            return_to_r: false,
             feed_mm_min: self.core.feed,
             peck_mm: None,
             dwell_s: self.op.dwell_s.filter(|_| !self.op.spindle_stop),

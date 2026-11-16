@@ -5,7 +5,7 @@ center-cutting end mill. A native iterator plans all passes and feeds the stock
 stream directly; Python does not generate or transmit individual path edges.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import itertools
 import math
 
@@ -1034,6 +1034,28 @@ class HoleOrdering:
 
 
 @dataclass(frozen=True)
+class PeckSchedule:
+    """Caller-declared decreasing explicit pecks (first, decrement, minimum)."""
+
+    first_mm: float
+    decrement_mm: float
+    minimum_mm: float
+    max_pecks: int = 10_000
+
+    def to_dict(self):
+        import math
+
+        values = (self.first_mm, self.decrement_mm, self.minimum_mm)
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values):
+            raise ValueError("peck_schedule dimensions must be finite numbers")
+        if not self.first_mm >= self.minimum_mm > 0 or self.decrement_mm < 0:
+            raise ValueError("peck_schedule needs first_mm >= minimum_mm > 0 and decrement_mm >= 0")
+        if type(self.max_pecks) is not int or not 1 <= self.max_pecks <= 1_000_000:
+            raise ValueError("peck_schedule max_pecks must be an integer in 1..1000000")
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class Drilling:
     """Explicit axial moves; depth_z_mm is tip Z unless full_diameter is chosen."""
 
@@ -1068,6 +1090,8 @@ class Drilling:
     # return amount (LinuxCNC: 0.254 mm).
     canned_cycle: bool = False
     ordering: HoleOrdering | None = field(default=None, kw_only=True)
+    r_plane_travel: bool = field(default=False, kw_only=True)
+    peck_schedule: PeckSchedule | None = field(default=None, kw_only=True)
 
     def __post_init__(self):
         object.__setattr__(self, "centers_mm", _freeze_hole_centers(self.centers_mm))
@@ -1083,6 +1107,14 @@ class Drilling:
             del result["ordering"]
         else:
             result["ordering"] = self.ordering.to_dict()
+        if type(self.r_plane_travel) is not bool:
+            raise ValueError("r_plane_travel must be a boolean")
+        if not self.r_plane_travel:
+            del result["r_plane_travel"]
+        if self.peck_schedule is None:
+            del result["peck_schedule"]
+        else:
+            result["peck_schedule"] = self.peck_schedule.to_dict()
         return result
 
 

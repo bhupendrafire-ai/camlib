@@ -83,6 +83,26 @@ def _drilling_order(optimized):
     return build
 
 
+def _drilling_cycle(*, r_plane=False, decreasing=False, canned=False):
+    """Matched declared drilling controls; keep scene/stock proofs in every variant."""
+
+    def build():
+        from camlib import OperationNode, PeckSchedule
+        from test_drilling_options import fixture
+
+        source = fixture(
+            canned_cycle=canned,
+            r_plane_travel=r_plane,
+            **({"peck_schedule": PeckSchedule(3, 1, 1)} if decreasing else {"peck_mm": 1}),
+        )
+        setup = source.setups[0]
+        op = replace(setup.operations[0].operation, clearance_z_mm=20)
+        setup = replace(setup, initial_position_mm=(0, 0, 20), operations=(OperationNode(op, sources=()),))
+        return replace(source, setups=(setup,)).compile().setup("top").simulation_options()
+
+    return build
+
+
 def _solid(module, name="cadquery_target"):
     def target():
         shape = getattr(_support(module), name)()
@@ -787,6 +807,41 @@ WORKLOADS = (
         "Same six-hole pattern with bounded dynamics-aware 2-opt",
         {"holes": ("Drilling", 29)},
         _drilling_order(True),
+    ),
+    Workload(
+        "drilling-clearance-pecks",
+        "mill",
+        "Declared fixed explicit pecks, clearance travel with scene/stock checks",
+        {"holes": ("Drilling", 29)},
+        _drilling_cycle(),
+    ),
+    Workload(
+        "drilling-r-plane-pecks",
+        "mill",
+        "Same fixed explicit pecks with proven R-plane travel",
+        {"holes": ("Drilling", 29)},
+        _drilling_cycle(r_plane=True),
+    ),
+    Workload(
+        "drilling-decreasing-pecks",
+        "mill",
+        "Same R-plane pattern with caller-declared decreasing explicit pecks",
+        {"holes": ("Drilling", 29)},
+        _drilling_cycle(r_plane=True, decreasing=True),
+    ),
+    Workload(
+        "drilling-g98",
+        "mill",
+        "Declared fixed canned pecks, G98 clearance return with scene/stock checks",
+        {"holes": ("Drilling", 29)},
+        _drilling_cycle(canned=True),
+    ),
+    Workload(
+        "drilling-g99",
+        "mill",
+        "Same fixed canned pecks with G99 and proven R-plane travel",
+        {"holes": ("Drilling", 29)},
+        _drilling_cycle(canned=True, r_plane=True),
     ),
     Workload(
         "reaming", "mill", "Drill then ream two holes", {"drill": ("Drilling", 29), "bore": ("Reaming", 31)}, _reaming

@@ -893,7 +893,7 @@ drilling = replace(drilling, ordering=HoleOrdering(
 The bounded first-improvement 2-opt search keeps the last supplied center fixed,
 so its exit pose and the next operation's entry do not change. It preserves
 every center, including duplicates, with no changes to depths, pecks, dwells,
-feeds or clearance-plane travel. It works with explicit and declared canned
+feeds or the selected travel policy. It works with explicit and declared canned
 cycles. Operation/tool/pilot dependencies remain the caller's ordered operations;
 request ordering only where the centers themselves have no precedence.
 
@@ -908,8 +908,49 @@ time estimate, not a global optimum, controller timing or a clearance proof.
 All existing stock, fixture, machine and decoded-output checks still run.
 
 Reference: G. A. Croes, [A Method for Solving Traveling-Salesman Problems](https://doi.org/10.1287/opre.6.6.791)
-(1958); the fixed-endpoint 2-opt slice requested in #23/#29. Further R-plane,
-pecking and general pass-order optimization remain separate work.
+(1958); the fixed-endpoint 2-opt slice requested in #23/#29. General pass-order
+optimization remains separate work.
+
+### R-plane travel and decreasing pecks
+
+Clearance travel and fixed pecks remain the defaults. `r_plane_travel=True`
+returns to `retract_z_mm` between holes. The first approach and final exit
+retain the original clearance pose. R remains strictly above the stock top,
+as before. The stream requires both `StreamChecks.scene` and `stock_contact`;
+every XY rapid must have **Clear** reports from both before it is committed.
+Missing checks, obstruction, exhausted proof budgets and uncertain clearance
+refuse the run. There is no automatic clearance-route fallback. Correct the
+declaration/budget or explicitly choose clearance travel.
+
+In canned mode, the typed `Cycle.return_to_r` selects `G99`, independently
+decoded against the actual moves in both Rust and Python. A dialect must
+declare `cycle_return_r` to write it; otherwise its existing explicit-motion
+path writes the same moves. The operation cancels the last cycle and lifts
+to clearance. G98/G99 changes retain the controller series' initial level
+until G80; a new source cycle whose intended initial plane differs starts a
+new series. This follows [LinuxCNC 2.9, G98/G99](https://linuxcnc.org/docs/2.9/html/gcode/g-code.html#gcode:g98-g99).
+
+For explicit pecks, use `peck_schedule=PeckSchedule(first_mm, decrement_mm,
+minimum_mm, max_pecks=10000)` and omit `peck_mm`. All dimensions are caller
+cutting data, not recommendations. The first increment is measured from the
+stock top; each later increment decreases to the declared minimum. The last
+partial increment stops exactly at the original tip/full-diameter target.
+`peck_mode` still selects full retract or chip break, with the existing fed
+returns/reentry and declared distances. A budget counts pecks per hole;
+exhaustion or cancellation refuses preparation, never truncates the hole.
+The minimum must exceed `16*tolerance_mm`. Fixed canned peck preparation also
+polls cancellation and refuses schedules beyond the existing covered-event
+limit before allocating their queue.
+
+The first/decrement/minimum schedule follows the I/J/K practice documented
+by [Haas G83](https://haascnc.com/service/codes-settings.type=gcode.machine=mill.value=G83.html).
+It is expanded as explicit motion: requesting `canned_cycle=True` with a
+decreasing schedule is refused rather than approximated as fixed Q. Drill
+point geometry, target depth, final pose, dwell, feeds and all export gates
+are unchanged. The report records the requested schedule and candidate
+R-plane link count; those fields confer no clearance or machine authority.
+Spot/pilot awareness and automatic tool/material peck recommendations remain
+outside this slice.
 
 ### Depths and cycles
 
@@ -938,7 +979,8 @@ post can write one block per hole:
 | `peck_mm`, `peck_mode="full_retract"` | `G83` | pecks of `peck_mm` from the R plane (`retract_z_mm`), rapid to R after each, rapid back down to `reentry_clearance_mm` above the last peck |
 | `peck_mm`, `peck_mode="chip_break"` | `G73` | pecks from R, rapid up `chip_break_lift_mm` after each |
 
-All cycles return to the clearance height (`G98`). The return amounts are
+Cycles default to the clearance height (`G98`); `r_plane_travel=True` selects
+the checked R-plane mode (`G99`) above. The return amounts are
 controller settings (LinuxCNC: 0.254 mm, i.e. 0.010 in), so set
 `reentry_clearance_mm`/`chip_break_lift_mm` to the machine's value; the post
 refuses a mismatch. Posts without the cycle write the same moves explicitly.
