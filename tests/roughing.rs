@@ -5335,6 +5335,7 @@ fn bounded_front_on_large_blank_keeps_independent_pocket_engagement_and_stock_ch
     value["stock"]["min_mm"] = serde_json::json!([0., 0., 0.]);
     value["stock"]["max_mm"] = serde_json::json!([1000., 1000., 10.]);
     value["stock"]["cell_size_mm"] = 5.into();
+    value["operations"][0]["path_strategy"] = "engagement_front".into();
     value["operations"][0]["floor_z_mm"] = 9.into();
     value["operations"][0]["stepdown_mm"] = 1.into();
     let m: StreamManifest = serde_json::from_value(value).unwrap();
