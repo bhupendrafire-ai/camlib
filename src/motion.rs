@@ -679,6 +679,16 @@ pub enum Event {
     HeightControl {
         on: bool,
     },
+    /// Plasma arc or laser beam on at `power_percent` where the material is
+    /// already open: beside the sheet's edge, or over a kerf cut earlier
+    /// (an edge start, or a start in a gap). There is nothing to pierce: the
+    /// controller must fire without touching off the sheet and without a
+    /// pierce height, at the height the beam stands at. Only from the beam
+    /// off; `Beam { power_percent: 0 }` turns it off. A post writes it only
+    /// where its controller documents such a start.
+    BeamStart {
+        power_percent: f64,
+    },
     /// Plasma arc or laser beam on in the machine's marking process at
     /// `power_percent` (laser power; a plasma torch fires at the marking
     /// current its controller's marking process sets): it marks the sheet
@@ -1305,6 +1315,25 @@ impl ProgramValidator {
                         ));
                     }
                     beam_on = *power_percent > 0.;
+                    beam_marking = false;
+                }
+                Event::BeamStart { power_percent } => {
+                    if !power_percent.is_finite() || *power_percent <= 0. || *power_percent > 100. {
+                        return Err(error(
+                            "beam power at an open-material start must be above 0, at most 100 percent",
+                        ));
+                    }
+                    if !beam_tool(&active_tool) {
+                        return Err(error(
+                            "the beam needs an active beam tool (torch or laser head)",
+                        ));
+                    }
+                    if beam_on {
+                        return Err(error(
+                            "turn the beam off before starting it in open material",
+                        ));
+                    }
+                    beam_on = true;
                     beam_marking = false;
                 }
                 Event::BeamMark { power_percent } => {

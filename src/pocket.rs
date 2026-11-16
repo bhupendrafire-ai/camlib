@@ -1435,7 +1435,8 @@ impl PocketPlan {
     /// The plan of `prepare`, for a planner that uses it only to certify
     /// strokes against the region and to prove entries (engagement_front):
     /// its raster passes are never cut, so a `RampEntry` is not checked
-    /// against them.
+    /// against them, and it admits its own entries and lists the areas no
+    /// entry reaches (#310) instead of refusing them here.
     pub(crate) fn prepare_region_guides(
         op: PocketOperation,
         assembly: &ToolAssembly,
@@ -1794,6 +1795,11 @@ impl PocketPlan {
             }
         }
         if guide_radius.is_none()
+            // A Region plan belongs to a planner that certifies and enters
+            // the region itself and reports areas no entry reaches instead
+            // of refusing them (#310): admitting this plan's own guide
+            // routes would refuse the operation for areas it never cuts.
+            && !matches!(mode, GuideMode::Region)
             && result
                 .operation
                 .entry

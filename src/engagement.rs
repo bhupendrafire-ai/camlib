@@ -421,7 +421,7 @@ pub enum UnresolvedReason {
     Resolution,
     Depth,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EngagementReport {
     pub status: EngagementStatus,
     pub upper_angle_deg: f64,
@@ -1333,6 +1333,20 @@ impl EngagementScene {
                 b,
                 error,
             };
+            if let Some(upper) = straight_leading_trail_bound(&span, metric)
+                && upper.to_degrees() <= max_angle_deg
+            {
+                // This is a separate whole-span certificate, not a clamp on
+                // `angular_bound`: a straight analytic path has one exact
+                // heading, and at every pose after its certified start its own
+                // sweep contains the open trailing cutter half. The two
+                // boundary radii leave a closed possible-contact half of PI.
+                // `path_error` is retained by every stock/support certificate;
+                // it cannot rotate Curve::Line's exact heading or separate a
+                // cutter from its own correlated trail.
+                report.upper_angle_deg = report.upper_angle_deg.max(upper.to_degrees());
+                continue;
+            }
             let Some(upper) = self.angular_bound::<EARLY_UNION, REFUTE>(
                 &span,
                 radius,
@@ -2198,6 +2212,29 @@ fn sufficient_metric_bound(
     }
 }
 
+/// Exact whole-span leading-contact certificate for a straight analytic move.
+///
+/// `check_leading`'s premise is that the start pose was covered by the
+/// preceding certified motion. At every later pose of a nonzero line, cutter
+/// centres arbitrarily close behind it lie on this same exact line. Every
+/// circumference point whose dot product with the feed direction is negative
+/// is therefore strictly inside an earlier cutter disk; the two perpendicular
+/// radii are the boundary. Thus possible contact is contained in the closed
+/// leading half-circle, angle PI, over the entire stroke.
+///
+/// This does not use a support, endpoint sample or acceptance tolerance.
+/// `Curve::Line` prepares as exact linear interpolation, so its nonzero
+/// `path_error` is a positional/numeric envelope shared by the cutter and its
+/// own trail and cannot rotate the heading. Other metrics count the trail, and
+/// curved paths do not have one constant heading, so neither is eligible.
+fn straight_leading_trail_bound(span: &Span<'_>, metric: Metric) -> Option<f64> {
+    let Curve::Line { start, end } = span.motion.curve else {
+        return None;
+    };
+    (matches!(metric, Metric::Leading) && (end[0] - start[0]).hypot(end[1] - start[1]) > 0.)
+        .then_some(PI)
+}
+
 /// Whole LINE cutter-half enclosure in the finite inner rectangle of a
 /// committed line capsule, with a separate total-contact bound. Linear
 /// projection extrema and analytic half-circle extrema cover every axis
@@ -2755,6 +2792,112 @@ mod leading_tests {
                 .status,
             EngagementStatus::Bounded
         );
+    }
+
+    /// #309/#310. These are the three straight strokes reduced from the
+    /// opened-start, channel and tight-slot integration failures. Their
+    /// generic angular unions exceeded a half-circle by 0.0022--0.0027
+    /// degrees because they treated the line's declared positional error as
+    /// heading uncertainty. A straight move's own correlated trail instead
+    /// proves the closed leading half over the ENTIRE stroke.
+    #[test]
+    fn straight_strokes_have_a_half_circle_leading_bound_with_declared_error() {
+        let options = EngagementOptions {
+            tolerance_mm: 0.01,
+            resolution_mm: 0.01,
+            ..EngagementOptions::default()
+        };
+        let support = line([8.75, 11.5], [11., 11.5]);
+        let support_error = crate::verification::path_error(&support, options.tolerance_mm);
+        assert!(support_error > 0.);
+        let scene = EngagementScene::new(
+            StockSpec {
+                version: 1,
+                units: "mm".into(),
+                min_mm: [0., 0., 0.],
+                max_mm: [26., 26., 10.],
+                cell_size_mm: 0.4,
+                max_cells: 1_048_576,
+            },
+            vec![ClearedSweep::from_motion(&support, 2., options.tolerance_mm).unwrap()],
+        )
+        .unwrap();
+        let cases = [
+            (
+                [11.000042525000003, 11.5001701],
+                [11.250037209375002, 11.5001701],
+            ),
+            ([17.9998299, 13.6249362125], [17.9998299, 13.843680896875]),
+            ([20.249845846875, 11.7501701], [20.49984053125, 11.7501701]),
+        ];
+        for (a, b) in cases {
+            for perturbation in [-1e-9, 0., 1e-9] {
+                let pass = line(
+                    [a[0] + perturbation, a[1] - perturbation],
+                    [b[0] + perturbation, b[1] - perturbation],
+                );
+                assert!(crate::verification::path_error(&pass, options.tolerance_mm) > 0.);
+                let report = scene
+                    .check_leading(&pass, 2., 180., options, &|| false)
+                    .unwrap();
+                assert_eq!(
+                    report.status,
+                    EngagementStatus::Bounded,
+                    "{pass:?}: {report:?}"
+                );
+                assert_eq!(report.upper_angle_deg, 180., "{pass:?}: {report:?}");
+            }
+        }
+        // Exact boundary, not an epsilon acceptance: with no prior clearance
+        // the same line cannot be certified one thousandth of a degree below
+        // the analytic half-circle bound.
+        let virgin = EngagementScene::new(stock(), vec![]).unwrap();
+        let boundary = line([50., 50.], [150., 50.]);
+        let below = virgin
+            .check_leading(&boundary, 5., 179.999, options, &|| false)
+            .unwrap();
+        assert_eq!(below.status, EngagementStatus::Unresolved, "{below:?}");
+        let exact = virgin
+            .check_leading(&boundary, 5., 180., options, &|| false)
+            .unwrap();
+        assert_eq!(exact.status, EngagementStatus::Bounded, "{exact:?}");
+        assert_eq!(exact.upper_angle_deg, 180.);
+    }
+
+    /// Negative controls for the straight-trail certificate: total contact
+    /// counts the current move's trail and genuinely exceeds 180 degrees in
+    /// virgin stock, while a curved move has no single whole-stroke heading.
+    /// Neither may use the line-only leading certificate.
+    #[test]
+    fn straight_trail_certificate_does_not_admit_other_metrics_or_curves() {
+        let options = EngagementOptions {
+            tolerance_mm: 0.01,
+            resolution_mm: 0.01,
+            ..EngagementOptions::default()
+        };
+        let scene = EngagementScene::new(stock(), vec![]).unwrap();
+        let pass = line([50., 50.], [150., 50.]);
+        let total = scene.check(&pass, 5., 180., options, &|| false).unwrap();
+        assert_eq!(total.status, EngagementStatus::Unresolved, "{total:?}");
+        let total_bound = scene.check(&pass, 5., 360., options, &|| false).unwrap();
+        assert_eq!(
+            total_bound.status,
+            EngagementStatus::Bounded,
+            "{total_bound:?}"
+        );
+        assert_eq!(total_bound.upper_angle_deg, 360., "{total_bound:?}");
+
+        let arc = motion(Curve::Arc {
+            start: [130., 50., 5.],
+            end: [100., 80., 5.],
+            center: [100., 50., 5.],
+            plane: Plane::Xy,
+            sweep_rad: PI / 2.,
+        });
+        let curved = scene
+            .check_leading(&arc, 5., 180., options, &|| false)
+            .unwrap();
+        assert_eq!(curved.status, EngagementStatus::Unresolved, "{curved:?}");
     }
 
     /// The trail credit agrees with the same bound taken the slow way: the

@@ -38,8 +38,10 @@ conditions cover those processes and the actual tool system.
 
 The nominal formulas are `n = 1000 × Vc / (π × D)` and `vf = fn × n`. **Fn is
 mm/revolution**; it is not multiplied by flute count. The helper uses the supplied
-maximum Vc, then caps rpm by the machine spindle, scalar feed and optional Z-axis
-feed limits while retaining nominal fn. If this would put Vc below the supplied
+maximum Vc, then caps rpm by the machine spindle, scalar feed and optional machine-axis
+feed limits while retaining nominal fn. Drilling follows work Z: each physical axis
+limit applies to the corresponding component of `machine.work_to_machine.z`.
+Stationary axes do not restrict the drilling feed. If this would put Vc below the supplied
 minimum, the candidate is rejected. See [Sandvik Coromant, metric drilling formulas,
 printed H81](https://cdn.sandvik.coromant.com/files/sitecollectiondocuments/services/metal-cutting-e-learning/formulas-and-definitions/formulas-and-deinitions-for-drilling-metric-enu.pdf).
 

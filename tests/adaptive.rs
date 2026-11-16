@@ -2139,3 +2139,196 @@ fn adaptive_pocket_front_options_are_validated_and_refused_for_orbits() {
         assert!(wire.get(name).is_none(), "{name} written when unset");
     }
 }
+
+/// #311: what a level reports as its residual is what its committed strokes
+/// left, the wall pass included. A square pocket's leftover is the four
+/// inside corners a round cutter cannot reach; measuring the emitted paths
+/// independently and comparing is what catches a report that still counts
+/// material the wall pass removed (it did: 12.74 mm2 reported against 3.36 mm2
+/// of corners here).
+#[test]
+fn engagement_front_reports_the_material_its_wall_pass_left() {
+    use camlib::operation::OperationPlan;
+    let m = fixture();
+    let mut op = operation();
+    op.path_strategy = AdaptivePathStrategy::EngagementFront;
+    op.pocket.stepdown_mm = 2.;
+    op.pocket.region = PlanarRegion {
+        version: 1,
+        units: "mm".into(),
+        name: "square pocket".into(),
+        boundary_error_mm: 0.,
+        source: serde_json::Value::Null,
+        components: vec![Component {
+            outer: Boundary {
+                vertices: vec![[3., 3., 0.], [23., 3., 0.], [23., 23., 0.], [3., 23., 0.]],
+            },
+            holes: vec![],
+        }],
+    };
+    let r = m.tools[0].cutter.diameter_mm / 2.;
+    let level = op.pocket.floor_z_mm;
+    let tool = m.tools[0].prepare().unwrap();
+    let mut stock = Stock::new(m.stock.height().unwrap().clone()).unwrap();
+    let mut plan = OperationPlan::prepare_with_stock(
+        Operation::AdaptivePocket(op),
+        &m.tools[0],
+        &stock,
+        m.initial_position_mm,
+        1,
+        &|| false,
+    )
+    .unwrap();
+    let mut flat = vec![];
+    while let Some(motion) = plan.next_motion_with_stock(&stock, &|| false).unwrap() {
+        if matches!(motion.kind, MoveKind::Cut | MoveKind::Lead | MoveKind::Link)
+            && motion.curve.start()[2] == motion.curve.end()[2]
+            && motion.curve.start()[2] == level
+        {
+            flat.push(motion.curve.clone());
+        }
+        let delta = stock
+            .preview_sweep(&tool, &motion, 1., m.sweep, &|| false)
+            .unwrap();
+        stock.apply_delta(&delta).unwrap();
+    }
+    plan.finish_report(&|| false).unwrap();
+    let report = serde_json::to_value(plan.report()).unwrap();
+    let layers = report["layers"].as_array().unwrap();
+    assert_eq!(layers.len(), 1, "{report}");
+    let clearing = &layers[0]["clearing"];
+    assert_eq!(clearing["wall_passes"].as_u64().unwrap(), 1, "{clearing}");
+    // Independent of the planner: a point of the pocket at 0.1 mm is material
+    // when no emitted path passed a cutter's radius from it. (A sampling of
+    // the emitted paths to cross-check the reported estimate, not a stock
+    // proof.)
+    let left = (0..200)
+        .flat_map(|j| {
+            (0..200).map(move |i| {
+                [3. + (i as f64 + 0.5) * 0.1, 3. + (j as f64 + 0.5) * 0.1]
+            })
+        })
+        .filter(|p| {
+            flat.iter()
+                .all(|c| curve_distance(c, *p, false) >= r - 1e-4)
+        })
+        .count() as f64
+        * 0.01;
+    let reported = clearing["geometric_residual_area_mm2"]
+        .as_f64()
+        .unwrap();
+    assert_eq!(clearing["geometric_residual_status"], "estimated");
+    assert!(
+        (reported - left).abs() < 0.8,
+        "reported {reported} mm2 against {left} mm2 sampled from the paths: {clearing}"
+    );
+    // What a 4 mm cutter leaves in a square pocket is its corners: r² (1 -
+    // π/4) of them each.
+    let corners = 4. * r * r * (1. - PI / 4.);
+    assert!(
+        (left - corners).abs() < 1.2,
+        "{left} mm2 sampled against {corners} mm2 of corners"
+    );
+    // Reachable, unresolved and unreachable remain a partition of the whole.
+    let sum = ["residual_reachable_area_mm2", "residual_unresolved_area_mm2", "residual_unreachable_area_mm2"]
+        .iter()
+        .map(|name| clearing[name].as_f64().unwrap())
+        .fold(0., |a, b| a + b);
+    assert!(
+        (sum - reported).abs() < 1e-9,
+        "{sum} against {reported}: {clearing}"
+    );
+}
+
+/// #311 on a curved wall: a circular pocket has no corners, so what the
+/// level leaves after its wall pass is numerical dust. The report must say
+/// so — measured against an independent sampling of the emitted paths, like
+/// the square pocket above — instead of counting the skin the wall pass
+/// removed (it did: the reported residual was the whole ring the pass cut).
+#[test]
+fn engagement_front_reports_the_material_a_curved_wall_pass_left() {
+    use camlib::operation::OperationPlan;
+    let m = fixture();
+    let mut op = operation();
+    op.path_strategy = AdaptivePathStrategy::EngagementFront;
+    op.pocket.stepdown_mm = 2.;
+    let (segments, radius) = (12, 8.);
+    let centre = [13., 13.];
+    let vertices: Vec<[f64; 3]> = (0..segments)
+        .map(|i| {
+            let a = i as f64 * TAU / segments as f64;
+            [
+                centre[0] + radius * a.cos(),
+                centre[1] + radius * a.sin(),
+                (TAU / segments as f64 / 4.).tan(),
+            ]
+        })
+        .collect();
+    op.pocket.region = PlanarRegion {
+        version: 1,
+        units: "mm".into(),
+        name: "circular pocket".into(),
+        boundary_error_mm: 0.,
+        source: serde_json::Value::Null,
+        components: vec![Component {
+            outer: Boundary { vertices },
+            holes: vec![],
+        }],
+    };
+    let r = m.tools[0].cutter.diameter_mm / 2.;
+    let level = op.pocket.floor_z_mm;
+    let tool = m.tools[0].prepare().unwrap();
+    let mut stock = Stock::new(m.stock.height().unwrap().clone()).unwrap();
+    let mut plan = OperationPlan::prepare_with_stock(
+        Operation::AdaptivePocket(op),
+        &m.tools[0],
+        &stock,
+        m.initial_position_mm,
+        1,
+        &|| false,
+    )
+    .unwrap();
+    let mut flat = vec![];
+    while let Some(motion) = plan.next_motion_with_stock(&stock, &|| false).unwrap() {
+        if matches!(motion.kind, MoveKind::Cut | MoveKind::Lead | MoveKind::Link)
+            && motion.curve.start()[2] == motion.curve.end()[2]
+            && motion.curve.start()[2] == level
+        {
+            flat.push(motion.curve.clone());
+        }
+        let delta = stock
+            .preview_sweep(&tool, &motion, 1., m.sweep, &|| false)
+            .unwrap();
+        stock.apply_delta(&delta).unwrap();
+    }
+    plan.finish_report(&|| false).unwrap();
+    let report = serde_json::to_value(plan.report()).unwrap();
+    let clearing = &report["layers"][0]["clearing"];
+    assert_eq!(clearing["wall_passes"].as_u64().unwrap(), 1, "{clearing}");
+    // Independent of the planner: a point of the pocket at 0.1 mm is material
+    // when no emitted path passed a cutter's radius from it.
+    let left = (0..260)
+        .flat_map(|j| {
+            (0..260).map(move |i| {
+                [5. + (i as f64 + 0.5) * 0.1, 5. + (j as f64 + 0.5) * 0.1]
+            })
+        })
+        .filter(|p| {
+            (p[0] - centre[0]).hypot(p[1] - centre[1]) <= radius
+                && flat
+                    .iter()
+                    .all(|c| curve_distance(c, *p, false) >= r - 1e-4)
+        })
+        .count() as f64
+        * 0.01;
+    let reported = clearing["geometric_residual_area_mm2"]
+        .as_f64()
+        .unwrap();
+    assert_eq!(clearing["geometric_residual_status"], "estimated");
+    assert!(
+        (reported - left).abs() < 0.8,
+        "reported {reported} mm2 against {left} mm2 sampled from the paths: {clearing}"
+    );
+    // A circle leaves no corners: what stands is the sampling's own dust.
+    assert!(left < 0.5, "{left} mm2 sampled from the paths: {clearing}");
+}

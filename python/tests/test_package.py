@@ -85,6 +85,50 @@ class PackageTest(unittest.TestCase):
             self.assertEqual(progress["uncertain"], 0)
             self.assertEqual(progress["clear"], stock.completed)
 
+    def test_fixed_milling_entries_do_not_plunge_into_stock(self):
+        import math
+
+        import numpy as np
+
+        from camlib.simulation import Simulation, Update
+
+        spec = importlib.util.spec_from_file_location("standalone_job", ROOT / "examples/standalone_job.py")
+        example = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(example)
+        job = example.build_validation_job()
+        tools = {tool.id: tool.cutter.diameter_mm / 2 for tool in job.setups[0].tools}
+        helices = set()
+        with Simulation(**job.compile().setup("top").simulation_options()) as sim:
+            stock = sim.state
+            xs = stock.min_mm[0] + (np.arange(stock.nx) + 0.5) * stock.dx
+            ys = stock.min_mm[1] + (np.arange(stock.ny) + 0.5) * stock.dy
+            previous = np.array(stock.heights).reshape(-1, 2)[:, 1].copy()
+            for update in sim.run_operations():
+                if not isinstance(update, Update):
+                    continue
+                motion = update.motion
+                curve = motion["curve"]
+                a, b = curve["start"], curve["end"]
+                if b[2] < a[2] - 1e-8:
+                    if curve["kind"] == "line" and math.hypot(b[0] - a[0], b[1] - a[1]) < 1e-9:
+                        # Whole stock cells inside the cutter: no planner entry flags
+                        # or declared heights are used to decide whether the plunge cuts.
+                        reach = np.hypot(
+                            np.abs(xs[None, :] - b[0]) + stock.dx / 2, np.abs(ys[:, None] - b[1]) + stock.dy / 2
+                        )
+                        tops = previous.reshape(stock.ny, stock.nx)[reach < tools[motion["tool"]] - 1e-9]
+                        if tops.size:
+                            self.assertLessEqual(float(tops.max()), b[2] + 2e-5, motion)
+                    elif curve["kind"] == "helix":
+                        helices.add(motion["operation"])
+                        radius = math.hypot(a[0] - curve["center"][0], a[1] - curve["center"][1])
+                        length = radius * abs(curve["sweep_rad"])
+                        self.assertLessEqual(a[2] - b[2], length * math.tan(math.radians(3)) + 2e-5)
+                        self.assertEqual(motion["feed_mm_min"], 150)
+                previous = np.array(stock.heights).reshape(-1, 2)[:, 1].copy()
+            self.assertTrue(stock.finished)
+        self.assertIn("pocket", helices)
+
     @unittest.skipUnless(importlib.util.find_spec("cadquery"), "CadQuery is optional")
     def test_cadquery_cli_requires_machine_coverage(self):
         self.check_example("cadquery_job.py", False)

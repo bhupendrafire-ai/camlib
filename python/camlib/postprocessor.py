@@ -34,6 +34,7 @@ from .motion import (
     SpindleOrient,
     Beam,
     BeamMark,
+    BeamStart,
     HeightControl,
     SurfaceSpeed,
     FeedPerRev,
@@ -892,6 +893,7 @@ def _typed(data):
         'spindle_orient': SpindleOrient,
         'beam': Beam,
         'beam_mark': BeamMark,
+        'beam_start': BeamStart,
         'height_control': HeightControl,
         'surface_speed': SurfaceSpeed,
         'feed_per_rev': FeedPerRev,
@@ -1069,6 +1071,17 @@ class PostProcessor(_TransactionCopy):
 
     def on_beam_mark(self, event):
         raise NotImplementedError
+
+    def on_beam_start(self, event):
+        """The beam fired in open material (an edge start: ThermalCut's
+        ``edge_starts``). A post writes it only with a code its controller
+        documents for firing without a touch-off or a pierce height; there
+        is no general one, so the default refuses."""
+        raise ValueError(
+            'this post declares no start in open material (an edge start needs a controller code that fires '
+            'without touching off the sheet and without a pierce height); plan without edge_starts, or post '
+            'with a post whose machine declares one'
+        )
 
     def on_height_control(self, event):
         raise NotImplementedError
@@ -3463,6 +3476,7 @@ class PostEngine:
                     SpindleOrient,
                     Beam,
                     BeamMark,
+                    BeamStart,
                     HeightControl,
                     SurfaceSpeed,
                     FeedPerRev,

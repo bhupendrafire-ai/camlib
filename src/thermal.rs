@@ -201,6 +201,10 @@ pub struct ThermalCutOperation {
     /// Off unless set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corner_slowdown: Option<CornerSlowdown>,
+    /// Start loops where the material is already open, without a pierce.
+    /// Off unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge_starts: Option<EdgeStarts>,
     /// Keep neighbouring parts joined to each other by an uncut strip (see
     /// `thermal/bridges.rs`). Off unless set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,6 +248,35 @@ pub struct ThermalCutOperation {
 #[serde(deny_unknown_fields)]
 pub struct ChainCutting {
     pub max_link_mm: f64,
+}
+
+/// Edge starts: a loop is started where the material is already open,
+/// beside the sheet's edge or over a kerf cut earlier, so nothing is pierced
+/// there (Hypertherm, "Thick metal cutting techniques", white paper 807850:
+/// the torch at the cut height with its centre line off the workpiece's
+/// edge, the edge in line with the shield's face, a motion delay, then into
+/// the plate; its cut charts mark the thicknesses that can only be edge
+/// started. US 10,195,682 describes starting "positioned over a previously
+/// cut path" the same way). The sheet's edge is the stock's box. A loop's
+/// straight lead-in is lengthened until its far end is open: `run_on_mm`
+/// beyond the edge, or on the centre line of an earlier straight kerf. The
+/// start with the shortest such lead is taken, if it is no longer than
+/// `max_lead_mm` and the lead is clear of every part; otherwise the loop is
+/// pierced as usual.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeStarts {
+    /// How far beyond the sheet's edge the beam's centre stands when it
+    /// fires.
+    pub run_on_mm: f64,
+    /// The longest straight lead from there to the loop.
+    pub max_lead_mm: f64,
+    /// Also start over straight kerfs cut earlier in this operation.
+    #[serde(default)]
+    pub from_kerfs: bool,
+    /// The pause after the beam fires, before it moves (the motion delay).
+    #[serde(default)]
+    pub delay_s: f64,
 }
 
 /// The crop cut: a straight cut (two points) or an L (three), in the
@@ -290,6 +323,9 @@ pub struct ThermalCutReport {
     /// Stretches cut at the reduced feed (`corner_slowdown`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub corner_slowdowns: Option<usize>,
+    /// Loops started in open material instead of pierced (`edge_starts`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_starts: Option<usize>,
     /// Outlines started through a chain link instead of a pierce (`chain`),
     /// and the links' total length (leads, not in `cut_length_mm`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -331,6 +367,9 @@ pub struct ThermalCutReport {
 enum Step {
     Move(Curve, MoveKind, Option<f64>),
     Event(Event),
+    /// The beam is about to start here without a pierce: the stock as it
+    /// stands must be open at this point (off the sheet, or cut through).
+    Open([f64; 2]),
     /// A loop is complete (for the report).
     Done,
 }
@@ -406,6 +445,9 @@ fn part_of(c: &Curve, t0: f64, t1: f64) -> Curve {
     }
 }
 
+fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0] * b[1] - a[1] * b[0]
+}
 fn rot_left(v: [f64; 2]) -> [f64; 2] {
     [-v[1], v[0]]
 }
@@ -845,6 +887,20 @@ impl ThermalCutPlan {
             k.validate()
                 .map_err(|e| format!("thermal cut {}: {e}", op.id))?;
         }
+        if let Some(e) = &op.edge_starts
+            && !(e.run_on_mm.is_finite()
+                && (0. ..=1e3).contains(&e.run_on_mm)
+                && e.max_lead_mm.is_finite()
+                && e.max_lead_mm > 0.
+                && e.max_lead_mm <= 1e4
+                && e.delay_s.is_finite()
+                && (0. ..=1e3).contains(&e.delay_s))
+        {
+            return Err(format!(
+                "thermal cut {}: edge_starts needs run_on_mm of zero or more (how far beyond the sheet's edge the beam stands when it fires), a positive max_lead_mm (the longest lead from there to the loop) and a delay_s of 0..1000",
+                op.id
+            ));
+        }
         if let Some(chain) = &op.chain {
             if !(chain.max_link_mm.is_finite()
                 && chain.max_link_mm > 0.
@@ -1076,6 +1132,10 @@ impl ThermalCutPlan {
         // for a link to this one.
         let mut pending_link = false;
         let (mut chain_links, mut chain_length) = (0usize, 0.);
+        // Edge starts: how many, and the straight kerfs cut so far (centre
+        // lines), which a later loop may start over.
+        let mut edge_starts = 0usize;
+        let mut cut_kerfs: Vec<([f64; 2], [f64; 2])> = vec![];
         for (index, &l) in order.iter().enumerate() {
             if l >= loops.len() {
                 let [a, b] = common.cut(l - loops.len()).parts;
@@ -1164,18 +1224,20 @@ impl ThermalCutPlan {
             // corner (a straight-edged hole) sends the tangent lead back
             // past the corner, out of the scrap.
             let mut strokes = lp.strokes.clone();
-            let clear_at = |strokes: &[Stroke]| -> Result<(), String> {
+            let clear_with = |strokes: &[Stroke], lin: Lead, crater: bool| -> Result<(), String> {
                 let (start, t) = (strokes[0].a, strokes[0].tangent(false));
                 let n = scrap(t);
                 let center = add(start, n, lin.radius_mm);
                 let a = add(center, t, -lin.radius_mm);
                 let pierce = add(a, n, lin.length_mm);
                 let low = |p: [f64; 2]| at_z(p, z_check);
-                probe(
-                    &crater_probe,
-                    line(at_z(pierce, top + 1.), low(pierce)),
-                    "pierce point",
-                )?;
+                if crater {
+                    probe(
+                        &crater_probe,
+                        line(at_z(pierce, top + 1.), low(pierce)),
+                        "pierce point",
+                    )?;
+                }
                 if lin.length_mm > 0. {
                     probe(&kerf_probe, line(low(pierce), low(a)), "lead")?;
                 }
@@ -1214,6 +1276,7 @@ impl ThermalCutPlan {
                 }
                 Ok(())
             };
+            let clear_at = |strokes: &[Stroke]| clear_with(strokes, lin, true);
             // Chain cutting, the beam still on from the last outline: this
             // outline starts where a link reaches it, the shortest first.
             // Its possible starts are its stroke ends and the middles of
@@ -1299,7 +1362,102 @@ impl ThermalCutPlan {
                     }
                 }
             }
-            if let Some((_, at)) = declared {
+            // Edge starts: of the loop's possible starts (the declared one
+            // alone, where there is one), the one whose straight lead-in,
+            // lengthened along its own line, soonest ends in open material:
+            // beyond the sheet's edge by the run-on, or on the centre line
+            // of a straight kerf cut earlier. Not while a chain link to
+            // this outline is still open (the beam is on).
+            let mut edge_lead: Option<(f64, Vec<Stroke>)> = None;
+            if let Some(edge) = op
+                .edge_starts
+                .as_ref()
+                .filter(|_| !pending_link && !chain_start)
+            {
+                use lead_placement::Start;
+                let candidates: Vec<Vec<Stroke>> = match &declared {
+                    Some((_, at)) => vec![at.clone()],
+                    None => {
+                        let n = strokes.len();
+                        (0..n)
+                            .map(Start::End)
+                            .chain(
+                                (0..n)
+                                    .filter(|&k| strokes[k].arc.is_none())
+                                    .map(Start::Middle),
+                            )
+                            .filter(|start| {
+                                lead_rules
+                                    .as_ref()
+                                    .is_none_or(|rules| !rules.kept_off(start.point(&strokes)))
+                            })
+                            .map(|start| start.rotate(&strokes))
+                            .collect()
+                    }
+                };
+                let sheet = [
+                    spec.min_mm[0],
+                    spec.min_mm[1],
+                    spec.max_mm[0],
+                    spec.max_mm[1],
+                ];
+                for r in candidates {
+                    let (start, t) = (r[0].a, r[0].tangent(false));
+                    let normal = scrap(t);
+                    let from = add(add(start, normal, lin.radius_mm), t, -lin.radius_mm);
+                    // Along the lead's line to the sheet's edge, and on by
+                    // the run-on measured square to that edge.
+                    let mut reach = f64::INFINITY;
+                    for axis in 0..2 {
+                        let d = normal[axis];
+                        if d.abs() > 1e-12 {
+                            let edge_at = if d > 0. { sheet[axis + 2] } else { sheet[axis] };
+                            let l = ((edge_at - from[axis]) / d).max(0.) + edge.run_on_mm / d.abs();
+                            reach = reach.min(l);
+                        }
+                    }
+                    if edge.from_kerfs {
+                        for &(p, q) in &cut_kerfs {
+                            let (e, w) =
+                                ([q[0] - p[0], q[1] - p[1]], [p[0] - from[0], p[1] - from[1]]);
+                            let denominator = cross(normal, e);
+                            let length = e[0].hypot(e[1]);
+                            // Not along the kerf: across it.
+                            if denominator.abs() <= 0.5 * length {
+                                continue;
+                            }
+                            let l = cross(w, e) / denominator;
+                            let u = cross(w, normal) / denominator;
+                            // Inside the kerf's length, a kerf from its ends.
+                            if l > kerf && u * length >= kerf && (1. - u) * length >= kerf {
+                                reach = reach.min(l);
+                            }
+                        }
+                    }
+                    if reach <= edge.max_lead_mm
+                        && edge_lead
+                            .as_ref()
+                            .is_none_or(|(best, _)| reach < *best - guard)
+                        && clear_with(
+                            &r,
+                            Lead {
+                                length_mm: reach,
+                                radius_mm: lin.radius_mm,
+                            },
+                            false,
+                        )
+                        .is_ok()
+                    {
+                        edge_lead = Some((reach, r));
+                    }
+                }
+            }
+            let edge_start = edge_lead.is_some();
+            if let Some((reach, at)) = edge_lead {
+                leads_moved += usize::from(lead_rules.is_some() && at[0].a != strokes[0].a);
+                strokes = at;
+                lin.length_mm = reach;
+            } else if let Some((_, at)) = declared {
                 leads_moved += usize::from(at[0].a != strokes[0].a);
                 strokes = at;
             } else if chain_start {
@@ -1401,7 +1559,12 @@ impl ThermalCutPlan {
             };
             let crater = |p: [f64; 2]| line(at_z(p, top + 1.), at_z(p, z_check));
             let (mut center, mut a, mut pierce) = geometry(lin);
-            let first = probe(&crater_probe, crater(pierce), "pierce point");
+            // An edge start has no crater: there is nothing to pierce.
+            let first = if edge_start {
+                Ok(())
+            } else {
+                probe(&crater_probe, crater(pierce), "pierce point")
+            };
             if let Err(error) = first {
                 // In a hole: pierce at its center instead (Hypertherm's
                 // small-hole practice), with a smaller arc if needed.
@@ -1508,7 +1671,8 @@ impl ThermalCutPlan {
                     );
                     push_move(
                         &mut steps,
-                        at_z(pierce, z_pierce),
+                        // An edge start fires at the cut height.
+                        at_z(pierce, if edge_start { z_cut } else { z_pierce }),
                         &mut pos,
                         MoveKind::Rapid,
                         None,
@@ -1522,21 +1686,33 @@ impl ThermalCutPlan {
                         None,
                     );
                 }
-                steps.push_back(Step::Event(Event::Beam {
-                    power_percent: power,
-                }));
-                if op.pierce_delay_s > 0. {
-                    steps.push_back(Step::Event(Event::Dwell {
-                        seconds: op.pierce_delay_s,
+                if edge_start {
+                    edge_starts += 1;
+                    steps.push_back(Step::Open(pierce));
+                    steps.push_back(Step::Event(Event::BeamStart {
+                        power_percent: power,
                     }));
+                    let delay = op.edge_starts.map_or(0., |e| e.delay_s);
+                    if delay > 0. {
+                        steps.push_back(Step::Event(Event::Dwell { seconds: delay }));
+                    }
+                } else {
+                    steps.push_back(Step::Event(Event::Beam {
+                        power_percent: power,
+                    }));
+                    if op.pierce_delay_s > 0. {
+                        steps.push_back(Step::Event(Event::Dwell {
+                            seconds: op.pierce_delay_s,
+                        }));
+                    }
+                    push_move(
+                        &mut steps,
+                        at_z(pierce, z_cut),
+                        &mut pos,
+                        MoveKind::Plunge,
+                        op.plunge_mm_min,
+                    );
                 }
-                push_move(
-                    &mut steps,
-                    at_z(pierce, z_cut),
-                    &mut pos,
-                    MoveKind::Plunge,
-                    op.plunge_mm_min,
-                );
             }
             let wear = op.compensation == Compensation::Wear;
             let comp_side = if op.reverse {
@@ -1886,6 +2062,9 @@ impl ThermalCutPlan {
                 if kind == MoveKind::Cut {
                     cut_length += curve.prepare(op.tolerance_mm)?.length_mm();
                 }
+                if let Curve::Line { start, end } = &curve {
+                    cut_kerfs.push(([start[0], start[1]], [end[0], end[1]]));
+                }
                 pos = curve.end();
                 steps.push_back(Step::Move(
                     curve,
@@ -2175,9 +2354,21 @@ impl ThermalCutPlan {
         }
         // Events before the first move are handed out before it.
         let mut events = vec![];
-        while let Some(Step::Event(_)) = steps.front() {
-            if let Some(Step::Event(e)) = steps.pop_front() {
-                events.push(e);
+        while let Some(Step::Event(_) | Step::Open(_)) = steps.front() {
+            match steps.pop_front() {
+                Some(Step::Event(e)) => events.push(e),
+                Some(Step::Open(p)) => {
+                    // No move has run yet, so there is no earlier kerf in this
+                    // operation. An initial edge start must be outside the box;
+                    // this proof also holds for mesh stock contained in it.
+                    if (0..2).all(|k| p[k] >= spec.min_mm[k] && p[k] <= spec.max_mm[k]) {
+                        return Err(format!(
+                            "thermal cut {}: an initial edge start must be outside the sheet",
+                            op.id
+                        ));
+                    }
+                }
+                _ => unreachable!(),
             }
         }
         // The order's rules, checked on the order as it will be cut, apart
@@ -2264,7 +2455,14 @@ impl ThermalCutPlan {
                 _ => 0.,
             })
             .sum();
-        let (mut feed_seconds, mut dwell_seconds) = (0., 0.);
+        let mut feed_seconds = 0.;
+        let mut dwell_seconds: f64 = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Dwell { seconds } => Some(*seconds),
+                _ => None,
+            })
+            .sum();
         for step in &steps {
             match step {
                 Step::Move(curve, kind, Some(feed)) if !kind.is_rapid() => {
@@ -2282,7 +2480,10 @@ impl ThermalCutPlan {
             parts: definition.components.len(),
             loops: order.len() - common.len(),
             small_holes: small,
-            pierces: order.len() + usize::from(op.crop.is_some()) + skeleton_cuts - chain_links,
+            pierces: order.len() + usize::from(op.crop.is_some()) + skeleton_cuts
+                - chain_links
+                - edge_starts,
+            edge_starts: op.edge_starts.map(|_| edge_starts),
             skeleton_cuts: op.skeleton.as_ref().map(|_| skeleton_cuts),
             skeleton_length_mm: op.skeleton.as_ref().map(|_| skeleton_length),
             chain_links: op.chain.map(|_| chain_links),
@@ -2355,6 +2556,25 @@ impl ThermalCutPlan {
         self.report.geometric_residual_status = ResidualStatus::Estimated;
         Ok(())
     }
+    fn check_open(&self, p: [f64; 2], stock: &Stock) -> Result<(), String> {
+        // Off the sheet (the stock's box), or cut through.
+        let spec = stock.spec();
+        let inside = (0..2).all(|k| p[k] >= spec.min_mm[k] && p[k] <= spec.max_mm[k]);
+        if inside {
+            let [nx, ny] = stock.dimensions();
+            let [wx, wy] = stock.cell_widths_mm();
+            let i = (((p[0] - spec.min_mm[0]) / wx) as usize).min(nx - 1);
+            let j = (((p[1] - spec.min_mm[1]) / wy) as usize).min(ny - 1);
+            let upper = stock.cells()[j * nx + i].upper_mm;
+            if upper > spec.min_mm[2] {
+                return Err(format!(
+                    "thermal cut {}: the edge start at ({:.3}, {:.3}) is not proven open: the stock is not cut through there (its upper bound is Z{upper:.3}); use a positive run_on_mm to start outside the sheet, or refine the stock grid to prove an earlier kerf open",
+                    self.id, p[0], p[1]
+                ));
+            }
+        }
+        Ok(())
+    }
     pub fn next_motion_with_stock(
         &mut self,
         stock: &Stock,
@@ -2374,6 +2594,7 @@ impl ThermalCutPlan {
             match step {
                 Step::Event(e) => self.events.push(e),
                 Step::Done => self.report.loops_completed += 1,
+                Step::Open(p) => self.check_open(p, stock)?,
                 Step::Move(curve, kind, feed) => {
                     curve.prepare(self.tolerance)?;
                     let m = Motion {
@@ -2388,10 +2609,16 @@ impl ThermalCutPlan {
                     self.expected_generation = Some(stock.generation() + 1);
                     // Events due right after this move stay queued until the
                     // next call hands them out with take_events.
-                    while let Some(Step::Event(_) | Step::Done) = self.steps.front() {
+                    while let Some(Step::Event(_) | Step::Done | Step::Open(_)) = self.steps.front()
+                    {
                         match self.steps.pop_front() {
                             Some(Step::Event(e)) => self.events.push(e),
                             Some(Step::Done) => self.report.loops_completed += 1,
+                            // Checking the stock before this move is conservative:
+                            // a committed move can only remove material. In the
+                            // usual case this is the rapid to the start, which
+                            // removes nothing. Check before exposing BeamStart.
+                            Some(Step::Open(p)) => self.check_open(p, stock)?,
                             _ => unreachable!(),
                         }
                     }

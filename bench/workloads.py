@@ -40,6 +40,9 @@ class Workload:
     build: object
     target: object = None
     tags: tuple = field(default=())
+    # Optional controller-specific posting settings: (program, base machine)
+    # -> dict accepted by post_program. The usual benchmark post is unchanged.
+    posting: object = None
 
 
 def _options(job, setup_id=None):
@@ -668,6 +671,23 @@ def _plasma_common_line():
     return _options(t.job(t.cut(count=4)))
 
 
+def _plasma_edge_starts():
+    from test_thermal import wincnc_edge_start_job
+
+    return _options(wincnc_edge_start_job(material_feed=True)[1])
+
+
+def _plasma_edge_post(program, machine):
+    from test_thermal import wincnc_edge_start_job
+
+    w, _, declared = wincnc_edge_start_job(material_feed=True)
+    return dict(
+        machine=replace(declared, motion_policy=machine.motion_policy),
+        post=w.WinCNCPlasmaPost,
+        decoder=w.WinCNCPlasmaDecoder,
+    )
+
+
 # --- turning ----------------------------------------------------------------
 
 
@@ -1123,6 +1143,14 @@ WORKLOADS = (
         "Plasma-cut a row of four flush rectangles with common lines",
         {"plasma": ("ThermalCut common line", 17)},
         _plasma_common_line,
+    ),
+    Workload(
+        "plasma-edge-starts",
+        "thermal",
+        "Two squares with a sheet-edge start and an ordinary pierce, posted for WinCNC",
+        {"plasma": ("ThermalCut edge starts", 306)},
+        _plasma_edge_starts,
+        posting=_plasma_edge_post,
     ),
     Workload(
         "lathe-shaft",

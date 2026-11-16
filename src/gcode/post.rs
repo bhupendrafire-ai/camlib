@@ -289,6 +289,7 @@ impl DefaultPost {
                 Event::SpindleOrient { .. } => "on_spindle_orient",
                 Event::Beam { .. } => "on_beam",
                 Event::BeamMark { .. } => "on_beam_mark",
+                Event::BeamStart { .. } => "on_beam_start",
                 Event::HeightControl { .. } => "on_height_control",
                 Event::SurfaceSpeed { .. } => "on_surface_speed",
                 Event::FeedPerRev { .. } => "on_feed_per_rev",
@@ -466,6 +467,10 @@ impl DefaultPost {
                 self.spindle_on = true;
                 Ok(())
             }
+            Event::BeamStart { .. } => Err(
+                "this dialect declares no start in open material (an edge or gap start needs a controller code that fires without a touch-off or a pierce height); plan without edge_starts or post with a post whose machine declares one"
+                    .into(),
+            ),
             Event::BeamMark { power_percent } => {
                 if matches!(self.machine.controller, Some(Controller::Carvera(_))) {
                     return Err(

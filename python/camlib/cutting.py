@@ -292,7 +292,18 @@ def recommend_drilling(
     max_rpm = _positive('machine max_spindle_rpm', machine.max_spindle_rpm)
     max_feed = _positive('machine max_feed_mm_min', machine.max_feed_mm_min)
     if machine.max_axis_feed_mm_min is not None:
-        max_feed = min(max_feed, _positive('machine Z feed limit', machine.max_axis_feed_mm_min[2]))
+        # Drilling advances along work Z. Its machine-axis speeds are vf * |z_i|,
+        # as in the native dynamics/post checks, regardless of work-frame origin.
+        direction = machine.work_to_machine.z
+        if (
+            len(direction) != 3
+            or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in direction)
+            or abs(sum(v * v for v in direction) - 1.0) > 1e-12
+        ):
+            raise ValueError('machine work_to_machine.z must be a finite unit drilling direction')
+        for component, limit in zip(direction, machine.max_axis_feed_mm_min):
+            if component != 0:
+                max_feed = min(max_feed, limit / abs(component))
 
     def poll():
         if cancel is not None and cancel():

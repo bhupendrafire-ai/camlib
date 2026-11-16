@@ -146,7 +146,10 @@ impl ControlState {
                 next.spindle_direction = *direction;
             }
             Event::FeedPerRev { .. } => {}
-            Event::Beam { .. } | Event::BeamMark { .. } | Event::HeightControl { .. } => {}
+            Event::Beam { .. }
+            | Event::BeamStart { .. }
+            | Event::BeamMark { .. }
+            | Event::HeightControl { .. } => {}
             Event::Coolant { mode } => next.coolant = *mode,
             Event::WorkOffset { number } => {
                 if self.work_offset.is_some_and(|n| n != *number) {

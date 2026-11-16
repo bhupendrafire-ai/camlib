@@ -241,6 +241,7 @@ controller parameters, real offsets) is outside what camlib can check.
 | Cutter compensation | G41/G42 with the tool's D register (wear), G40: on their own line (LinuxCNC, Centroid) or in the lead move's block (FANUC, Haas) |
 | Oriented spindle stop | M19 (declared per machine) for fine boring |
 | Probing | LinuxCNC `G38.3` (protected, with a trip check) and `G38.2` with `#5061`-`#5063` into `G10 L2`/`L10`/`L1`; or Renishaw Inspection Plus `G65 P9810`/`P9811`/`P9812`/`P9814`/`P9815` (FANUC); decoded back into moves and checked |
+| Edge starts (experimental) | `ThermalCut(edge_starts=EdgeStarts(...))`: off-sheet or earlier straight-kerf starts at cut height, checked against stock and counted separately from pierces. WinCNC supports declared native starts with independent decoding; other supplied posts refuse `BeamStart`. No physical-machine validation |
 | Beam on/off, power | Plasma `M3 S1`/`M5`, laser `M4 S<power>` (GRBL laser mode) or `M3 S`, from the declared S at full power |
 | Beam marking | Only as the machine declares it (`beam_mark`): the beam word at the marking power (lasers, GRBL laser mode), or the controller's declared marking and cutting process codes; QtPlasmaC: the machine's declared marking and cutting materials (`M190 P`/`M66 P3 L3 Q`). Decoded back, with the cutting process or power proven stated again before every cut |
 | Torch height control | Declared on/off codes (e.g. `M63 P2`/`M62 P2`) |

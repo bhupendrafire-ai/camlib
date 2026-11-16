@@ -64,6 +64,8 @@ def render(data):
         "    moves. Neither models controller blending or jerk.",
         "  - *Blocks*: lines of G-code posted for a LinuxCNC-style controller at 3",
         "    decimals (arcs not exactly writable there become checked segments).",
+        "    Controller-specific workloads name their post in the workload description;",
+        "    plasma-edge-starts uses the WinCNC post with independent decoding.",
         "  - *Leftover / over-cut*: material left above, and removed below, the",
         "    workload's target part, from camlib's material verifier, as certain /",
         "    possible bounds in mm³. Certain values are proven; possible values include",

@@ -7,6 +7,7 @@ import unittest
 import camlib
 from camlib.cutting import DrillingCuttingData, recommend_drilling
 from camlib.export import ExportRefused
+from camlib.motion import WorkFrame
 from camlib.simulation import SimulationError
 from test_drilling_options import fixture, run
 from test_drill_cycles import linuxcnc
@@ -43,6 +44,31 @@ def recommendation(source=None, **changes):
 
 
 class RecommendationsTest(unittest.TestCase):
+    def test_axis_feed_limits_follow_the_physical_drilling_direction(self):
+        source = fixture(peck_mm=None)
+        base = replace(linuxcnc(source), max_spindle_rpm=2000.0, max_feed_mm_min=1000.0)
+        for frame, limits, expected in (
+            (WorkFrame(), (1.0, 1.0, 80.0), 80.0),
+            (WorkFrame(x=(0, 0, -1), z=(1, 0, 0)), (80.0, 1.0, 1.0), 80.0),
+            (WorkFrame(y=(0, 0, 1), z=(0, -1, 0)), (1.0, 80.0, 1.0), 80.0),
+            (WorkFrame(x=(0.8, 0, -0.6), z=(0.6, 0, 0.8)), (60.0, 1.0, 120.0), 100.0),
+            (WorkFrame(x=(0.8, 0, -0.6), z=(0.6, 0, 0.8)), (120.0, 1.0, 80.0), 100.0),
+        ):
+            with self.subTest(frame=frame, limits=limits):
+                machine = replace(base, work_to_machine=frame, max_axis_feed_mm_min=limits)
+                candidate = recommendation(source, machine=machine).candidates[0]
+                self.assertAlmostEqual(candidate.cutting.feed_mm_min, expected)
+                self.assertAlmostEqual(candidate.cutting.spindle_rpm, expected / 0.08)
+                self.assertTrue(candidate.feed_limited)
+                for direction, limit in zip(frame.z, limits):
+                    self.assertLessEqual(abs(direction) * candidate.cutting.feed_mm_min, limit)
+        too_slow = replace(
+            base, work_to_machine=WorkFrame(x=(0, 0, -1), z=(1, 0, 0)), max_axis_feed_mm_min=(1.0, 1000.0, 1000.0)
+        )
+        rejected = recommendation(source, machine=too_slow)
+        self.assertFalse(rejected.candidates)
+        self.assertTrue(any('speed range' in row['reason'] for row in rejected.rejected))
+
     def test_feed_is_per_revolution_and_caps_keep_the_supplied_speed_range(self):
         candidate = recommendation().candidates[0]
         self.assertEqual(candidate.cutting.spindle_rpm, 2000.0)
