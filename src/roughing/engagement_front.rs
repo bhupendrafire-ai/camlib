@@ -2804,28 +2804,27 @@ impl EngagementFrontPlan {
         // the operation region can contain reachable material. Its exact
         // prepared bounds include arcs; the same exterior margin keeps the
         // grid border outside all region, cutter and steering queries (#193).
-        if cells(nx, ny) > 64_000_000 {
-            if let Some(bounds) = self.guides.source_region().bounds() {
-                let lo = [
-                    (((bounds[0] - margin - x0) / c).floor() - 1.).max(0.) as usize,
-                    (((bounds[1] - margin - y0) / c).floor() - 1.).max(0.) as usize,
-                ];
-                let hi = [
-                    (((bounds[2] + margin - x0) / c).ceil() + 1.).min(nx as f64) as usize,
-                    (((bounds[3] + margin - y0) / c).ceil() + 1.).min(ny as f64) as usize,
-                ];
-                // Integer offsets retain the stock-aligned fine lattice.
-                let cropped = [hi[0].saturating_sub(lo[0]), hi[1].saturating_sub(lo[1])];
-                if cropped[0] > 0 && cropped[1] > 0 && cells(cropped[0], cropped[1]) < cells(nx, ny)
-                {
-                    self.report.diagnostics.push(format!(
+        if cells(nx, ny) > 64_000_000
+            && let Some(bounds) = self.guides.source_region().bounds()
+        {
+            let lo = [
+                (((bounds[0] - margin - x0) / c).floor() - 1.).max(0.) as usize,
+                (((bounds[1] - margin - y0) / c).floor() - 1.).max(0.) as usize,
+            ];
+            let hi = [
+                (((bounds[2] + margin - x0) / c).ceil() + 1.).min(nx as f64) as usize,
+                (((bounds[3] + margin - y0) / c).ceil() + 1.).min(ny as f64) as usize,
+            ];
+            // Integer offsets retain the stock-aligned fine lattice.
+            let cropped = [hi[0].saturating_sub(lo[0]), hi[1].saturating_sub(lo[1])];
+            if cropped[0] > 0 && cropped[1] > 0 && cells(cropped[0], cropped[1]) < cells(nx, ny) {
+                self.report.diagnostics.push(format!(
                         "steering grid bounded to the operation region: {nx} x {ny} -> {} x {} cells at unchanged {c} mm resolution",
                         cropped[0], cropped[1]
                     ));
-                    x0 += lo[0] as f64 * c;
-                    y0 += lo[1] as f64 * c;
-                    [nx, ny] = cropped;
-                }
+                x0 += lo[0] as f64 * c;
+                y0 += lo[1] as f64 * c;
+                [nx, ny] = cropped;
             }
         }
         if cells(nx, ny) > 64_000_000 {
