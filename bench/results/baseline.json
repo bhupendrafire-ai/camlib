@@ -3458,6 +3458,96 @@
      "native": 6976.0
     }
    }
+  },
+  {
+   "name": "drilling-data-manual",
+   "family": "holes",
+   "description": "Synthetic declared drill rates written explicitly",
+   "operations": {
+    "holes": {
+     "toolpath": "drilling",
+     "issue": 29,
+     "moves": 8,
+     "cut_mm": 14.0,
+     "rapid_mm": 41.314,
+     "air_cut_mm": 0.0,
+     "link_mm": 0.0,
+     "plunges": 2,
+     "retracts": 2,
+     "removed_mm3": 183.922,
+     "cycle_seconds_exact_stop": 6.173,
+     "cycle_seconds_tangent": 6.173,
+     "engine_seconds": 0.0011
+    }
+   },
+   "toolpath": {
+    "moves": 8,
+    "cycle_seconds_exact_stop": 6.173,
+    "cycle_seconds_tangent": 6.173,
+    "posted_blocks": 27,
+    "post_error": null,
+    "removed_mm3": [
+     183.922,
+     208.489
+    ],
+    "material": null
+   },
+   "engine": {
+    "run_seconds": 0.0062,
+    "first_move_seconds": 0.0052,
+    "post_seconds": 0.0015,
+    "repeats": 3,
+    "engagement_measure_seconds": null,
+    "peak_rss_kib": {
+     "python": 49488.0,
+     "native": 6544.0
+    }
+   }
+  },
+  {
+   "name": "drilling-data-recommended",
+   "family": "holes",
+   "description": "Same synthetic rates selected from declared tool/material data",
+   "operations": {
+    "holes": {
+     "toolpath": "drilling",
+     "issue": 29,
+     "moves": 8,
+     "cut_mm": 14.0,
+     "rapid_mm": 41.314,
+     "air_cut_mm": 0.0,
+     "link_mm": 0.0,
+     "plunges": 2,
+     "retracts": 2,
+     "removed_mm3": 183.922,
+     "cycle_seconds_exact_stop": 6.173,
+     "cycle_seconds_tangent": 6.173,
+     "engine_seconds": 0.0009
+    }
+   },
+   "toolpath": {
+    "moves": 8,
+    "cycle_seconds_exact_stop": 6.173,
+    "cycle_seconds_tangent": 6.173,
+    "posted_blocks": 27,
+    "post_error": null,
+    "removed_mm3": [
+     183.922,
+     208.489
+    ],
+    "material": null
+   },
+   "engine": {
+    "run_seconds": 0.0058,
+    "first_move_seconds": 0.005,
+    "post_seconds": 0.0016,
+    "repeats": 3,
+    "engagement_measure_seconds": null,
+    "peak_rss_kib": {
+     "python": 48352.0,
+     "native": 6176.0
+    }
+   }
   }
  ],
  "failures": {},

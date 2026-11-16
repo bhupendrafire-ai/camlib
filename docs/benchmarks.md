@@ -78,6 +78,8 @@ comparable only on the same machine; CI runs the same benchmark on every push.
 | Contour | [#28](https://github.com/stevecad/camlib/issues/28) | `chamfer` (rough-profile) | 40 | 358 | 0 (0%) | 148 | 8 | 8 | 2243 | 55.8 / 55.7 | 0.011 |
 | Contour | [#28](https://github.com/stevecad/camlib/issues/28) | `contour` (profile) | 40 | 358 | 0 (0%) | 148 | 8 | 8 | 2192 | 55.8 / 55.7 | 0.007 |
 | Drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `drilling-clearance-pecks` (holes) | 38 | 126 | 109 (87%) | 41 | 12 | 12 | 184 | 18.6 / 18.6 | 0.004 |
+| drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `drilling-data-manual` (holes) | 8 | 14 | 0 (0%) | 41 | 2 | 2 | 184 | 6.2 / 6.2 | 0.001 |
+| drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `drilling-data-recommended` (holes) | 8 | 14 | 0 (0%) | 41 | 2 | 2 | 184 | 6.2 / 6.2 | 0.001 |
 | Drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `drilling-decreasing-pecks` (holes) | 19 | 77 | 62 (80%) | 32 | 6 | 6 | 184 | 12.9 / 12.9 | 0.004 |
 | Drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `drilling-g98` (holes) | 44 | 17 | 0 (0%) | 154 | 14 | 14 | 184 | 10.9 / 10.9 | 0.003 |
 | Drilling | [#29](https://github.com/stevecad/camlib/issues/29) | `drilling-g99` (holes) | 44 | 17 | 0 (0%) | 136 | 14 | 15 | 184 | 10.7 / 10.7 | 0.003 |
@@ -232,6 +234,8 @@ limit the cutter actually runs, measured from the streamed moves alone
 | `drilling-g99` | Same fixed canned pecks with G99 and proven R-plane travel | 44 | 10.7 / 10.7 | 28 | – | – | 0.010 | 0.007 | 0.003 | 7 |
 | `drilling-preparation-manual` | Explicit spot, pilot and final stages without preparation metadata | 24 | 13.5 / 13.5 | 63 | – | – | 0.015 | 0.009 | 0.002 | 7 |
 | `drilling-preparation-bound` | The same stages with checked source-bound preparation | 24 | 13.5 / 13.5 | 63 | – | – | 0.020 | 0.014 | 0.002 | 7 |
+| `drilling-data-manual` | Synthetic declared drill rates written explicitly | 8 | 6.2 / 6.2 | 27 | – | – | 0.006 | 0.005 | 0.002 | 6 |
+| `drilling-data-recommended` | Same synthetic rates selected from declared tool/material data | 8 | 6.2 / 6.2 | 27 | – | – | 0.006 | 0.005 | 0.002 | 6 |
 
 ## Baseline provenance
 

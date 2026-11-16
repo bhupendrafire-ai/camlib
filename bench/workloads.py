@@ -112,6 +112,31 @@ def _drilling_preparation(declared):
     return build
 
 
+def _drilling_recommendations(declared):
+    def build():
+        from camlib import OperationNode
+        from test_drilling_options import fixture
+        from test_drilling_recommendations import recommendation
+
+        source = fixture(peck_mm=None)
+        setup = source.setups[0]
+        operation = setup.operations[0].operation
+        if declared:
+            selected = recommendation(source).candidates[0]
+            rpm, feed = selected.cutting.spindle_rpm, selected.cutting.feed_mm_min
+        else:
+            rpm, feed = 2000.0, 160.0  # Same synthetic declared rates, written explicitly.
+        operation = replace(operation, spindle_rpm=rpm, feed_mm_min=feed)
+        return (
+            replace(source, setups=(replace(setup, operations=(OperationNode(operation, sources=()),)),))
+            .compile()
+            .setup("top")
+            .simulation_options()
+        )
+
+    return build
+
+
 def _solid(module, name="cadquery_target"):
     def target():
         shape = getattr(_support(module), name)()
@@ -730,6 +755,20 @@ def _lathe_face_groove():
 
 
 WORKLOADS = (
+    Workload(
+        "drilling-data-manual",
+        "holes",
+        "Synthetic declared drill rates written explicitly",
+        {"holes": ("drilling", 29)},
+        _drilling_recommendations(False),
+    ),
+    Workload(
+        "drilling-data-recommended",
+        "holes",
+        "Same synthetic rates selected from declared tool/material data",
+        {"holes": ("drilling", 29)},
+        _drilling_recommendations(True),
+    ),
     Workload(
         "drilling-preparation-manual",
         "holes",

@@ -18,6 +18,9 @@ import json
 
 _EXPORTS = {
     **dict.fromkeys(
+        ("DrillingCuttingData", "DrillingRecommendation", "DrillingRecommendations", "recommend_drilling"), "cutting"
+    ),
+    **dict.fromkeys(
         (
             'PlanningCandidate',
             'OperationChoices',

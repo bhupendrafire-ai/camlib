@@ -3123,3 +3123,5 @@ gives the `effective_diameter_mm` it used. camlib does not pick cutting data.
 part seen as a height map). Undercuts are cut with `Undercut` on tri-dexel
 stock only; lollipop finishing along an undercut edge (a surface strategy)
 is not supported yet.
+
+For opt-in drilling tool/rate proposals from explicit manufacturer or shop records, see [Declared drilling recommendations](drilling-cutting-data.md). Existing operations retain the ordinary validation and export path.

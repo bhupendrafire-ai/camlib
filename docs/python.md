@@ -13,7 +13,7 @@ level `Setup` is the job setup (`camlib.jobs.Setup`).
 | `camlib.nesting` | `Nest`, `NestPart`, `NestPlacement`, `NestResult`, `Remnant`, `sheet_report`, `SheetReport`, `Consumable`: place sheet parts for a `ThermalCut` from a chosen corner with their marks, prove the layout, take the remnant, and report what the sheet takes ([nesting](nesting.md)) |
 | `camlib.dxf` | `read_parts`, `write_regions`: flat parts and remnants in and out of DXF (lines, arcs, circles, polylines) ([nesting](nesting.md#dxf)) |
 | `camlib.limits` | `Limits(contain=, avoid=)`, `AvoidArea(region, top_z_mm)` |
-| `camlib.cutting` | `cutting_data` → `CuttingData`: spindle speed and feed from surface speed and feed per tooth (chip thinning, ball effective diameter, rpm cap) |
+| `camlib.cutting` | `cutting_data` → `CuttingData`: spindle speed and feed from surface speed and feed per tooth (chip thinning, ball effective diameter, rpm cap); `recommend_drilling` matches caller-declared drilling records to tools and machine limits ([details](drilling-cutting-data.md)) |
 | `camlib.tools` | `EndMill`, `BallEndMill`, `BullEndMill`, `Drill`, `ChamferMill`, `ThreadMill`, `TSlotCutter`, `KeyseatCutter`, `LollipopCutter`, `DovetailCutter`, `Tap`, `BoringBar`, `Torch`, `LaserHead`, `Neck`, `ToolAssembly`, `HolderSection`, `holder_sections_from_mesh` |
 | `camlib.planar` | `PlanarRegion` (`components`, reported `boundary_error_mm`), `Component`, `Boundary` (line/arc regions) |
 | `camlib.surface` | `SurfaceMesh` (triangle surfaces with a finite stated `surface_error_mm` in the inclusive range 0–0.1 mm; checked at construction) |
