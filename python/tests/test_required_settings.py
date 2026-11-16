@@ -88,7 +88,8 @@ class RequiredSettingsTest(unittest.TestCase):
             self.assertFalse(hasattr(camlib.post, name), name)
         with self.assertRaisesRegex(TypeError, "rapid_mm_min"):
             RecordedRun(None, (), (), revision="1", initial_position_mm=(0, 0, 0))
-        self.assertEqual(GCodeDialect.linuxcnc(), GCodeDialect())
+        # G99 is an explicit LinuxCNC capability; generic defaults stay unchanged.
+        self.assertEqual(GCodeDialect.linuxcnc(), GCodeDialect().with_commands(cycle_return_r="G99"))
 
     def test_default_dialect_accepts_arcs_as_linuxcnc(self):
         d = GCodeDialect()
