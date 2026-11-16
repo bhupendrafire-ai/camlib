@@ -96,7 +96,7 @@ def _drilling_multistart(nearest):
         setup = given.setups[0]
         operation = replace(
             setup.operations[0].operation,
-            centers_mm=((46, 62), (38, 86), (38, 30), (62, 70), (14, 54), (94, 46), (70, 38), (22, 6), (62, 38)),
+            centers_mm=((6, 6), (78, 78), (54, 38), (78, 38), (46, 54), (30, 6), (86, 54), (86, 46), (54, 86)),
             ordering=HoleOrdering(machine, 100_000, nearest_neighbor=nearest),
         )
         setup = replace(
