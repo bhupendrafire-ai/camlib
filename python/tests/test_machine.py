@@ -336,7 +336,18 @@ class MachineLatheAndPersistenceTest(unittest.TestCase):
             insert_check=camlib.TurningModelWithoutInsert(reason='synthetic declared cutting-point frame'),
             max_hull_error_mm=0.05,
         )
-        supplied = replace(cnmg(), holder=camlib.TurningHolder.from_model(body))
+        original = cnmg()
+        supplied = camlib.TurningTool(
+            original.id,
+            insert=original.insert,
+            nose_radius_mm=original.nose_radius_mm,
+            side=original.side,
+            hand=original.hand,
+            holder=camlib.TurningHolder.from_model(body),
+            seat=original.seat,
+            insert_thickness_mm=original.insert_thickness_mm,
+            insert_clearance_deg=original.insert_clearance_deg,
+        )
         model_plan = job(
             initial_position_mm=(100, 100),
             tools=(camlib.TurnToolSetting(supplied, 1, 1),),

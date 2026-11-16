@@ -105,9 +105,20 @@ class StepToolBodyTest(unittest.TestCase):
         self.assertLessEqual(model.body.surface_error_mm, 0.01)
         self.assertEqual(model.max_hull_error_mm, 0.1)
         from test_turning import cnmg
-        from dataclasses import replace
 
-        replace(cnmg(), holder=camlib.TurningHolder.from_model(model)).validate()
+        original = cnmg()
+        made = camlib.TurningTool(
+            original.id,
+            insert=original.insert,
+            nose_radius_mm=original.nose_radius_mm,
+            side=original.side,
+            hand=original.hand,
+            holder=camlib.TurningHolder.from_model(model),
+            seat=original.seat,
+            insert_thickness_mm=original.insert_thickness_mm,
+            insert_clearance_deg=original.insert_clearance_deg,
+        )
+        made.validate()
 
     def test_a_step_holder_gives_the_same_checks_as_the_equivalent_mesh(self):
         path = write_step(
