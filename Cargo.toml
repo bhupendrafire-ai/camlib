@@ -62,3 +62,7 @@ opt-level = 2
 lto = false
 codegen-units = 16
 incremental = true
+
+[[example]]
+name = "model-body-cost"
+path = "bench/model_body_cost.rs"

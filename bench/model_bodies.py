@@ -1,29 +1,45 @@
-"""Measure #221 with the Release driver, sequentially on one host.
+"""Measure #221's native planner using public APIs in shipping Release.
 
     python bench/model_bodies.py --output /path/to/results.json --repeat 3
 
-Uses the existing lathe-bore workload/stream measurement. Geometry construction
-is outside the timer; total includes transport and one-time model reduction.
-The two bore operations measure per-move work after startup. Timing is reported,
-never asserted in CI. Motions and final stock must match the built-in control.
+Input decoding is outside the native timer. Cold native planning includes model
+reduction; warm complete plans include all moves and geometry/collision checks.
+The ordinary 17-move stream case is too short to separate transport/startup from
+per-move work, so the same bore uses a declared 0.015 mm roughing pass depth.
+Timing is reported, never asserted in CI. Motions and final stock must match.
 """
 
 import argparse
-from dataclasses import asdict, replace
-import hashlib
 import json
 from pathlib import Path
 import statistics
+import subprocess
+import tempfile
 
-from run import _environment, _run_once
-from workloads import BY_NAME, _lathe_bore
+from run import _environment
+from workloads import ROOT, _lathe_bore
 from support.tool_models import dense_bar_mesh
 
 
 def measure(repeat):
     import camlib
 
-    workload = BY_NAME["lathe-bore"]
+    # Cargo owns target-dir selection; its message supplies the actual executable.
+    built = subprocess.check_output(
+        [
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--all-features",
+            "--example",
+            "model-body-cost",
+            "--message-format=json",
+        ],
+        cwd=ROOT,
+        text=True,
+    )
+    (executable,) = [row["executable"] for line in built.splitlines() if (row := json.loads(line)).get("executable")]
     reference = None
     rows = []
     for name, facets, budget in [
@@ -33,6 +49,13 @@ def measure(repeat):
         ("72-facets-exact", 72, None),
     ]:
         config = _lathe_bore()
+        job = config["turning"]
+        job["operations"][1]["depth_of_cut_mm"] = 0.015
+        job.update(
+            id="model-bodies",
+            stock=config["stock"],
+            initial_position_mm=[config["initial_position_mm"][0], config["initial_position_mm"][2]],
+        )
         if facets:
             mesh = dense_bar_mesh(facets)
             model = camlib.TurningToolModel(
@@ -42,38 +65,27 @@ def measure(repeat):
                 insert_check=camlib.TurningModelWithoutInsert(reason="synthetic bar inside the benchmark holder's box"),
                 max_hull_error_mm=budget,
             )
-            config["turning"]["tools"][1]["tool"]["body"]["model"] = model.to_dict()
-        totals, seconds = [], []
-        for _ in range(repeat):
-            run = _run_once(replace(workload, build=lambda: config))
-            physical = json.dumps(
-                {"events": [asdict(e) for e in run["program"].events], "stock": run["state"].stock()}, sort_keys=True
-            ).encode()
-            signature = hashlib.sha256(physical).hexdigest()
-            if reference is None:
-                reference = signature
-            if signature != reference:
-                raise AssertionError(f"{name}: motions or stock differ from the built-in control")
-            moves = sum(run["ops"][op]["moves"] for op in ("bore_rough", "bore_finish"))
-            totals.append(run["total"])
-            seconds.append(sum(run["ops"][op]["engine_seconds"] for op in ("bore_rough", "bore_finish")))
-        rows.append(
-            dict(
-                name=name,
-                triangles=len(mesh.triangles) if facets else 0,
-                max_hull_error_mm=budget,
-                repeats=repeat,
-                total_seconds=totals,
-                bore_seconds=seconds,
-                bore_moves=moves,
-                median_bore_ms_per_move=1000 * statistics.median(seconds) / moves,
-                median_total_seconds=statistics.median(totals),
-                physical_sha256=signature,
-            )
+            job["tools"][1]["tool"]["body"]["model"] = model.to_dict()
+        with tempfile.TemporaryDirectory(prefix="camlib model cost ") as directory:
+            path = Path(directory) / "job.json"
+            path.write_text(json.dumps(job))
+            result = json.loads(subprocess.check_output([executable, str(path), str(repeat)], text=True))
+        signature = result["physical_sha256"]
+        if reference is None:
+            reference = signature
+        if signature != reference:
+            raise AssertionError(f"{name}: motions or stock differ from the built-in control")
+        result.update(
+            name=name,
+            triangles=len(mesh.triangles) if facets else 0,
+            max_hull_error_mm=budget,
+            repeats=repeat,
+            median_native_ms_per_move=1000 * statistics.median(result["warm_plan_seconds"]) / result["moves"],
         )
+        rows.append(result)
     for row in rows:
-        row["bore_cost_multiple_of_builtin"] = row["median_bore_ms_per_move"] / rows[0]["median_bore_ms_per_move"]
-    return dict(environment=_environment(), rows=rows)
+        row["cost_multiple_of_builtin"] = row["median_native_ms_per_move"] / rows[0]["median_native_ms_per_move"]
+    return dict(environment=_environment(), input_decoding_timed=False, rows=rows)
 
 
 def main():

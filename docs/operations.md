@@ -2926,10 +2926,14 @@ tool.validate()   # the meshes, the placement and the insert cross-check
 
     Measure this tradeoff with the Release driver using
     `python bench/model_bodies.py --output /path/to/result.json --repeat 3`.
-    It uses the existing bore workload, runs controls sequentially on the
-    same host and requires identical motions and stock. It reports total
-    time separately from bore-operation cost per move; results describe
-    those inputs and that host, not a timing guarantee.
+    It builds the public-API `model-body-cost` example in Release, uses the
+    existing bore with an explicit 0.015 mm pass depth (hundreds of moves), runs
+    controls sequentially on the same host and requires identical motions
+    and stock. Input decoding is outside the native timer; cold native
+    planning includes reduction, while warm complete plans measure the
+    per-move work with every check. Short streamed runs mix delivery/startup
+    into operation timings and are not a native per-move measurement.
+    Results describe those inputs and that host, not a timing guarantee.
 - The checks run on the slices, not the triangles. A model is reduced once
   (and kept: a run asks for a tool's body at every operation); consecutive
   slices of one section are one prism, so a straight bar is a single piece
