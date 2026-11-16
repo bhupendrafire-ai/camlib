@@ -865,10 +865,18 @@ fn peck_schedules_are_bounded_validated_and_cancellable_before_motion() {
     assert!(drill_plan(op.clone()).err().unwrap().contains("explicit drilling"));
     op.peck_schedule = None;
     op.peck_mm = Some(0.001);
-    assert!(prepare(op.clone()).err().unwrap().contains("canned peck schedule cancelled"));
+    // Valid controller returns must reach the inner preparation loop, not
+    // be rejected by the existing return-distance guard first.
+    op.reentry_clearance_mm = 0.0002;
+    op.chip_break_lift_mm = 0.0002;
+    let error = prepare(op.clone()).err().unwrap();
+    assert!(error.contains("canned peck schedule cancelled"), "{error}");
     op.tolerance_mm = 1e-7;
     op.peck_mm = Some(0.000002);
-    assert!(drill_plan(op).err().unwrap().contains("covered-event limit"));
+    op.reentry_clearance_mm = 0.0000018;
+    op.chip_break_lift_mm = 0.0000018;
+    let error = drill_plan(op).err().unwrap();
+    assert!(error.contains("covered-event limit"), "{error}");
 }
 
 fn boring_bar(f: &StreamManifest) -> camlib::tool::ToolAssembly {
