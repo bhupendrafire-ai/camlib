@@ -3548,6 +3548,96 @@
      "native": 6176.0
     }
    }
+  },
+  {
+   "name": "drilling-multistart-baseline",
+   "family": "mill",
+   "description": "Nine-hole baseline 2-opt with fixed final hole",
+   "operations": {
+    "holes": {
+     "toolpath": "Drilling",
+     "issue": 29,
+     "moves": 90,
+     "cut_mm": 279.0,
+     "rapid_mm": 223.082,
+     "air_cut_mm": 211.428,
+     "link_mm": 67.428,
+     "plunges": 27,
+     "retracts": 27,
+     "removed_mm3": 582.121,
+     "cycle_seconds_exact_stop": 52.31,
+     "cycle_seconds_tangent": 52.248,
+     "engine_seconds": 0.0015
+    }
+   },
+   "toolpath": {
+    "moves": 90,
+    "cycle_seconds_exact_stop": 52.31,
+    "cycle_seconds_tangent": 52.248,
+    "posted_blocks": 113,
+    "post_error": null,
+    "removed_mm3": [
+     582.121,
+     1264.376
+    ],
+    "material": null
+   },
+   "engine": {
+    "run_seconds": 0.0075,
+    "first_move_seconds": 0.0061,
+    "post_seconds": 0.0034,
+    "repeats": 3,
+    "engagement_measure_seconds": null,
+    "peak_rss_kib": {
+     "python": 58736.0,
+     "native": 5376.0
+    }
+   }
+  },
+  {
+   "name": "drilling-multistart-nearest",
+   "family": "mill",
+   "description": "Same nine-hole pattern with bounded nearest-neighbour multi-start",
+   "operations": {
+    "holes": {
+     "toolpath": "Drilling",
+     "issue": 29,
+     "moves": 90,
+     "cut_mm": 279.0,
+     "rapid_mm": 203.88,
+     "air_cut_mm": 211.428,
+     "link_mm": 67.428,
+     "plunges": 27,
+     "retracts": 27,
+     "removed_mm3": 582.121,
+     "cycle_seconds_exact_stop": 52.116,
+     "cycle_seconds_tangent": 52.055,
+     "engine_seconds": 0.0018
+    }
+   },
+   "toolpath": {
+    "moves": 90,
+    "cycle_seconds_exact_stop": 52.116,
+    "cycle_seconds_tangent": 52.055,
+    "posted_blocks": 113,
+    "post_error": null,
+    "removed_mm3": [
+     582.121,
+     1264.376
+    ],
+    "material": null
+   },
+   "engine": {
+    "run_seconds": 0.0075,
+    "first_move_seconds": 0.0061,
+    "post_seconds": 0.004,
+    "repeats": 3,
+    "engagement_measure_seconds": null,
+    "peak_rss_kib": {
+     "python": 47600.0,
+     "native": 5392.0
+    }
+   }
   }
  ],
  "failures": {},
