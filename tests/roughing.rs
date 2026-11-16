@@ -5326,3 +5326,53 @@ fn engagement_front_travel_clearance_keeps_lowered_rapids_above_a_clamp() {
         );
     }
 }
+
+#[test]
+fn bounded_front_on_large_blank_keeps_independent_pocket_engagement_and_stock_checks() {
+    let mut value: serde_json::Value = serde_json::from_str(include_str!(
+        "../fixtures/operations/adaptive-pocket.json"
+    )).unwrap();
+    value["stock"]["min_mm"] = serde_json::json!([0., 0., 0.]);
+    value["stock"]["max_mm"] = serde_json::json!([1000., 1000., 10.]);
+    value["stock"]["cell_size_mm"] = 5.into();
+    value["operations"][0]["floor_z_mm"] = 9.into();
+    value["operations"][0]["stepdown_mm"] = 1.into();
+    let m: StreamManifest = serde_json::from_value(value).unwrap();
+    m.validate().unwrap();
+    let prepared = m.tools[0].prepare().unwrap();
+    let mut stock = Stock::new(m.stock.height().unwrap().clone()).unwrap();
+    let mut plan = OperationPlan::prepare_with_stock(m.operations[0].clone(), &m.tools[0], &stock,
+        m.initial_position_mm, 1, &|| false).unwrap();
+    let mut leading = LeadingOracle::new(2., [[0., 0.], [1000., 1000.]]);
+    let (mut moves, mut cuts) = (0, 0);
+    while let Some(motion) = plan.next_motion_with_stock(&stock, &|| false).unwrap() {
+        moves += 1;
+        assert!(moves < 2000);
+        let c = &motion.curve;
+        for i in 0..=32 {
+            let p = position(c, i as f64 / 32.);
+            assert!(p[2] >= 9. - 1e-9, "below the analytic floor: {p:?}");
+            if p[2] < 10. - 1e-9 {
+                for j in 0..72 {
+                    let a = TAU * j as f64 / 72.;
+                    let (x, y) = (p[0] + 2. * a.cos(), p[1] + 2. * a.sin());
+                    assert!(x >= 3. - 1e-4 && y >= 3. - 1e-4 && x <= 23. + 1e-4 && y <= 23. + 1e-4
+                        && (x <= 11. + 1e-4 || y <= 11. + 1e-4), "outside the analytic L cavity: {x}, {y}");
+                }
+            }
+        }
+        if c.start()[2] <= 9. + 1e-9 && c.end()[2] <= 9. + 1e-9 && motion.kind != MoveKind::Rapid {
+            let check = matches!(motion.kind, MoveKind::Cut | MoveKind::Link);
+            cuts += usize::from(check);
+            leading.feed(c, check);
+        }
+        let delta = stock.preview_sweep(&prepared, &motion, 1., m.sweep, &|| false).unwrap();
+        stock.apply_delta(&delta).unwrap();
+    }
+    assert!(cuts > 10);
+    let limit = (1f64 - 1.5 / 2.).acos().to_degrees();
+    assert!(leading.worst_deg <= limit + 5., "{} > {limit} + 5 degree sampling slack", leading.worst_deg);
+    let report = serde_json::to_value(plan.report()).unwrap();
+    assert_eq!(report["completed_layers"], 1);
+    assert!(report["layers"][0]["clearing"]["certified_strokes"].as_u64().unwrap() > 0);
+}

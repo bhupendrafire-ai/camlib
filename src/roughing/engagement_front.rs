@@ -6515,4 +6515,115 @@ mod tests {
         }
         assert!(floor(f64::NAN).is_nan() && ceil(f64::NAN).is_nan());
     }
+
+    fn bounded_grid_plan(
+        side: f64,
+        vertices: Option<serde_json::Value>,
+    ) -> (EngagementFrontPlan, Stock) {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../fixtures/operations/adaptive-pocket.json"
+        ))
+        .unwrap();
+        value["stock"]["min_mm"] = serde_json::json!([0., 0., 0.]);
+        value["stock"]["max_mm"] = serde_json::json!([side, side, 10.]);
+        value["stock"]["cell_size_mm"] = 5.into();
+        if let Some(vertices) = vertices {
+            value["operations"][0]["region"]["components"][0]["outer"]["vertices"] = vertices;
+        }
+        let m: crate::stream::StreamManifest = serde_json::from_value(value).unwrap();
+        let crate::pocket::Operation::AdaptivePocket(op) = m.operations[0].clone() else {
+            panic!("fixture changed")
+        };
+        let mut op = op.pocket;
+        op.entry = Some(PocketEntry::StockEdgeOrHelix(
+            crate::entry::HelicalEntry::default(),
+        ));
+        let spec = m.stock.height().unwrap();
+        let plan = EngagementFrontPlan::prepare(
+            op,
+            &m.tools[0],
+            spec,
+            m.initial_position_mm,
+            1.5,
+            true,
+            &|| false,
+        )
+        .unwrap();
+        (plan, Stock::new(spec.clone()).unwrap())
+    }
+
+    #[test]
+    fn bounded_steering_grid_keeps_fitting_grids_exactly_and_large_stock_resolution() {
+        let (mut small, stock) = bounded_grid_plan(25., None);
+        let g = small.grid_for(&stock).unwrap();
+        let c = stock.cell_widths_mm()[0] / (stock.cell_widths_mm()[0] / 0.1).ceil();
+        let margin = 3. * small.r + small.op.radial_allowance_mm + 24. * c;
+        let x0 = -(margin / c).ceil() * c;
+        let n = ((25. + margin - x0) / c).ceil() as usize;
+        assert_eq!(
+            g,
+            Grid {
+                x0,
+                y0: x0,
+                c,
+                nx: n,
+                ny: n
+            }
+        );
+        assert!(
+            !small
+                .report
+                .diagnostics
+                .iter()
+                .any(|s| s.contains("bounded to"))
+        );
+
+        let (mut large, stock) = bounded_grid_plan(1000., None);
+        let grid = large.grid_for(&stock).unwrap();
+        assert_eq!(grid.c, c);
+        assert!(grid.nx * grid.ny < 200_000);
+        let bounds = large.guides.source_region().bounds().unwrap();
+        for axis in 0..2 {
+            let origin = [grid.x0, grid.y0][axis];
+            let size = [grid.nx, grid.ny][axis];
+            assert!(origin <= bounds[axis] - margin);
+            assert!(origin + size as f64 * c >= bounds[axis + 2] + margin);
+            let index = (origin - x0) / c;
+            assert!((index - index.round()).abs() < 1e-9);
+        }
+        assert!(
+            large
+                .report
+                .diagnostics
+                .iter()
+                .any(|s| s.contains("unchanged"))
+        );
+    }
+
+    #[test]
+    fn bounded_steering_grid_encloses_arc_extrema_and_keeps_the_active_region_cap() {
+        // The two vertices have x=10; the semicircles reach x=0 and x=20.
+        let (mut circle, stock) = bounded_grid_plan(
+            1000.,
+            Some(serde_json::json!([[10., 0., 1.], [10., 20., 1.]])),
+        );
+        let g = circle.grid_for(&stock).unwrap();
+        let margin = 3. * circle.r + circle.op.radial_allowance_mm + 24. * g.c;
+        assert!(g.x0 <= -margin && g.x0 + g.nx as f64 * g.c >= 20. + margin);
+        let (mut whole, stock) = bounded_grid_plan(
+            1000.,
+            Some(serde_json::json!([
+                [0., 0., 0.],
+                [1000., 0., 0.],
+                [1000., 1000., 0.],
+                [0., 1000., 0.]
+            ])),
+        );
+        assert!(
+            whole
+                .grid_for(&stock)
+                .unwrap_err()
+                .contains("exceeds 64M even when bounded")
+        );
+    }
 }
