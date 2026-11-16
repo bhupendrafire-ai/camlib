@@ -146,7 +146,8 @@ impl<'a> Pairs<'a> {
         });
         self.push(
             x.max_radius.min(y.max_radius),
-            d[0].hypot(d[1]),
+            // Same length as `distance`: a lower bound in that metric, not libm hypot.
+            (d[0] * d[0] + d[1] * d[1]).sqrt(),
             Kind::Boxes(a, b),
         )
     }
@@ -217,6 +218,26 @@ impl<'a> Pairs<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn box_distance_is_a_lower_bound_for_the_endpoint_ordering_key() {
+        let critical = super::super::tests::competing_bridge_points()[2];
+        // Two leaf boxes, each containing coincident endpoints. Their gap is
+        // exactly the #245 separation, so the box bound must not exceed the
+        // endpoint key by even one ulp or best-first ordering can skip a pair.
+        let points: Vec<_> = (0..16)
+            .map(|i| if i < 8 { [0., 0.] } else { critical })
+            .collect();
+        let radii = vec![1.; points.len()];
+        let mut groups = Groups::new(points.len());
+        let mut search = Pairs::new(&points, &radii, &mut groups, &|| false).unwrap();
+        let [a, b] = search.nodes[0].children.unwrap();
+        search.heap.clear();
+        search.boxes(a, b).unwrap();
+        let bound = search.heap.pop().unwrap().distance;
+        assert_eq!(bound.to_bits(), 4630074070701655572);
+        assert!(bound <= distance(points[0], points[8]));
+    }
+
     #[test]
     fn lazy_pairs_match_every_brute_force_pair_and_priority() {
         let points: Vec<_> = (0..137)

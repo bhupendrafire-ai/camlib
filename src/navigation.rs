@@ -9,9 +9,31 @@ mod pairs;
 /// Above this many candidate pairs, pairs are searched lazily (performance
 /// threshold, not a limit).
 const MAX_PAIRS: usize = 2_000_000;
+/// Separation used to order candidate bridges.
+///
+/// Use the same sequence of rounded operations on every platform. Rust's
+/// `f64::hypot` has platform-dependent precision, while `sqrt` is correctly
+/// rounded: <https://doc.rust-lang.org/std/primitive.f64.html#method.sqrt>
+/// and <https://doc.rust-lang.org/std/primitive.f64.html#method.hypot>.
+/// This is a reproducible ordering key, not a more accurate Euclidean norm:
+/// the products and sum round before the square root. In #245, a one-ulp
+/// difference changes which bridge links the fine-mesh roughing passes.
 fn distance(a: Point, b: Point) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    (dx * dx + dy * dy).sqrt()
 }
+
+/// (preferred radius, distance, node a, node b). Larger radius first, then
+/// the shorter distance, then the node indices. `graph` sorts with this
+/// before it accepts a bridge.
+fn bridge_cmp(a: &(f64, f64, usize, usize), b: &(f64, f64, usize, usize)) -> std::cmp::Ordering {
+    b.0.total_cmp(&a.0)
+        .then(a.1.total_cmp(&b.1))
+        .then(a.2.cmp(&b.2))
+        .then(a.3.cmp(&b.3))
+}
+
 struct Groups {
     parent: Vec<usize>,
     count: usize,
@@ -126,12 +148,7 @@ pub(crate) fn graph(
                 }
             }
         }
-        candidates.sort_unstable_by(|a, b| {
-            b.0.total_cmp(&a.0)
-                .then(a.1.total_cmp(&b.1))
-                .then(a.2.cmp(&b.2))
-                .then(a.3.cmp(&b.3))
-        });
+        candidates.sort_unstable_by(bridge_cmp);
     }
     let mut candidates = candidates.into_iter();
     let (mut links, mut work) = (0, starting_work);
@@ -235,4 +252,104 @@ pub(crate) fn graph(
         }
     }
     Ok(GuideGraph { tours, links, work })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The diagonal separation is from #245's fine-mesh workload. Its rounded
+    // products/sum/sqrt give bits 4630074070701655572; glibc hypot gives the
+    // next value up (and is the correctly rounded Euclidean norm here).
+    // The axis-aligned competitor has exactly the former length. Constants
+    // keep the expected bridge independent of the host's libm.
+    pub(super) fn competing_bridge_points() -> [Point; 4] {
+        [
+            [0., 0.],
+            [-100., 0.],
+            [
+                f64::from_bits(4629828858962157920),
+                f64::from_bits(4622297698970182392),
+            ],
+            [f64::from_bits(4630074070701655572), 0.],
+        ]
+    }
+
+    #[test]
+    fn graph_links_the_reproducible_bridge_between_real_strokes() {
+        use crate::{planar::Boundary, pocket::Operation, stream::StreamManifest};
+        let manifest: StreamManifest =
+            serde_json::from_str(include_str!("../fixtures/operations/adaptive-pocket.json"))
+                .unwrap();
+        let Operation::AdaptivePocket(op) = manifest.operations[0].clone() else {
+            panic!("adaptive fixture")
+        };
+        let mut pocket = op.pocket;
+        pocket.region.components[0].outer = Boundary {
+            vertices: vec![
+                [-110., -10., 0.],
+                [50., -10., 0.],
+                [50., 25., 0.],
+                [-110., 25., 0.],
+            ],
+        };
+        pocket.region.components[0].holes.clear();
+        let mut stock = manifest.stock.height().unwrap().clone();
+        stock.min_mm = [-115., -15., 0.];
+        stock.max_mm = [55., 30., 10.];
+        let guides = PocketPlan::prepare_region_guides(
+            pocket,
+            &manifest.tools[0],
+            &stock,
+            manifest.initial_position_mm,
+            1,
+            &|| false,
+        )
+        .unwrap();
+        let points = competing_bridge_points();
+        let result = graph(
+            &guides,
+            vec![
+                (Stroke::line(points[0], points[1]), 1., 1.),
+                (Stroke::line(points[2], points[3]), 1., 1.),
+            ],
+            GraphOptions {
+                bridge_radius: 1.,
+                cutter_radius: 2.,
+                coverage: 1.,
+                local_sizing: false,
+                starting_work: 0,
+            },
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(result.links, 1);
+        assert_eq!(result.tours.len(), 1);
+        let bridges: Vec<_> = result.tours[0].iter().filter(|s| s.edge >= 2).collect();
+        assert!(!bridges.is_empty());
+        for bridge in bridges {
+            let s = bridge.stroke;
+            assert!(
+                (s.a == points[0] && s.b == points[2]) || (s.a == points[2] && s.b == points[0]),
+                "unexpected bridge: {:?} -> {:?}",
+                s.a,
+                s.b
+            );
+        }
+    }
+
+    #[test]
+    fn lazy_search_selects_the_reproducible_bridge() {
+        let points = competing_bridge_points();
+        let mut groups = Groups::new(points.len());
+        groups.join(0, 1);
+        groups.join(2, 3);
+        let radii = [1.; 4];
+        let mut search = pairs::Pairs::new(&points, &radii, &mut groups, &|| false).unwrap();
+        let (_, length, a, b) = search.next(&mut groups, &|| false).unwrap().unwrap();
+        assert_eq!((a, b), (0, 2));
+        assert_eq!(length.to_bits(), 4630074070701655572);
+        groups.join(a, b);
+        assert!(search.next(&mut groups, &|| false).unwrap().is_none());
+    }
 }

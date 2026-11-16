@@ -315,6 +315,12 @@ replay of the decoded program.
 - The same inputs give the same toolpaths. The benchmark (`bench/`) runs from
   frozen geometry, and CI fails when a run's toolpath data differs from the
   committed baseline (`bench/results/baseline.json`), on any machine.
+- The shared guide graph orders bridge distances with separately rounded
+  products, sum and square root; its lazy search uses the same calculation
+  for box bounds. This avoids platform-dependent `hypot` results deciding
+  which passes are linked. It is an ordering convention, not an accuracy
+  improvement. Other platform-dependent planning comparisons and material
+  interval differences remain tracked in #245.
 
 ## What is proven and what is not
 
