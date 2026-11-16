@@ -55,6 +55,7 @@ fn commit(stock: &mut Stock, m: &Motion) {
 fn ordering(max_work: usize) -> camlib::ordering::HoleOrdering {
     use camlib::dynamics::{JunctionMode, Policy, Settings};
     camlib::ordering::HoleOrdering {
+        nearest_neighbor: false,
         settings: Settings {
             policy: Policy {
                 tangential_accel_mm_s2: 100.,
@@ -1229,4 +1230,34 @@ fn oriented_shift_is_certified_only_inside_its_own_bore() {
         ),
         Status::Clear
     );
+}
+
+
+#[test]
+fn multistart_drilling_preserves_actual_cuts_stock_and_final_pose() {
+    let run=|nearest| {
+        let mut manifest=fixture();
+        let spec=manifest.stock.height_mut().unwrap();
+        spec.max_mm=[100.,100.,10.]; spec.cell_size_mm=0.5;
+        let mut op=drilling();
+        op.centers_mm=vec![[46.,62.],[38.,86.],[38.,30.],[62.,70.],[14.,54.],
+            [94.,46.],[70.,38.],[22.,6.],[62.,38.]];
+        let mut settings=ordering(100_000); settings.nearest_neighbor=nearest; op.ordering=Some(settings);
+        let cancel=AtomicBool::new(false);
+        let mut plan=DrillingPlan::prepare(op,&manifest.tools[0],manifest.stock.height().unwrap(),manifest.initial_position_mm,1,&cancel).unwrap();
+        let mut stock=Stock::new(manifest.stock.height().unwrap().clone()).unwrap();
+        let mut moves=Vec::new();
+        while let Some(m)=plan.next_motion_with_stock(&stock,&cancel).unwrap() { commit(&mut stock,&m); moves.push(m); }
+        plan.finish_report(&cancel).unwrap();
+        (plan,stock,moves)
+    };
+    let (old,a,am)=run(false); let (new,b,bm)=run(true);
+    let old=old.report(); let new=new.report();
+    assert!(new.ordering.as_ref().unwrap().ordered_seconds < 0.95*old.ordering.as_ref().unwrap().ordered_seconds);
+    assert_eq!(old.cut_pecks,new.cut_pecks); assert_eq!(old.completed_holes,new.completed_holes);
+    assert_eq!(am.last().unwrap().curve.end(),bm.last().unwrap().curve.end());
+    for (a,b) in a.cells().iter().zip(b.cells()) { assert_eq!((a.lower_mm,a.upper_mm),(b.lower_mm,b.upper_mm)); }
+    let cuts=|moves: &[Motion]| { let mut values:Vec<_>=moves.iter().filter(|m| !m.kind.is_rapid()).map(|m|serde_json::to_string(&(m.kind,&m.curve,m.feed_mm_min)).unwrap()).collect();values.sort();values };
+    assert_eq!(cuts(&am),cuts(&bm));
+    for m in bm.iter().filter(|m|m.kind.is_rapid() && m.curve.start()[..2]!=m.curve.end()[..2]) { assert!(m.curve.start()[2]>=12. && m.curve.end()[2]>=12.); }
 }

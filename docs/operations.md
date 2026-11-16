@@ -911,6 +911,22 @@ cancellation refuses without publishing a result. This is a heuristic nominal
 time estimate, not a global optimum, controller timing or a clearance proof.
 All existing stock, fixture, machine and decoded-output checks still run.
 
+Set `HoleOrdering(machine, max_work=100_000, nearest_neighbor=True)` to try an
+additional nearest-neighbour starting route. The existing 2-opt result is fully
+scored first and retained unless this complete additional route, improved with
+the same 2-opt search, scores strictly lower. Both searches share `max_work`;
+the extra seed does not take work away from the baseline. Ties choose the first
+unused original index, including coincident hole occurrences; the original
+last index stays fixed. The optional `ordering.nearest_neighbor` report gives
+`baseline_seconds`, `seed_seconds`, `optimized_seconds` and a `status` of
+`selected`, `not_better`, `insufficient_budget` or `not_applicable` (under three
+holes). Insufficient remaining work returns the complete baseline with null
+seed scores and sets `work_limit_reached`; no partial seed is returned.
+
+This deterministic multi-start heuristic follows Rosenkrantz, Stearns and Lewis,
+[An Analysis of Several Heuristics for the Traveling Salesman Problem](https://doi.org/10.1137/0206041)
+(1977). It supplies no global-optimality or machine-clearance guarantee.
+
 Reference: G. A. Croes, [A Method for Solving Traveling-Salesman Problems](https://doi.org/10.1287/opre.6.6.791)
 (1958); the fixed-endpoint 2-opt slice requested in #23/#29. General pass-order
 optimization remains separate work.

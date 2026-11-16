@@ -119,3 +119,64 @@ class HoleOrderingTest(unittest.TestCase):
             source.compile().setup("top").provenance[0]["input_digest"],
             ordered.compile().setup("top").provenance[0]["input_digest"],
         )
+
+
+class NearestNeighborTest(unittest.TestCase):
+    def test_multistart_native_stock_post_budget_and_definition_identity(self):
+        source, _, machine = fixture()
+        setup = source.setups[0]
+        centers = ((46, 62), (38, 86), (38, 30), (62, 70), (14, 54), (94, 46), (70, 38), (22, 6), (62, 38))
+        operation = replace(setup.operations[0].operation, centers_mm=centers)
+        setup = replace(setup, stock=StockSpec((0, 0, 0), (100, 100, 10), 0.5))
+
+        def build(nearest, budget=100_000):
+            op = replace(operation, ordering=HoleOrdering(machine, budget, nearest_neighbor=nearest))
+            return replace(source, setups=(replace(setup, operations=(OperationNode(op, sources=()),)),))
+
+        baseline, candidate = build(False), build(True)
+        old, old_stock, before = run(baseline)
+        new, new_stock, after = run(candidate)
+        a, b = before["ordering"], after["ordering"]
+        self.assertLess(b["ordered_seconds"], 0.95 * a["ordered_seconds"])
+        self.assertEqual(b["nearest_neighbor"]["baseline_seconds"], a["ordered_seconds"])
+        self.assertEqual(b["nearest_neighbor"]["status"], "selected")
+        self.assertLessEqual(b["work"], 100_000)
+        self.assertEqual(sorted(b["order"]), list(range(9)))
+        self.assertEqual(b["order"][-1], 8)
+        self.assertEqual(old_stock, new_stock)
+        self.assertEqual(old[-1]["curve"]["end"], new[-1]["curve"]["end"])
+
+        def cuts(moves):
+            return sorted(
+                json.dumps({k: m[k] for k in ("curve", "kind", "feed_mm_min")}, sort_keys=True)
+                for m in moves
+                if m["kind"] != "rapid"
+            )
+
+        self.assertEqual(cuts(old), cuts(new))
+        for motion in new:
+            curve = motion["curve"]
+            if motion["kind"] == "rapid" and curve["start"][:2] != curve["end"][:2]:
+                self.assertGreaterEqual(min(curve["start"][2], curve["end"][2]), 12)
+        self.assertNotEqual(
+            baseline.compile().setup("top").provenance[0]["input_digest"],
+            candidate.compile().setup("top").provenance[0]["input_digest"],
+        )
+        _, _, limited = run(build(True, 36))
+        self.assertEqual(limited["ordering"]["nearest_neighbor"]["status"], "insufficient_budget")
+        with candidate.post("top", machine=machine) as posted:
+            posted.wait()
+            self.assertIsNone(posted.status()["error"])
+            self.assertTrue(posted.posting_status()["finished"])
+            self.assertEqual(posted.posting_status()["checked_motions"], posted.status()["available"])
+            for i in range(posted.status()["available"]):
+                self.assertTrue(posted.posted_motion(i)["stock_committed"])
+            with TemporaryDirectory(prefix="nearest checked refusal ") as folder:
+                path = Path(folder) / "holes.nc"
+                with self.assertRaisesRegex(ExportRefused, "machine"):
+                    posted.export(path)
+                self.assertFalse(path.exists())
+        self.assertNotIn("nearest_neighbor", HoleOrdering(machine, 100).to_dict())
+        for value in (1, "yes", None):
+            with self.assertRaisesRegex(ValueError, "boolean"):
+                HoleOrdering(machine, 100, nearest_neighbor=value).to_dict()

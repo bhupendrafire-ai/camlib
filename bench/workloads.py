@@ -83,6 +83,30 @@ def _drilling_order(optimized):
     return build
 
 
+def _drilling_multistart(nearest):
+    """Matched hard-pattern control: baseline 2-opt versus its extra seed."""
+
+    def build():
+        from camlib import HoleOrdering, OperationNode, StockSpec
+        from camlib.dynamics import MotionPolicy
+        from test_hole_ordering import fixture
+
+        given, _, machine = fixture()
+        machine = replace(machine, motion_policy=MotionPolicy(1000, 6000))
+        setup = given.setups[0]
+        operation = replace(
+            setup.operations[0].operation,
+            centers_mm=((46, 62), (38, 86), (38, 30), (62, 70), (14, 54), (94, 46), (70, 38), (22, 6), (62, 38)),
+            ordering=HoleOrdering(machine, 100_000, nearest_neighbor=nearest),
+        )
+        setup = replace(
+            setup, stock=StockSpec((0, 0, 0), (100, 100, 10), 0.5), operations=(OperationNode(operation, sources=()),)
+        )
+        return _options(replace(given, setups=(setup,)))
+
+    return build
+
+
 def _drilling_cycle(*, r_plane=False, decreasing=False, canned=False):
     """Matched declared drilling controls; keep scene/stock proofs in every variant."""
 
@@ -869,6 +893,20 @@ WORKLOADS = (
         "Same six-hole pattern with bounded dynamics-aware 2-opt",
         {"holes": ("Drilling", 29)},
         _drilling_order(True),
+    ),
+    Workload(
+        "drilling-multistart-baseline",
+        "mill",
+        "Nine-hole baseline 2-opt with fixed final hole",
+        {"holes": ("Drilling", 29)},
+        _drilling_multistart(False),
+    ),
+    Workload(
+        "drilling-multistart-nearest",
+        "mill",
+        "Same nine-hole pattern with bounded nearest-neighbour multi-start",
+        {"holes": ("Drilling", 29)},
+        _drilling_multistart(True),
     ),
     Workload(
         "drilling-clearance-pecks",

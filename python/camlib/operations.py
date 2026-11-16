@@ -1022,6 +1022,7 @@ class HoleOrdering:
 
     machine: object
     max_work: int
+    nearest_neighbor: bool = field(default=False, kw_only=True)
 
     def to_dict(self):
         from .dynamics import MotionPolicy, _settings
@@ -1030,7 +1031,12 @@ class HoleOrdering:
             raise ValueError("hole ordering requires an explicit Machine.motion_policy")
         if type(self.max_work) is not int or self.max_work <= 0:
             raise ValueError("hole ordering max_work must be a positive integer")
-        return {"settings": _settings(self.machine, False), "max_work": self.max_work}
+        if type(self.nearest_neighbor) is not bool:
+            raise ValueError("hole ordering nearest_neighbor must be a boolean")
+        result = {"settings": _settings(self.machine, False), "max_work": self.max_work}
+        if self.nearest_neighbor:
+            result["nearest_neighbor"] = True
+        return result
 
 
 @dataclass(frozen=True)
