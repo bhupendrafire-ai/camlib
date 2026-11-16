@@ -2553,22 +2553,51 @@ impl EngagementFrontPlan {
         Ok(())
     }
 
-    fn grid_for(&self, stock: &Stock) -> Result<Grid, String> {
+    fn grid_for(&mut self, stock: &Stock) -> Result<Grid, String> {
         let step = stock.cell_widths_mm();
         // Steering resolution: fine enough to resolve the target width.
         let want = (self.r / 20.).min(self.width / 5.);
         let c = step[0] / (step[0] / want).ceil();
         let margin = 3. * self.r + self.op.radial_allowance_mm + 24. * c;
-        let x0 = self.spec.min_mm[0] - (margin / c).ceil() * c;
-        let y0 = self.spec.min_mm[1] - (margin / c).ceil() * c;
-        let nx = ((self.spec.max_mm[0] + margin - x0) / c).ceil() as usize;
-        let ny = ((self.spec.max_mm[1] + margin - y0) / c).ceil() as usize;
-        crate::resources::check_memory((nx * ny) as u128 * 32, "engagement_front steering grid")?;
-        if nx * ny > 64_000_000 {
+        let mut x0 = self.spec.min_mm[0] - (margin / c).ceil() * c;
+        let mut y0 = self.spec.min_mm[1] - (margin / c).ceil() * c;
+        let mut nx = ((self.spec.max_mm[0] + margin - x0) / c).ceil() as usize;
+        let mut ny = ((self.spec.max_mm[1] + margin - y0) / c).ceil() as usize;
+        let cells = |nx: usize, ny: usize| nx as u128 * ny as u128;
+        // Keep every existing fitting grid unchanged. On a large blank, only
+        // the operation region can contain reachable material. Its exact
+        // prepared bounds include arcs; the same exterior margin keeps the
+        // grid border outside all region, cutter and steering queries (#193).
+        if cells(nx, ny) > 64_000_000 {
+            if let Some(bounds) = self.guides.source_region().bounds() {
+                let lo = [
+                    (((bounds[0] - margin - x0) / c).floor() - 1.).max(0.) as usize,
+                    (((bounds[1] - margin - y0) / c).floor() - 1.).max(0.) as usize,
+                ];
+                let hi = [
+                    (((bounds[2] + margin - x0) / c).ceil() + 1.).min(nx as f64) as usize,
+                    (((bounds[3] + margin - y0) / c).ceil() + 1.).min(ny as f64) as usize,
+                ];
+                // Integer offsets retain the stock-aligned fine lattice.
+                let cropped = [hi[0].saturating_sub(lo[0]), hi[1].saturating_sub(lo[1])];
+                if cropped[0] > 0 && cropped[1] > 0 && cells(cropped[0], cropped[1]) < cells(nx, ny)
+                {
+                    self.report.diagnostics.push(format!(
+                        "steering grid bounded to the operation region: {nx} x {ny} -> {} x {} cells at unchanged {c} mm resolution",
+                        cropped[0], cropped[1]
+                    ));
+                    x0 += lo[0] as f64 * c;
+                    y0 += lo[1] as f64 * c;
+                    [nx, ny] = cropped;
+                }
+            }
+        }
+        if cells(nx, ny) > 64_000_000 {
             return Err(format!(
-                "engagement_front steering grid of {nx} x {ny} cells exceeds 64M; use a larger tool or split the stock"
+                "engagement_front steering grid of {nx} x {ny} cells exceeds 64M even when bounded to the operation; use a larger tool or split the operation region"
             ));
         }
+        crate::resources::check_memory(cells(nx, ny) * 32, "engagement_front steering grid")?;
         Ok(Grid { x0, y0, c, nx, ny })
     }
 
