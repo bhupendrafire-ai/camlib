@@ -73,6 +73,62 @@ fn ordering(max_work: usize) -> camlib::ordering::HoleOrdering {
     }
 }
 
+fn preparation_fixture() -> StreamManifest {
+    use camlib::tool::CutterShape;
+    let mut m = fixture();
+    let mut final_op = drilling();
+    final_op.id = "final".into();
+    final_op.peck_mm = None;
+    let mut spot = final_op.clone();
+    spot.id = "spot".into();
+    spot.tool = "spot6".into();
+    spot.depth_z_mm = 10. - 1. / 75_f64.to_radians().tan();
+    let mut pilot = final_op.clone();
+    pilot.id = "pilot".into();
+    pilot.tool = "pilot2".into();
+    pilot.depth_z_mm = 8.5;
+    pilot.depth_reference = DepthReference::FullDiameter;
+    for (id, diameter, angle) in [("spot6", 6., 150_f64), ("pilot2", 2., 140_f64)] {
+        let mut t = m.tools[0].clone();
+        t.id = id.into();
+        t.cutter.diameter_mm = diameter;
+        t.cutter.shape = CutterShape::Drill { point_angle_rad: angle.to_radians() };
+        m.tools.push(t);
+    }
+    final_op.preparation = Some(DrillingPreparation { spot: Some("spot".into()), spot_diameter_mm: Some(2.), pilot: Some("pilot".into()) });
+    m.operations = vec![Operation::Drilling(spot), Operation::Drilling(pilot), Operation::Drilling(final_op)];
+    m
+}
+
+#[test]
+fn drilling_preparation_checks_source_geometry_coverage_order_and_cancel() {
+    let m = preparation_fixture();
+    let cancel = AtomicBool::new(false);
+    let report = preparation_report(&m, 2, &cancel).unwrap().unwrap();
+    assert_eq!(report.holes, drilling().centers_mm.len());
+    assert!((report.spot.unwrap().diameter_mm - 2.).abs() < 1e-12);
+    assert!((report.pilot.unwrap().full_diameter_depth_mm - 1.5).abs() < 1e-12);
+    assert!(preparation_report(&m, 2, &AtomicBool::new(true)).unwrap_err().contains("cancelled"));
+    let mut bad = m.clone();
+    bad.operations.swap(0, 1);
+    assert!(preparation_report(&bad, 2, &cancel).unwrap_err().contains("order"));
+    let mut bad = m.clone();
+    let Operation::Drilling(spot) = &mut bad.operations[0] else { unreachable!() };
+    spot.centers_mm.pop();
+    assert!(preparation_report(&bad, 2, &cancel).unwrap_err().contains("cover"));
+    let Operation::Drilling(final_op) = &m.operations[2] else { unreachable!() };
+    assert!(DrillingPlan::prepare(final_op.clone(), &m.tools[0], m.stock.height().unwrap(), m.initial_position_mm, 1, &cancel).err().unwrap().contains("run"));
+}
+
+#[test]
+fn drilling_preparation_no_metadata_default_and_duplicate_occurrences_are_not_skipped() {
+    assert!(serde_json::to_value(drilling()).unwrap().get("preparation").is_none());
+    let mut m = preparation_fixture();
+    let Operation::Drilling(final_op) = &mut m.operations[2] else { unreachable!() };
+    final_op.centers_mm.push(final_op.centers_mm[0]);
+    assert!(preparation_report(&m, 2, &AtomicBool::new(false)).unwrap_err().contains("duplicate"));
+}
+
 #[test]
 fn bounded_drilling_order_changes_only_clearance_travel_and_keeps_stock_and_exit() {
     let centers = vec![[34., 18.], [6., 6.], [34., 6.], [6., 18.], [20., 6.], [20., 18.]];

@@ -537,6 +537,13 @@ impl StreamManifest {
         if let Some(config) = &self.verification {
             config.validate(&self.operations)?;
         }
+        for index in 0..self.operations.len() {
+            crate::holes::preparation_report(
+                self,
+                index,
+                &std::sync::atomic::AtomicBool::new(false),
+            )?;
+        }
         if self
             .operations
             .iter()

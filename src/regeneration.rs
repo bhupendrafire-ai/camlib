@@ -232,6 +232,21 @@ impl Store {
             "tool":tool,"stock":m.stock,"before_stock":stock_digest(producer)?,"pose":producer.position(),
             "sweep":m.sweep,"native_clearance":clearance_dependency(producer.stock()?,op),
             "dependencies":self.options.dependencies.get(op.id())});
+        if matches!(op, Operation::Drilling(d) if d.preparation.is_some()) {
+            let index = m
+                .operations
+                .iter()
+                .position(|o| o.id() == op.id())
+                .ok_or("operation missing")?;
+            if let Some(report) = crate::holes::preparation_report(
+                m,
+                index,
+                &std::sync::atomic::AtomicBool::new(false),
+            )? {
+                inputs["drilling_preparation"] =
+                    serde_json::to_value(report).map_err(|e| e.to_string())?;
+            }
+        }
         if m.rapid_retracts {
             inputs["rapid_retracts"] = true.into();
         }
@@ -736,9 +751,9 @@ fn uncached<C: CancelSignal>(
             .iter()
             .find(|t| t.id == operation.tool())
             .ok_or("operation tool missing")?;
-        let mut plan = OperationPlan::prepare_with_stock(
-            operation.clone(),
-            tool,
+        let mut plan = OperationPlan::prepare_in_run(
+            &manifest,
+            index,
             producer.stock().unwrap(),
             producer.position(),
             producer
@@ -987,9 +1002,9 @@ fn cached<C: CancelSignal>(
             let mut plan = {
                 #[cfg(feature = "profile-planning")]
                 let _profile = crate::planning_profile::span("regeneration.plan.prepare");
-                OperationPlan::prepare_with_stock(
-                    op.clone(),
-                    &tool,
+                OperationPlan::prepare_in_run(
+                    producer.manifest(),
+                    index,
                     producer.stock()?,
                     producer.position(),
                     base.checked_add(1).ok_or("motion ID overflow")?,

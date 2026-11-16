@@ -50,6 +50,8 @@ _EXPORTS = {
             "DeburrBrokenEdge",
             "DeburrEdge",
             "Drilling",
+            "DrillingPreparation",
+            "DrillingSequence",
             "HoleOrdering",
             "PeckSchedule",
             "Bore",

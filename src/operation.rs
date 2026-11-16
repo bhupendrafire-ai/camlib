@@ -298,6 +298,35 @@ impl OperationPlan {
             other => Self::prepare(other, tool, stock.spec(), initial, first_id, cancel),
         }
     }
+    /// Resolve declared drilling dependencies from the complete source run.
+    pub(crate) fn prepare_in_run(
+        manifest: &crate::stream::StreamManifest,
+        index: usize,
+        stock: &Stock,
+        initial: Vec3,
+        first_id: u64,
+        cancel: &impl CancelSignal,
+    ) -> Result<Self, String> {
+        let mut op = manifest
+            .operations
+            .get(index)
+            .ok_or("operation index missing")?
+            .clone();
+        let report = crate::holes::preparation_report(manifest, index, cancel)?;
+        let tool = manifest
+            .tools
+            .iter()
+            .find(|t| t.id == op.tool())
+            .ok_or("operation tool missing")?;
+        if let Operation::Drilling(d) = &mut op {
+            d.preparation = None;
+        }
+        let mut plan = Self::prepare_with_stock(op, tool, stock, initial, first_id, cancel)?;
+        if let Self::Drilling(d) = &mut plan {
+            d.set_preparation_report(report);
+        }
+        Ok(plan)
+    }
     pub fn prepare(
         op: Operation,
         tool: &ToolAssembly,

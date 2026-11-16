@@ -10,7 +10,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::f64::consts::TAU;
 
+mod preparation;
 mod ream;
+pub use preparation::{DrillingPreparation, PreparationReport, preparation_report};
 mod tap;
 mod thread;
 pub use ream::{ReamingOperation, ReamingPlan, ReamingReport};
@@ -127,6 +129,8 @@ pub struct DrillingOperation {
     pub r_plane_travel: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peck_schedule: Option<PeckSchedule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<DrillingPreparation>,
     /// Containment and avoid areas (clamps, fixtures, features to leave alone).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<crate::limits::Limits>,
@@ -168,6 +172,8 @@ pub struct BoreOperation {
 }
 #[derive(Debug, Serialize)]
 pub struct DrillingReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<PreparationReport>,
     pub strategy: &'static str,
     pub geometric_residual_status: ResidualStatus,
     pub holes: usize,
@@ -470,6 +476,9 @@ impl DrillingPlan {
         first_id: u64,
         cancel: &impl CancelSignal,
     ) -> Result<Self, String> {
+        if op.preparation.is_some() {
+            return Err("drilling preparation requires the complete manifest-bound operation run; use Setup operations rather than preparing this drill in isolation".into());
+        }
         let tool = assembly.prepare()?;
         let cutter = tool.cutter();
         let def = cutter.definition();
@@ -623,6 +632,7 @@ impl DrillingPlan {
             return Err("drilling needs at least one peck".into());
         }
         let report = DrillingReport {
+            preparation: None,
             strategy: "drilling",
             geometric_residual_status: ResidualStatus::Pending,
             holes: core.centers.len(),
@@ -843,6 +853,9 @@ impl DrillingPlan {
     }
     pub fn report(&self) -> &DrillingReport {
         &self.report
+    }
+    pub(crate) fn set_preparation_report(&mut self, report: Option<PreparationReport>) {
+        self.report.preparation = report;
     }
     fn record_r_plane_link(&mut self, start: Vec3, end: Vec3, kind: MoveKind) {
         if kind.is_rapid()

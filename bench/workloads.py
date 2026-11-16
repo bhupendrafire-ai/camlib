@@ -103,6 +103,15 @@ def _drilling_cycle(*, r_plane=False, decreasing=False, canned=False):
     return build
 
 
+def _drilling_preparation(declared):
+    def build():
+        from test_drilling_preparation import job
+
+        return job(declared=declared).compile().setup("top").simulation_options()
+
+    return build
+
+
 def _solid(module, name="cadquery_target"):
     def target():
         shape = getattr(_support(module), name)()
@@ -721,6 +730,20 @@ def _lathe_face_groove():
 
 
 WORKLOADS = (
+    Workload(
+        "drilling-preparation-manual",
+        "holes",
+        "Explicit spot, pilot and final stages without preparation metadata",
+        {"spot": ("drilling", 29), "pilot": ("drilling", 29), "holes": ("drilling", 29)},
+        _drilling_preparation(False),
+    ),
+    Workload(
+        "drilling-preparation-bound",
+        "holes",
+        "The same stages with checked source-bound preparation",
+        {"spot": ("drilling", 29), "pilot": ("drilling", 29), "holes": ("drilling", 29)},
+        _drilling_preparation(True),
+    ),
     Workload("facing", "mill", "Face a 40 x 24 block 2 mm", {"face": ("Facing", 24)}, _facing, _solid("facing")),
     Workload(
         "pocket",

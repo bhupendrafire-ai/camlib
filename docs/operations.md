@@ -870,6 +870,10 @@ has no default.
 
 ## Drilling: `Drilling`
 
+For explicitly declared spot and smaller-pilot prerequisites, see
+[spot and pilot preparation](drilling-preparation.md). The sequence expands into
+ordinary drilling operations and retains every existing release check.
+
 ### Optional hole ordering
 
 Given center order is preserved by default. For a pattern with no precedence

@@ -5,7 +5,7 @@ center-cutting end mill. A native iterator plans all passes and feeds the stock
 stream directly; Python does not generate or transmit individual path edges.
 """
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import itertools
 import math
 
@@ -1056,6 +1056,34 @@ class PeckSchedule:
 
 
 @dataclass(frozen=True)
+class DrillingPreparation:
+    """Source operation IDs, checked by the native run before any motion.
+
+    Spot diameter is the requested circle at the stock top. Prerequisites
+    cover every final center; their own stock/scene/material checks still apply.
+    """
+
+    spot: str | None = None
+    spot_diameter_mm: float | None = None
+    pilot: str | None = None
+
+    def to_dict(self):
+        if (self.spot is None) != (self.spot_diameter_mm is None) or self.spot is None and self.pilot is None:
+            raise ValueError("preparation needs spot and/or pilot IDs and a diameter exactly when a spot is named")
+        for value in (self.spot, self.pilot):
+            if value is not None and (not isinstance(value, str) or not value or len(value) > 128):
+                raise ValueError("preparation IDs must be nonempty strings of at most 128 characters")
+        if self.spot_diameter_mm is not None and (
+            isinstance(self.spot_diameter_mm, bool)
+            or not isinstance(self.spot_diameter_mm, (int, float))
+            or not math.isfinite(self.spot_diameter_mm)
+            or self.spot_diameter_mm <= 0
+        ):
+            raise ValueError("spot_diameter_mm must be a finite positive diameter")
+        return {k: v for k, v in asdict(self).items() if v is not None}
+
+
+@dataclass(frozen=True)
 class Drilling:
     """Explicit axial moves; depth_z_mm is tip Z unless full_diameter is chosen."""
 
@@ -1092,6 +1120,7 @@ class Drilling:
     ordering: HoleOrdering | None = field(default=None, kw_only=True)
     r_plane_travel: bool = field(default=False, kw_only=True)
     peck_schedule: PeckSchedule | None = field(default=None, kw_only=True)
+    preparation: DrillingPreparation | None = field(default=None, kw_only=True)
 
     def __post_init__(self):
         object.__setattr__(self, "centers_mm", _freeze_hole_centers(self.centers_mm))
@@ -1115,7 +1144,57 @@ class Drilling:
             del result["peck_schedule"]
         else:
             result["peck_schedule"] = self.peck_schedule.to_dict()
+        if self.preparation is None:
+            del result["preparation"]
+        else:
+            result["preparation"] = self.preparation.to_dict()
         return result
+
+
+@dataclass(frozen=True)
+class DrillingSequence:
+    """Expand explicit stages into ordinary Setup operations, in dependency order.
+
+    Each stage supplies its own tool and cutting data. The native manifest
+    checks the geometry; this helper grants no clearance or entry shortcut.
+    """
+
+    drill: Drilling
+    spot: Drilling | None = None
+    pilot: Drilling | None = None
+    spot_diameter_mm: float | None = None
+
+    def operations(self):
+        stages = tuple(op for op in (self.spot, self.pilot, self.drill) if op is not None)
+        if any(not isinstance(op, Drilling) or op.preparation is not None for op in stages):
+            raise ValueError(
+                "DrillingSequence needs unbound Drilling stages; existing prerequisites must not be replaced"
+            )
+        if len({op.id for op in stages}) != len(stages):
+            raise ValueError("DrillingSequence stage IDs must be distinct")
+        preparation = DrillingPreparation(
+            spot=self.spot.id if self.spot else None,
+            spot_diameter_mm=self.spot_diameter_mm,
+            pilot=self.pilot.id if self.pilot else None,
+        )
+        preparation.to_dict()
+        result = []
+        if self.spot:
+            result.append(self.spot)
+        if self.pilot:
+            result.append(
+                replace(
+                    self.pilot,
+                    preparation=DrillingPreparation(
+                        spot=self.spot.id,
+                        spot_diameter_mm=self.spot_diameter_mm,
+                    ),
+                )
+                if self.spot
+                else self.pilot
+            )
+        result.append(replace(self.drill, preparation=preparation))
+        return tuple(result)
 
 
 @dataclass(frozen=True)
