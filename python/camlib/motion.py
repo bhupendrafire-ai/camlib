@@ -168,6 +168,21 @@ class BeamMark:
 
 
 @dataclass(frozen=True)
+class BeamStart:
+    """Plasma arc or laser beam on at ``power_percent`` where the material is
+    already open: beside the sheet's edge or over a kerf cut earlier (an edge
+    start). There is nothing to pierce: the controller must fire without
+    touching off the sheet and without a pierce height, where the beam
+    stands. ``Beam(0)`` turns it off. A post writes it only where its
+    controller documents such a start."""
+
+    power_percent: float
+
+    def to_dict(self):
+        return {"kind": "beam_start", "power_percent": self.power_percent}
+
+
+@dataclass(frozen=True)
 class HeightControl:
     """Torch height control on or off (while the beam is on)."""
 

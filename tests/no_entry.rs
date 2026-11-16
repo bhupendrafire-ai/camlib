@@ -555,9 +555,12 @@ fn no_pocket_strategy_plans_nothing_in_a_slot_the_cutter_fits() {
         }
         assert!(inside(named_point(&error), slot_rect(5.)), "{error}");
     }
-    // A helix radius that does not fit is refused the same way by the
-    // entry fit, for a Pocket and for the engagement front: what, where,
-    // what was tried, the options.
+    // A helix radius that does not fit is refused before any motion, naming
+    // what, where, what was tried and the options. The `Pocket` says it as
+    // its entry fit (#250); the engagement front lists the area itself,
+    // because it admits its own entries rather than being admitted by a
+    // guide plan it never cuts (#310) — the same facts, said by the planner
+    // that will do the work.
     for front in [false, true] {
         let wide = HelicalEntry {
             radius_mm: Some(0.75),
@@ -576,15 +579,27 @@ fn no_pocket_strategy_plans_nothing_in_a_slot_the_cutter_fits() {
         );
         let error = seen.error.unwrap();
         assert!(seen.motions.is_empty());
-        for part in [
-            "no source-admitted entry/route into area 0 of adaptive at (",
-            "tool centres within X",
-            "the cutter of radius 2 mm fits there",
-            "no helix of the entry's radii [0.75] mm fits",
-            "a circle of radius 2 + h mm clear of the walls",
-            "entry=RampEntry(angle_deg)",
-            "a smaller cutter",
-        ] {
+        let parts: &[&str] = if front {
+            &[
+                "no entry into the enclosed material of adaptive at (",
+                "tool centres within X",
+                "the cutter of radius 2 mm fits there",
+                "the entry's radii are [0.75] mm",
+                "entry=RampEntry(angle_deg)",
+                "a smaller cutter",
+            ]
+        } else {
+            &[
+                "no source-admitted entry/route into area 0 of adaptive at (",
+                "tool centres within X",
+                "the cutter of radius 2 mm fits there",
+                "no helix of the entry's radii [0.75] mm fits",
+                "a circle of radius 2 + h mm clear of the walls",
+                "entry=RampEntry(angle_deg)",
+                "a smaller cutter",
+            ]
+        };
+        for part in parts {
             assert!(error.contains(part), "{part:?} not in: {error}");
         }
         assert!(inside(named_point(&error), slot_rect(5.)), "{error}");
@@ -904,5 +919,114 @@ fn roughing_refuses_an_enclosed_slot_no_entry_fits() {
             None => assert!(cut(&seen, slot(NARROW)), "{clearing} left the slot"),
         }
         eprintln!("roughing {clearing}: {:?}", seen.error);
+    }
+}
+
+/// #310: whether an area can be entered is decided by the entry *policy*,
+/// not by whether a helix would geometrically fit. With
+/// `StockEdgeEntry(helix=None)` the enclosed slot's only way in is a helix
+/// the entry forbids: the layer lists it (`no_helix_allowed`) and leaves it,
+/// and the material the cutter does reach is cut. An operation whose only
+/// such area is all it was asked to cut still refuses before its first
+/// motion.
+#[test]
+fn roughing_lists_an_area_whose_only_entry_is_a_forbidden_helix() {
+    let front = || {
+        serde_json::json!({
+            "kind": "adaptive", "path_strategy": "engagement_front",
+            "max_radial_engagement_mm": 0.5, "orbit_radius_mm": null,
+            "min_orbit_radius_mm": null, "local_orbit_tolerance_mm": null,
+            "boundary_tolerance_mm": 0.01,
+        })
+    };
+    let stock_edge =
+        || serde_json::json!({"kind": "stock_edge", "angle_rad": 0.05235987755982989});
+    let slot = |width: f64| -> Rect { [[10., 14. - width / 2.], [22., 14. + width / 2.]] };
+    // 2.8 mm: no helix fits at all. 5 mm: a helix would fit, and the entry
+    // forbids it. Both are listed; both leave the rest to be cut.
+    for width in [2.8, 5.0] {
+        let m = roughing_from(1.5, front(), stock_edge(), width);
+        m.validate().unwrap();
+        let seen = run(&m, m.operations[0].clone());
+        assert_eq!(seen.error, None, "{width} mm: {:?}", seen.error);
+        assert!(
+            seen.motions
+                .iter()
+                .any(|motion| motion.kind == MoveKind::Cut),
+            "{width} mm made no cut: {}",
+            seen.report
+        );
+        // The strip of stock beside the plate was cut; the slot was not.
+        assert!(
+            cells_in(&seen.stock, [[0., 4.], [1.5, 24.]], 0.)
+                .iter()
+                .any(|cell| cell.upper_mm < TOP - 0.5),
+            "{width} mm left the strip standing: {}",
+            seen.report
+        );
+        assert!(
+            untouched(&seen.stock, slot(width)),
+            "{width} mm cut the enclosed slot: {}",
+            seen.report
+        );
+        // No cutting, leading or plunging move is inside the slot below the
+        // plate top: what is not entered is not worked in.
+        for motion in &seen.motions {
+            if matches!(
+                motion.kind,
+                MoveKind::Cut | MoveKind::Lead | MoveKind::Plunge
+            ) {
+                for end in [motion.curve.start(), motion.curve.end()] {
+                    assert!(
+                        !(inside([end[0], end[1]], slot(width)) && end[2] < TOP - 1e-6),
+                        "{:?} at Z{:.3} inside the slot",
+                        motion.kind,
+                        end[2]
+                    );
+                }
+            }
+        }
+        let layers = seen.report["layers"].as_array().unwrap();
+        assert_eq!(layers.len(), 2, "{}", seen.report);
+        for layer in layers {
+            let areas = layer["clearing"]["unentered_areas"].as_array().unwrap();
+            assert_eq!(areas.len(), 1, "{layer}");
+            assert_eq!(areas[0]["reason"], "no_helix_allowed", "{layer}");
+            let at = areas[0]["at_mm"].as_array().unwrap();
+            assert!(
+                inside(
+                    [at[0].as_f64().unwrap(), at[1].as_f64().unwrap()],
+                    slot(width)
+                ),
+                "{layer}"
+            );
+            // The area is in the layer's residual: it is reported left, not
+            // quietly skipped.
+            assert!(
+                layer["clearing"]["geometric_residual_area_mm2"]
+                    .as_f64()
+                    .unwrap()
+                    > 0.,
+                "{layer}"
+            );
+        }
+    }
+    // The same entries over a part that covers the whole stock: the slot is
+    // all there is to cut, and nothing was cut, so the operation refuses
+    // before its first motion.
+    for width in [2.8, 5.0] {
+        let m = roughing(front(), stock_edge(), width);
+        m.validate().unwrap();
+        let seen = run(&m, m.operations[0].clone());
+        let error = seen.error.expect("{width} mm was not refused");
+        assert!(seen.motions.is_empty(), "{width} mm moved: {}", seen.report);
+        for part in [
+            "no entry into the enclosed material of rough at (",
+            "the entry allows no helix",
+        ] {
+            assert!(error.contains(part), "{part:?} not in: {error}");
+        }
+        assert!(inside(named_point(&error), slot(width)), "{error}");
+        assert!(untouched(&seen.stock, slot(width)));
     }
 }

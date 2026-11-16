@@ -2000,6 +2000,33 @@ class SkeletonCutUp:
 
 
 @dataclass(frozen=True)
+class EdgeStarts:
+    """Edge starts in a ``ThermalCut``: a loop is started where the material
+    is already open, so nothing is pierced there. A loop's straight lead-in
+    is lengthened along its own line until its far end is open:
+    ``run_on_mm`` beyond the sheet's edge (the stock's box), or, with
+    ``from_kerfs``, on the centre line of a straight kerf cut earlier in the
+    operation. Of the loop's possible starts the one with the shortest such
+    lead is taken, when it is no longer than ``max_lead_mm`` and the lead is
+    proven clear of every part; otherwise the loop is pierced as usual. The
+    beam then fires at the cut height with no pierce height and no pierce
+    delay, pausing ``delay_s`` before it moves. There are no defaults for
+    the run-on or the lead. The report counts them (``edge_starts``) and
+    ``pierces`` drops by as many. A post writes such a start only where its
+    machine declares a code for it, and refuses otherwise."""
+
+    run_on_mm: float
+    max_lead_mm: float = field(kw_only=True)
+    from_kerfs: bool = False
+    delay_s: float = 0.0
+
+    def to_dict(self):
+        return dict(
+            run_on_mm=self.run_on_mm, max_lead_mm=self.max_lead_mm, from_kerfs=self.from_kerfs, delay_s=self.delay_s
+        )
+
+
+@dataclass(frozen=True)
 class ChainCutting:
     """Chain cutting in a ``ThermalCut``: the outlines of parts cut one after
     the other are joined by a straight cut through the scrap, from the end of
@@ -2156,6 +2183,7 @@ class ThermalCut:
     chain: ChainCutting | None = field(default=None, kw_only=True)
     bridges: Bridges | None = field(default=None, kw_only=True)
     skeleton: SkeletonCutUp | None = field(default=None, kw_only=True)
+    edge_starts: EdgeStarts | None = field(default=None, kw_only=True)
 
     def common_line_spacing_mm(self):
         """The gap between two parts whose facing edges are a common line:
@@ -2193,7 +2221,7 @@ class ThermalCut:
             result.pop("lead_placement")
         else:
             result["lead_placement"] = self.lead_placement.to_dict()
-        for name in ("corner_loops", "corner_slowdown", "chain", "bridges", "skeleton"):
+        for name in ("corner_loops", "corner_slowdown", "chain", "bridges", "skeleton", "edge_starts"):
             option = result.pop(name)
             if option is not None:
                 result[name] = option.to_dict()

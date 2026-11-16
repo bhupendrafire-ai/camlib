@@ -1,8 +1,8 @@
 {
- "label": "quiet",
+ "label": "wincnc-edge-starts",
  "environment": {
-  "cad": "CadQuery 2.9.0.dev0, OCP 8.0.1.1 (geometry from fixtures)",
-  "commit": "f2cc4996eab553ec55c866a88896881870585f43",
+  "cad": "CadQuery 2.8.0, OCP 7.9.3.1 (geometry from fixtures)",
+  "commit": "95f0dddb79d77b89947e3472e74cb9480221ad90",
   "dirty": false,
   "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
   "python": "3.12.13",
@@ -33,7 +33,7 @@
      "removed_mm3": 1919.99,
      "cycle_seconds_exact_stop": 47.132,
      "cycle_seconds_tangent": 47.132,
-     "engine_seconds": 0.0065
+     "engine_seconds": 0.0074
     }
    },
    "toolpath": {
@@ -68,13 +68,13 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0106,
-    "first_move_seconds": 0.0039,
-    "post_seconds": 0.004,
+    "run_seconds": 0.0125,
+    "first_move_seconds": 0.0047,
+    "post_seconds": 0.0033,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 395800.0,
+     "python": 492140.0,
      "native": 43348.0
     }
    }
@@ -97,7 +97,7 @@
      "removed_mm3": 8697.589,
      "cycle_seconds_exact_stop": 508.314,
      "cycle_seconds_tangent": 508.274,
-     "engine_seconds": 0.0469
+     "engine_seconds": 0.044
     }
    },
    "toolpath": {
@@ -132,14 +132,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0579,
-    "first_move_seconds": 0.011,
-    "post_seconds": 0.0241,
+    "run_seconds": 0.0539,
+    "first_move_seconds": 0.0115,
+    "post_seconds": 0.0312,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 55748.0,
-     "native": 48660.0
+     "python": 55780.0,
+     "native": 48364.0
     }
    }
   },
@@ -161,7 +161,7 @@
      "removed_mm3": 383.996,
      "cycle_seconds_exact_stop": 26.859,
      "cycle_seconds_tangent": 26.859,
-     "engine_seconds": 0.0019
+     "engine_seconds": 0.001
     },
     "pocket": {
      "toolpath": "Pocket",
@@ -176,7 +176,7 @@
      "removed_mm3": 124.0,
      "cycle_seconds_exact_stop": 16.66,
      "cycle_seconds_tangent": 16.66,
-     "engine_seconds": 0.0014
+     "engine_seconds": 0.0013
     },
     "rest": {
      "toolpath": "RestPocket",
@@ -191,7 +191,7 @@
      "removed_mm3": 2.0,
      "cycle_seconds_exact_stop": 26.343,
      "cycle_seconds_tangent": 26.103,
-     "engine_seconds": 0.0026
+     "engine_seconds": 0.0029
     }
    },
    "toolpath": {
@@ -226,13 +226,13 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0116,
-    "first_move_seconds": 0.0063,
-    "post_seconds": 0.0109,
+    "run_seconds": 0.0097,
+    "first_move_seconds": 0.0042,
+    "post_seconds": 0.013,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 401308.0,
+     "python": 496756.0,
      "native": 42944.0
     }
    }
@@ -255,7 +255,7 @@
      "removed_mm3": 472.318,
      "cycle_seconds_exact_stop": 144.295,
      "cycle_seconds_tangent": 143.979,
-     "engine_seconds": 0.4552,
+     "engine_seconds": 0.5272,
      "engagement": {
       "cut_mm": 539.664,
       "mean_deg": 49.21,
@@ -305,14 +305,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.4608,
-    "first_move_seconds": 0.0519,
-    "post_seconds": 4.3422,
+    "run_seconds": 0.5411,
+    "first_move_seconds": 0.059,
+    "post_seconds": 5.2183,
     "repeats": 3,
-    "engagement_measure_seconds": 1.843,
+    "engagement_measure_seconds": 2.667,
     "peak_rss_kib": {
-     "python": 418396.0,
-     "native": 396844.0
+     "python": 513884.0,
+     "native": 491780.0
     }
    }
   },
@@ -334,7 +334,7 @@
      "removed_mm3": 5803.069,
      "cycle_seconds_exact_stop": 7932.337,
      "cycle_seconds_tangent": 7931.572,
-     "engine_seconds": 0.0745
+     "engine_seconds": 0.0849
     }
    },
    "toolpath": {
@@ -369,14 +369,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.086,
-    "first_move_seconds": 0.0105,
-    "post_seconds": 0.225,
+    "run_seconds": 0.0967,
+    "first_move_seconds": 0.011,
+    "post_seconds": 0.2317,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 412332.0,
-     "native": 401524.0
+     "python": 509220.0,
+     "native": 496804.0
     }
    }
   },
@@ -398,7 +398,7 @@
      "removed_mm3": 5776.189,
      "cycle_seconds_exact_stop": 1439.817,
      "cycle_seconds_tangent": 1436.824,
-     "engine_seconds": 0.0597
+     "engine_seconds": 0.0576
     }
    },
    "toolpath": {
@@ -433,14 +433,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0786,
-    "first_move_seconds": 0.0212,
-    "post_seconds": 0.306,
+    "run_seconds": 0.0761,
+    "first_move_seconds": 0.0219,
+    "post_seconds": 0.3882,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 409064.0,
-     "native": 399920.0
+     "python": 505308.0,
+     "native": 495964.0
     }
    }
   },
@@ -462,7 +462,7 @@
      "removed_mm3": 5803.069,
      "cycle_seconds_exact_stop": 1808.3,
      "cycle_seconds_tangent": 1807.436,
-     "engine_seconds": 8.1097,
+     "engine_seconds": 8.8951,
      "engagement": {
       "cut_mm": 15453.555,
       "mean_deg": 35.95,
@@ -512,14 +512,14 @@
     }
    },
    "engine": {
-    "run_seconds": 8.1351,
-    "first_move_seconds": 1.6424,
-    "post_seconds": 48.211,
+    "run_seconds": 9.0685,
+    "first_move_seconds": 2.0613,
+    "post_seconds": 57.3833,
     "repeats": 3,
-    "engagement_measure_seconds": 34.613,
+    "engagement_measure_seconds": 40.256,
     "peak_rss_kib": {
-     "python": 463476.0,
-     "native": 422400.0
+     "python": 557908.0,
+     "native": 517068.0
     }
    }
   },
@@ -541,7 +541,7 @@
      "removed_mm3": 5422.985,
      "cycle_seconds_exact_stop": 554.341,
      "cycle_seconds_tangent": 531.423,
-     "engine_seconds": 0.123
+     "engine_seconds": 0.1552
     }
    },
    "toolpath": {
@@ -576,14 +576,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.3744,
-    "first_move_seconds": 0.2405,
-    "post_seconds": 12.7188,
+    "run_seconds": 0.409,
+    "first_move_seconds": 0.2636,
+    "post_seconds": 13.9592,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 430504.0,
-     "native": 418668.0
+     "python": 527008.0,
+     "native": 514208.0
     }
    }
   },
@@ -605,7 +605,7 @@
      "removed_mm3": 2191.997,
      "cycle_seconds_exact_stop": 55.776,
      "cycle_seconds_tangent": 55.696,
-     "engine_seconds": 0.0067
+     "engine_seconds": 0.0083
     }
    },
    "toolpath": {
@@ -640,14 +640,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0117,
-    "first_move_seconds": 0.0051,
-    "post_seconds": 0.0119,
+    "run_seconds": 0.0134,
+    "first_move_seconds": 0.0054,
+    "post_seconds": 0.0126,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 408772.0,
-     "native": 395508.0
+     "python": 504336.0,
+     "native": 490444.0
     }
    }
   },
@@ -669,7 +669,7 @@
      "removed_mm3": 110.953,
      "cycle_seconds_exact_stop": 11.779,
      "cycle_seconds_tangent": 11.765,
-     "engine_seconds": 0.0012
+     "engine_seconds": 0.0017
     },
     "finish-holes": {
      "toolpath": "Bore",
@@ -684,7 +684,7 @@
      "removed_mm3": 1177.365,
      "cycle_seconds_exact_stop": 39.176,
      "cycle_seconds_tangent": 39.176,
-     "engine_seconds": 0.0186
+     "engine_seconds": 0.0234
     }
    },
    "toolpath": {
@@ -719,14 +719,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0262,
-    "first_move_seconds": 0.0048,
-    "post_seconds": 0.0144,
+    "run_seconds": 0.0309,
+    "first_move_seconds": 0.0057,
+    "post_seconds": 0.021,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 408160.0,
-     "native": 399928.0
+     "python": 503260.0,
+     "native": 494684.0
     }
    }
   },
@@ -748,7 +748,7 @@
      "removed_mm3": 313.002,
      "cycle_seconds_exact_stop": 11.285,
      "cycle_seconds_tangent": 11.285,
-     "engine_seconds": 0.0025
+     "engine_seconds": 0.0027
     },
     "bore": {
      "toolpath": "Reaming",
@@ -763,7 +763,7 @@
      "removed_mm3": 18.72,
      "cycle_seconds_exact_stop": 17.374,
      "cycle_seconds_tangent": 17.374,
-     "engine_seconds": 0.0017
+     "engine_seconds": 0.0015
     }
    },
    "toolpath": {
@@ -779,14 +779,14 @@
     "material": null
    },
    "engine": {
-    "run_seconds": 0.0115,
-    "first_move_seconds": 0.0061,
+    "run_seconds": 0.0124,
+    "first_move_seconds": 0.007,
     "post_seconds": 0.0049,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 49688.0,
-     "native": 45600.0
+     "python": 49812.0,
+     "native": 45272.0
     }
    }
   },
@@ -808,7 +808,7 @@
      "removed_mm3": 313.002,
      "cycle_seconds_exact_stop": 11.285,
      "cycle_seconds_tangent": 11.285,
-     "engine_seconds": 0.0027
+     "engine_seconds": 0.0019
     },
     "tap": {
      "toolpath": "Tapping",
@@ -823,7 +823,7 @@
      "removed_mm3": 0.0,
      "cycle_seconds_exact_stop": 3.533,
      "cycle_seconds_tangent": 3.533,
-     "engine_seconds": 0.001
+     "engine_seconds": 0.0013
     }
    },
    "toolpath": {
@@ -839,14 +839,14 @@
     "material": null
    },
    "engine": {
-    "run_seconds": 0.0112,
-    "first_move_seconds": 0.0063,
-    "post_seconds": 0.0044,
+    "run_seconds": 0.0103,
+    "first_move_seconds": 0.0057,
+    "post_seconds": 0.0048,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 49632.0,
-     "native": 45288.0
+     "python": 50112.0,
+     "native": 45512.0
     }
    }
   },
@@ -868,7 +868,7 @@
      "removed_mm3": 660.719,
      "cycle_seconds_exact_stop": 19.564,
      "cycle_seconds_tangent": 19.564,
-     "engine_seconds": 0.045
+     "engine_seconds": 0.0451
     },
     "thread": {
      "toolpath": "ThreadMilling",
@@ -883,7 +883,7 @@
      "removed_mm3": 23.063,
      "cycle_seconds_exact_stop": 28.139,
      "cycle_seconds_tangent": 28.119,
-     "engine_seconds": 0.2842
+     "engine_seconds": 0.278
     }
    },
    "toolpath": {
@@ -899,14 +899,14 @@
     "material": null
    },
    "engine": {
-    "run_seconds": 0.3513,
-    "first_move_seconds": 0.0096,
-    "post_seconds": 0.0135,
+    "run_seconds": 0.3408,
+    "first_move_seconds": 0.0077,
+    "post_seconds": 0.0121,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 51012.0,
-     "native": 46892.0
+     "python": 51704.0,
+     "native": 47228.0
     }
    }
   },
@@ -928,7 +928,7 @@
      "removed_mm3": 268.999,
      "cycle_seconds_exact_stop": 125.416,
      "cycle_seconds_tangent": 121.949,
-     "engine_seconds": 0.0168
+     "engine_seconds": 0.0322
     }
    },
    "toolpath": {
@@ -963,14 +963,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0213,
-    "first_move_seconds": 0.004,
-    "post_seconds": 0.093,
+    "run_seconds": 0.0416,
+    "first_move_seconds": 0.0095,
+    "post_seconds": 0.0997,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 406376.0,
-     "native": 43564.0
+     "python": 502008.0,
+     "native": 42992.0
     }
    }
   },
@@ -992,7 +992,7 @@
      "removed_mm3": 2243.197,
      "cycle_seconds_exact_stop": 55.776,
      "cycle_seconds_tangent": 55.696,
-     "engine_seconds": 0.0106
+     "engine_seconds": 0.0162
     },
     "top-bevel": {
      "toolpath": "Chamfer",
@@ -1007,7 +1007,7 @@
      "removed_mm3": 37.366,
      "cycle_seconds_exact_stop": 10.934,
      "cycle_seconds_tangent": 10.914,
-     "engine_seconds": 0.0185
+     "engine_seconds": 0.0192
     }
    },
    "toolpath": {
@@ -1042,14 +1042,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0369,
-    "first_move_seconds": 0.0058,
-    "post_seconds": 0.0137,
+    "run_seconds": 0.052,
+    "first_move_seconds": 0.0076,
+    "post_seconds": 0.018,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 418452.0,
-     "native": 396160.0
+     "python": 514872.0,
+     "native": 492204.0
     }
    }
   },
@@ -1071,7 +1071,7 @@
      "removed_mm3": 169.686,
      "cycle_seconds_exact_stop": 15.517,
      "cycle_seconds_tangent": 15.517,
-     "engine_seconds": 0.0025
+     "engine_seconds": 0.0029
     }
    },
    "toolpath": {
@@ -1087,14 +1087,14 @@
     "material": null
    },
    "engine": {
-    "run_seconds": 0.0154,
-    "first_move_seconds": 0.0084,
-    "post_seconds": 0.0048,
+    "run_seconds": 0.0107,
+    "first_move_seconds": 0.007,
+    "post_seconds": 0.0072,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 47248.0,
-     "native": 43024.0
+     "python": 47372.0,
+     "native": 42892.0
     }
    }
   },
@@ -1116,7 +1116,7 @@
      "removed_mm3": 107.0,
      "cycle_seconds_exact_stop": 28.837,
      "cycle_seconds_tangent": 20.505,
-     "engine_seconds": 2.4981
+     "engine_seconds": 2.922
     }
    },
    "toolpath": {
@@ -1132,14 +1132,14 @@
     "material": null
    },
    "engine": {
-    "run_seconds": 2.5183,
-    "first_move_seconds": 0.02,
-    "post_seconds": 0.1247,
+    "run_seconds": 2.963,
+    "first_move_seconds": 0.0218,
+    "post_seconds": 0.1362,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 60652.0,
-     "native": 49988.0
+     "python": 60988.0,
+     "native": 49548.0
     }
    }
   },
@@ -1161,7 +1161,7 @@
      "removed_mm3": 36.021,
      "cycle_seconds_exact_stop": 190.983,
      "cycle_seconds_tangent": 190.983,
-     "engine_seconds": 0.0163
+     "engine_seconds": 0.0206
     }
    },
    "toolpath": {
@@ -1196,14 +1196,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0424,
-    "first_move_seconds": 0.0246,
-    "post_seconds": 0.0134,
+    "run_seconds": 0.0585,
+    "first_move_seconds": 0.0369,
+    "post_seconds": 0.0217,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 404732.0,
-     "native": 399556.0
+     "python": 499676.0,
+     "native": 494044.0
     }
    }
   },
@@ -1225,7 +1225,7 @@
      "removed_mm3": 1983.996,
      "cycle_seconds_exact_stop": 8900.337,
      "cycle_seconds_tangent": 8898.918,
-     "engine_seconds": 0.0616
+     "engine_seconds": 0.1052
     },
     "parallel": {
      "toolpath": "Parallel",
@@ -1240,7 +1240,7 @@
      "removed_mm3": 292.384,
      "cycle_seconds_exact_stop": 368.389,
      "cycle_seconds_tangent": 350.549,
-     "engine_seconds": 0.1398
+     "engine_seconds": 0.1946
     }
    },
    "toolpath": {
@@ -1275,14 +1275,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.2131,
-    "first_move_seconds": 0.0101,
-    "post_seconds": 0.5058,
+    "run_seconds": 0.3112,
+    "first_move_seconds": 0.0112,
+    "post_seconds": 0.6492,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 429164.0,
-     "native": 408192.0
+     "python": 523560.0,
+     "native": 502232.0
     }
    }
   },
@@ -1304,7 +1304,7 @@
      "removed_mm3": 1508.38,
      "cycle_seconds_exact_stop": 334.784,
      "cycle_seconds_tangent": 316.944,
-     "engine_seconds": 0.166
+     "engine_seconds": 0.175
     }
    },
    "toolpath": {
@@ -1339,14 +1339,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.1723,
-    "first_move_seconds": 0.0052,
-    "post_seconds": 0.2382,
+    "run_seconds": 0.1804,
+    "first_move_seconds": 0.0058,
+    "post_seconds": 0.2488,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 415112.0,
-     "native": 402020.0
+     "python": 513848.0,
+     "native": 497460.0
     }
    }
   },
@@ -1368,7 +1368,7 @@
      "removed_mm3": 22.971,
      "cycle_seconds_exact_stop": 225.916,
      "cycle_seconds_tangent": 225.546,
-     "engine_seconds": 0.0913
+     "engine_seconds": 0.1116
     }
    },
    "toolpath": {
@@ -1403,14 +1403,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.1119,
-    "first_move_seconds": 0.0206,
-    "post_seconds": 0.1763,
+    "run_seconds": 0.1345,
+    "first_move_seconds": 0.0232,
+    "post_seconds": 0.2023,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 414100.0,
-     "native": 403036.0
+     "python": 510208.0,
+     "native": 498560.0
     }
    }
   },
@@ -1432,7 +1432,7 @@
      "removed_mm3": 10.228,
      "cycle_seconds_exact_stop": 115.708,
      "cycle_seconds_tangent": 114.69,
-     "engine_seconds": 0.0503
+     "engine_seconds": 0.0755
     }
    },
    "toolpath": {
@@ -1467,14 +1467,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0752,
-    "first_move_seconds": 0.0253,
-    "post_seconds": 0.0462,
+    "run_seconds": 0.1095,
+    "first_move_seconds": 0.0267,
+    "post_seconds": 0.0697,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 405204.0,
-     "native": 398876.0
+     "python": 501128.0,
+     "native": 494728.0
     }
    }
   },
@@ -1496,7 +1496,7 @@
      "removed_mm3": 2.077,
      "cycle_seconds_exact_stop": 17.939,
      "cycle_seconds_tangent": 17.814,
-     "engine_seconds": 0.0142
+     "engine_seconds": 0.0176
     }
    },
    "toolpath": {
@@ -1531,14 +1531,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0361,
-    "first_move_seconds": 0.0213,
-    "post_seconds": 0.013,
+    "run_seconds": 0.042,
+    "first_move_seconds": 0.0254,
+    "post_seconds": 0.0197,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 402952.0,
-     "native": 397860.0
+     "python": 498316.0,
+     "native": 492556.0
     }
    }
   },
@@ -1560,7 +1560,7 @@
      "removed_mm3": 1238.639,
      "cycle_seconds_exact_stop": 151.464,
      "cycle_seconds_tangent": 149.804,
-     "engine_seconds": 0.1049
+     "engine_seconds": 0.1266
     }
    },
    "toolpath": {
@@ -1595,14 +1595,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.1104,
-    "first_move_seconds": 0.0082,
-    "post_seconds": 0.0295,
+    "run_seconds": 0.1326,
+    "first_move_seconds": 0.0067,
+    "post_seconds": 0.0306,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 403172.0,
-     "native": 396076.0
+     "python": 498664.0,
+     "native": 491240.0
     }
    }
   },
@@ -1624,7 +1624,7 @@
      "removed_mm3": 23.015,
      "cycle_seconds_exact_stop": 243.844,
      "cycle_seconds_tangent": 224.606,
-     "engine_seconds": 0.2581
+     "engine_seconds": 0.2419
     }
    },
    "toolpath": {
@@ -1659,14 +1659,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.3205,
-    "first_move_seconds": 0.0556,
-    "post_seconds": 0.2207,
+    "run_seconds": 0.2857,
+    "first_move_seconds": 0.0506,
+    "post_seconds": 0.2323,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 417184.0,
-     "native": 404584.0
+     "python": 514824.0,
+     "native": 499848.0
     }
    }
   },
@@ -1688,7 +1688,7 @@
      "removed_mm3": 24.354,
      "cycle_seconds_exact_stop": 131.096,
      "cycle_seconds_tangent": 127.936,
-     "engine_seconds": 0.2091
+     "engine_seconds": 0.2591
     }
    },
    "toolpath": {
@@ -1723,14 +1723,14 @@
     }
    },
    "engine": {
-    "run_seconds": 2.4645,
-    "first_move_seconds": 2.2418,
-    "post_seconds": 0.3627,
+    "run_seconds": 2.5183,
+    "first_move_seconds": 2.2602,
+    "post_seconds": 0.3553,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 428552.0,
-     "native": 409840.0
+     "python": 523228.0,
+     "native": 505632.0
     }
    }
   },
@@ -1752,7 +1752,7 @@
      "removed_mm3": 22.712,
      "cycle_seconds_exact_stop": 90.196,
      "cycle_seconds_tangent": 86.939,
-     "engine_seconds": 0.0941
+     "engine_seconds": 0.122
     }
    },
    "toolpath": {
@@ -1787,14 +1787,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.351,
-    "first_move_seconds": 0.2554,
-    "post_seconds": 0.0566,
+    "run_seconds": 0.4635,
+    "first_move_seconds": 0.3141,
+    "post_seconds": 0.0675,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 406412.0,
-     "native": 400084.0
+     "python": 502212.0,
+     "native": 495172.0
     }
    }
   },
@@ -1816,7 +1816,7 @@
      "removed_mm3": 3.438,
      "cycle_seconds_exact_stop": 9.383,
      "cycle_seconds_tangent": 9.353,
-     "engine_seconds": 0.2082
+     "engine_seconds": 0.2157
     }
    },
    "toolpath": {
@@ -1851,14 +1851,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.6232,
-    "first_move_seconds": 0.5724,
-    "post_seconds": 0.0064,
+    "run_seconds": 0.6643,
+    "first_move_seconds": 0.6102,
+    "post_seconds": 0.0063,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 411896.0,
-     "native": 409224.0
+     "python": 506892.0,
+     "native": 503940.0
     }
    }
   },
@@ -1880,7 +1880,7 @@
      "removed_mm3": 51.675,
      "cycle_seconds_exact_stop": 34.047,
      "cycle_seconds_tangent": 34.047,
-     "engine_seconds": 0.1336
+     "engine_seconds": 0.1939
     }
    },
    "toolpath": {
@@ -1915,14 +1915,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.1475,
-    "first_move_seconds": 0.1413,
-    "post_seconds": 0.0123,
+    "run_seconds": 0.214,
+    "first_move_seconds": 0.2068,
+    "post_seconds": 0.0125,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 409128.0,
-     "native": 403824.0
+     "python": 503860.0,
+     "native": 497972.0
     }
    }
   },
@@ -1944,7 +1944,7 @@
      "removed_mm3": 0.0,
      "cycle_seconds_exact_stop": 176.078,
      "cycle_seconds_tangent": 172.658,
-     "engine_seconds": 0.5365
+     "engine_seconds": 0.5226
     },
     "finish-shallow": {
      "toolpath": "Steep-and-shallow",
@@ -1959,7 +1959,7 @@
      "removed_mm3": 23.086,
      "cycle_seconds_exact_stop": 157.827,
      "cycle_seconds_tangent": 154.127,
-     "engine_seconds": 0.0908
+     "engine_seconds": 0.0853
     }
    },
    "toolpath": {
@@ -1994,14 +1994,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.6626,
-    "first_move_seconds": 0.5181,
-    "post_seconds": 0.1181,
+    "run_seconds": 0.643,
+    "first_move_seconds": 0.4858,
+    "post_seconds": 0.1327,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 409068.0,
-     "native": 401076.0
+     "python": 505560.0,
+     "native": 496600.0
     }
    }
   },
@@ -2023,7 +2023,7 @@
      "removed_mm3": 119999.4,
      "cycle_seconds_exact_stop": 2153.312,
      "cycle_seconds_tangent": 2153.312,
-     "engine_seconds": 0.3798
+     "engine_seconds": 0.4504
     }
    },
    "toolpath": {
@@ -2039,14 +2039,14 @@
     "material": null
    },
    "engine": {
-    "run_seconds": 0.4265,
-    "first_move_seconds": 0.0471,
-    "post_seconds": 0.01,
+    "run_seconds": 0.4982,
+    "first_move_seconds": 0.0485,
+    "post_seconds": 0.0121,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 102520.0,
-     "native": 87440.0
+     "python": 104540.0,
+     "native": 89396.0
     }
    }
   },
@@ -2068,7 +2068,7 @@
      "removed_mm3": 2418061.169,
      "cycle_seconds_exact_stop": 4700.284,
      "cycle_seconds_tangent": 4697.972,
-     "engine_seconds": 10.9531,
+     "engine_seconds": 12.2247,
      "engagement": {
       "cut_mm": 50013.094,
       "mean_deg": 52.6,
@@ -2118,14 +2118,14 @@
     }
    },
    "engine": {
-    "run_seconds": 11.018,
-    "first_move_seconds": 2.19,
-    "post_seconds": 43.7598,
+    "run_seconds": 12.3027,
+    "first_move_seconds": 2.3078,
+    "post_seconds": 51.9407,
     "repeats": 3,
-    "engagement_measure_seconds": 20.902,
+    "engagement_measure_seconds": 24.821,
     "peak_rss_kib": {
-     "python": 170264.0,
-     "native": 183040.0
+     "python": 170388.0,
+     "native": 187868.0
     }
    }
   },
@@ -2147,7 +2147,7 @@
      "removed_mm3": 8698.869,
      "cycle_seconds_exact_stop": 11873.766,
      "cycle_seconds_tangent": 11873.446,
-     "engine_seconds": 0.6815
+     "engine_seconds": 0.8005
     }
    },
    "toolpath": {
@@ -2182,14 +2182,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.6923,
-    "first_move_seconds": 0.0109,
-    "post_seconds": 0.6084,
+    "run_seconds": 0.8098,
+    "first_move_seconds": 0.0093,
+    "post_seconds": 0.7058,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 88712.0,
-     "native": 61660.0
+     "python": 89112.0,
+     "native": 61564.0
     }
    }
   },
@@ -2211,7 +2211,7 @@
      "removed_mm3": 1510.585,
      "cycle_seconds_exact_stop": 1617.954,
      "cycle_seconds_tangent": 1555.854,
-     "engine_seconds": 0.737
+     "engine_seconds": 0.7941
     }
    },
    "toolpath": {
@@ -2246,14 +2246,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.742,
-    "first_move_seconds": 0.005,
-    "post_seconds": 0.8757,
+    "run_seconds": 0.7998,
+    "first_move_seconds": 0.0057,
+    "post_seconds": 0.9616,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 469968.0,
-     "native": 428700.0
+     "python": 563744.0,
+     "native": 520732.0
     }
    }
   },
@@ -2275,7 +2275,7 @@
      "removed_mm3": 28.682,
      "cycle_seconds_exact_stop": 1125.918,
      "cycle_seconds_tangent": 1123.918,
-     "engine_seconds": 0.4499
+     "engine_seconds": 0.6036
     }
    },
    "toolpath": {
@@ -2310,14 +2310,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.4814,
-    "first_move_seconds": 0.0227,
-    "post_seconds": 0.8654,
+    "run_seconds": 0.644,
+    "first_move_seconds": 0.0297,
+    "post_seconds": 0.9755,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 463308.0,
-     "native": 425644.0
+     "python": 558080.0,
+     "native": 519828.0
     }
    }
   },
@@ -2339,7 +2339,7 @@
      "removed_mm3": 29.336,
      "cycle_seconds_exact_stop": 1904.741,
      "cycle_seconds_tangent": 1781.687,
-     "engine_seconds": 2.7304
+     "engine_seconds": 2.961
     }
    },
    "toolpath": {
@@ -2374,14 +2374,14 @@
     }
    },
    "engine": {
-    "run_seconds": 3.8657,
-    "first_move_seconds": 1.0641,
-    "post_seconds": 2.4661,
+    "run_seconds": 4.3305,
+    "first_move_seconds": 1.1801,
+    "post_seconds": 2.838,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 560600.0,
-     "native": 461620.0
+     "python": 656088.0,
+     "native": 556972.0
     }
    }
   },
@@ -2403,7 +2403,7 @@
      "removed_mm3": 63.378,
      "cycle_seconds_exact_stop": 476.247,
      "cycle_seconds_tangent": 476.237,
-     "engine_seconds": 1.2798
+     "engine_seconds": 1.3228
     }
    },
    "toolpath": {
@@ -2438,14 +2438,14 @@
     }
    },
    "engine": {
-    "run_seconds": 1.3013,
-    "first_move_seconds": 0.4511,
-    "post_seconds": 0.1108,
+    "run_seconds": 1.3433,
+    "first_move_seconds": 0.4443,
+    "post_seconds": 0.1297,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 416112.0,
-     "native": 407864.0
+     "python": 511056.0,
+     "native": 501672.0
     }
    }
   },
@@ -2467,7 +2467,7 @@
      "removed_mm3": 4689.375,
      "cycle_seconds_exact_stop": 26.47,
      "cycle_seconds_tangent": 25.487,
-     "engine_seconds": 0.0153
+     "engine_seconds": 0.019
     }
    },
    "toolpath": {
@@ -2483,14 +2483,14 @@
     "material": null
    },
    "engine": {
-    "run_seconds": 0.0907,
-    "first_move_seconds": 0.0755,
-    "post_seconds": 0.078,
+    "run_seconds": 0.0929,
+    "first_move_seconds": 0.0749,
+    "post_seconds": 0.1002,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 68120.0,
-     "native": 62136.0
+     "python": 68164.0,
+     "native": 62020.0
     }
    }
   },
@@ -2512,7 +2512,7 @@
      "removed_mm3": 3034.875,
      "cycle_seconds_exact_stop": 18.345,
      "cycle_seconds_tangent": 17.978,
-     "engine_seconds": 0.0115
+     "engine_seconds": 0.0124
     }
    },
    "toolpath": {
@@ -2528,14 +2528,59 @@
     "material": null
    },
    "engine": {
-    "run_seconds": 0.067,
-    "first_move_seconds": 0.0557,
-    "post_seconds": 0.0092,
+    "run_seconds": 0.0647,
+    "first_move_seconds": 0.0524,
+    "post_seconds": 0.0089,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 67088.0,
-     "native": 61032.0
+     "python": 67148.0,
+     "native": 61068.0
+    }
+   }
+  },
+  {
+   "name": "plasma-edge-starts",
+   "family": "thermal",
+   "description": "Two squares with a sheet-edge start and an ordinary pierce, posted for WinCNC",
+   "operations": {
+    "plasma": {
+     "toolpath": "ThermalCut edge starts",
+     "issue": 306,
+     "moves": 26,
+     "cut_mm": 247.441,
+     "rapid_mm": 117.351,
+     "air_cut_mm": 0.0,
+     "link_mm": 0.0,
+     "plunges": 0,
+     "retracts": 0,
+     "removed_mm3": 1462.5,
+     "cycle_seconds_exact_stop": 8.307,
+     "cycle_seconds_tangent": 7.572,
+     "engine_seconds": 0.0116
+    }
+   },
+   "toolpath": {
+    "moves": 26,
+    "cycle_seconds_exact_stop": 8.307,
+    "cycle_seconds_tangent": 7.572,
+    "posted_blocks": 46,
+    "post_error": null,
+    "removed_mm3": [
+     1462.5,
+     2862.75
+    ],
+    "material": null
+   },
+   "engine": {
+    "run_seconds": 0.0477,
+    "first_move_seconds": 0.0328,
+    "post_seconds": 0.013,
+    "repeats": 3,
+    "engagement_measure_seconds": null,
+    "peak_rss_kib": {
+     "python": 68184.0,
+     "native": 62040.0
     }
    }
   },
@@ -2557,7 +2602,7 @@
      "removed_mm3": 2513.274,
      "cycle_seconds_exact_stop": 20.759,
      "cycle_seconds_tangent": 20.759,
-     "engine_seconds": 0.0028
+     "engine_seconds": 0.0032
     },
     "rough": {
      "toolpath": "TurnRough",
@@ -2572,7 +2617,7 @@
      "removed_mm3": 33227.163,
      "cycle_seconds_exact_stop": 58.801,
      "cycle_seconds_tangent": 58.801,
-     "engine_seconds": 0.0042
+     "engine_seconds": 0.0035
     },
     "finish": {
      "toolpath": "TurnFinish",
@@ -2616,14 +2661,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0308,
-    "first_move_seconds": 0.0066,
-    "post_seconds": 0.0107,
+    "run_seconds": 0.0362,
+    "first_move_seconds": 0.0092,
+    "post_seconds": 0.0082,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 47684.0,
-     "native": 46588.0
+     "python": 47520.0,
+     "native": 46824.0
     }
    }
   },
@@ -2645,7 +2690,7 @@
      "removed_mm3": 2513.274,
      "cycle_seconds_exact_stop": 20.759,
      "cycle_seconds_tangent": 20.759,
-     "engine_seconds": 0.0028
+     "engine_seconds": 0.0045
     },
     "rough": {
      "toolpath": "TurnRough",
@@ -2660,7 +2705,7 @@
      "removed_mm3": 33227.163,
      "cycle_seconds_exact_stop": 59.363,
      "cycle_seconds_tangent": 59.363,
-     "engine_seconds": 0.0039
+     "engine_seconds": 0.004
     },
     "groove": {
      "toolpath": "TurnGroove",
@@ -2675,7 +2720,7 @@
      "removed_mm3": 841.476,
      "cycle_seconds_exact_stop": 58.251,
      "cycle_seconds_tangent": 58.251,
-     "engine_seconds": 0.0042
+     "engine_seconds": 0.0058
     },
     "part": {
      "toolpath": "TurnPartOff",
@@ -2690,7 +2735,7 @@
      "removed_mm3": 1286.977,
      "cycle_seconds_exact_stop": 34.779,
      "cycle_seconds_tangent": 34.779,
-     "engine_seconds": 0.0026
+     "engine_seconds": 0.0041
     }
    },
    "toolpath": {
@@ -2719,14 +2764,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0303,
-    "first_move_seconds": 0.0077,
-    "post_seconds": 0.0089,
+    "run_seconds": 0.0441,
+    "first_move_seconds": 0.0107,
+    "post_seconds": 0.0181,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 47840.0,
-     "native": 46584.0
+     "python": 48008.0,
+     "native": 47132.0
     }
    }
   },
@@ -2748,7 +2793,7 @@
      "removed_mm3": 2513.274,
      "cycle_seconds_exact_stop": 20.759,
      "cycle_seconds_tangent": 20.759,
-     "engine_seconds": 0.0032
+     "engine_seconds": 0.0049
     },
     "rough": {
      "toolpath": "TurnRough",
@@ -2763,7 +2808,7 @@
      "removed_mm3": 33227.163,
      "cycle_seconds_exact_stop": 58.801,
      "cycle_seconds_tangent": 58.801,
-     "engine_seconds": 0.0034
+     "engine_seconds": 0.0059
     },
     "finish": {
      "toolpath": "TurnFinish",
@@ -2778,7 +2823,7 @@
      "removed_mm3": 1152.382,
      "cycle_seconds_exact_stop": 32.058,
      "cycle_seconds_tangent": 32.05,
-     "engine_seconds": 0.0026
+     "engine_seconds": 0.0037
     },
     "thread": {
      "toolpath": "TurnThread",
@@ -2793,7 +2838,7 @@
      "removed_mm3": 0.0,
      "cycle_seconds_exact_stop": 12.929,
      "cycle_seconds_tangent": 12.929,
-     "engine_seconds": 0.0036
+     "engine_seconds": 0.005
     }
    },
    "toolpath": {
@@ -2822,14 +2867,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.039,
-    "first_move_seconds": 0.0081,
-    "post_seconds": 0.0103,
+    "run_seconds": 0.0473,
+    "first_move_seconds": 0.0108,
+    "post_seconds": 0.0104,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 47720.0,
-     "native": 46516.0
+     "python": 47692.0,
+     "native": 46928.0
     }
    }
   },
@@ -2866,7 +2911,7 @@
      "removed_mm3": 4008.823,
      "cycle_seconds_exact_stop": 22.765,
      "cycle_seconds_tangent": 22.765,
-     "engine_seconds": 0.003
+     "engine_seconds": 0.0049
     },
     "bore_finish": {
      "toolpath": "TurnBore",
@@ -2881,7 +2926,7 @@
      "removed_mm3": 332.133,
      "cycle_seconds_exact_stop": 19.403,
      "cycle_seconds_tangent": 19.402,
-     "engine_seconds": 0.0028
+     "engine_seconds": 0.0037
     }
    },
    "toolpath": {
@@ -2910,14 +2955,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0253,
-    "first_move_seconds": 0.0075,
-    "post_seconds": 0.0053,
+    "run_seconds": 0.0302,
+    "first_move_seconds": 0.0092,
+    "post_seconds": 0.0049,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 47856.0,
-     "native": 46788.0
+     "python": 47948.0,
+     "native": 47176.0
     }
    }
   },
@@ -2939,7 +2984,7 @@
      "removed_mm3": 530.929,
      "cycle_seconds_exact_stop": 8.367,
      "cycle_seconds_tangent": 8.367,
-     "engine_seconds": 0.0042
+     "engine_seconds": 0.004
     },
     "fg": {
      "toolpath": "TurnFaceGroove",
@@ -2954,7 +2999,7 @@
      "removed_mm3": 308.253,
      "cycle_seconds_exact_stop": 74.968,
      "cycle_seconds_tangent": 74.968,
-     "engine_seconds": 0.0038
+     "engine_seconds": 0.0039
     }
    },
    "toolpath": {
@@ -2983,14 +3028,14 @@
     }
    },
    "engine": {
-    "run_seconds": 0.0191,
+    "run_seconds": 0.0203,
     "first_move_seconds": 0.0093,
-    "post_seconds": 0.0054,
+    "post_seconds": 0.0057,
     "repeats": 3,
     "engagement_measure_seconds": null,
     "peak_rss_kib": {
-     "python": 47360.0,
-     "native": 46508.0
+     "python": 47708.0,
+     "native": 47136.0
     }
    }
   }

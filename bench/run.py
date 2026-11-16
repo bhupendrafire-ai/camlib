@@ -267,6 +267,8 @@ def measure(name, repeat):
     runs = [_run_once(workload) for _ in range(repeat)]
     run = runs[-1]
     program, machine = run["program"], _machine(workload.family, run["program"])
+    posting = dict(machine=machine) if workload.posting is None else workload.posting(program, machine)
+    machine = posting["machine"]
 
     from dataclasses import replace
 
@@ -287,9 +289,7 @@ def measure(name, repeat):
         try:
             # Arcs not exactly writable at the machine's decimals become
             # checked segments (the real output of a 3-decimal controller).
-            text = "".join(
-                c.text for c in post_program(program, machine=machine, lowering=LoweringOptions(native_arcs=True))
-            )
+            text = "".join(c.text for c in post_program(program, **posting, lowering=LoweringOptions(native_arcs=True)))
         except ValueError as error:
             # A program the posting engine refuses is a result, recorded.
             post_error = str(error)

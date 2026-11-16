@@ -851,6 +851,13 @@ impl IntentChecker {
             {
                 (None, None)
             }
+            // A start in open material decodes as one: a controller that
+            // touched off or pierced there would not be running the plan.
+            (Event::BeamStart { power_percent: a }, [Event::BeamStart { power_percent: b }])
+                if (a - b).abs() <= 0.5 =>
+            {
+                (None, None)
+            }
             (Event::CutterCompensation { .. }, []) if self.deferred_compensation.is_some() => {
                 (None, None)
             }

@@ -128,6 +128,7 @@ pub fn apply(
                 | Event::FeedPerRev { .. }
                 | Event::Beam { .. }
                 | Event::BeamMark { .. }
+                | Event::BeamStart { .. }
                 | Event::HeightControl { .. }
         ) || matches!(e, Event::Motion {motion} if motion.kind == MoveKind::Thread)
     }) {

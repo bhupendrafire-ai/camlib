@@ -18,11 +18,11 @@ from pathlib import Path
 
 from camlib.export import ExportRefused
 from camlib.jobs import Job, OperationNode, RegenerationCache, Setup
-from camlib.operations import Facing, Pocket, RestPocket
+from camlib.operations import Facing, HelicalEntry, Pocket, RestPocket
 from camlib.planar import Boundary, Component, PlanarRegion
 from camlib.playback import Cursor, Player
 from camlib.post import GCodeDialect, LoweringOptions, Machine, ToolSetting
-from camlib.simulation import StockSpec
+from camlib.simulation import StockSpec, SweepOptions
 from camlib.tools import EndMill, HolderSection, ToolAssembly
 from camlib.verification import StockContactOptions, StreamChecks
 
@@ -187,6 +187,7 @@ def build_validation_job():
         "validation-pocket",
         (Component(Boundary.polygon(((4, 4), (28, 4), (28, 20), (4, 20))), (Boundary.circle((16, 12), 2),)),),
     )
+    entry = HelicalEntry(angle_deg=3, feed_mm_min=CUTTING["plunge_mm_min"])
     return replace(
         job,
         id="milling-post-validation",
@@ -194,7 +195,11 @@ def build_validation_job():
             replace(
                 setup,
                 stock=StockSpec((0, 0, 0), (32, 24, 6), 0.5),
-                operations=(setup.operations[0], *(replace(op, region=region) for op in setup.operations[1:])),
+                sweep=SweepOptions(tolerance_mm=1e-6, chord_error_mm=1e-6),
+                operations=(
+                    setup.operations[0],
+                    *(replace(op, region=region, entry=entry) for op in setup.operations[1:]),
+                ),
             ),
         ),
     )

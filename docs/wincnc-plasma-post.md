@@ -40,7 +40,7 @@ program = job.post_nc("sheet", machine=machine, post=w.WinCNCPlasmaPost,
 | Arcs | `G2`/`G3 X Y I J`, at most half a turn | I/J are always relative in WinCNC; no plane words (XY only) |
 | Inches | `output_units="inch"`, `decimals=4`: `G20`, every word in inches | A half-turn arc is kept as an arc only where its rounded inch words still span no more than half a turn; otherwise it is written as checked lines (with `LoweringOptions(native_arcs=True)`) |
 | Feeds | `F` on every cutting move | |
-| Z | None | Plan with `height_mode="fixed"` and start with the torch at the cut height |
+| Z | Controller-owned; explicit return to `THR` for edge starts | Plan with `height_mode="fixed"` and start with the torch at the cut height |
 | End | `M66` | End macro |
 
 M61–M66 are user-defined macros in WinCNC's `CNC.MAC`. The defaults are the
@@ -99,3 +99,50 @@ post refuses a dwell, and a THC command unless the machine declares
 post with `LoweringOptions(native_arcs=True)`. WinCNC's velocity smoothing
 (G9) must keep the path within the machine tolerance. Verify on the machine
 before cutting.
+
+Edge starts (`BeamStart`) are opt-in with
+`edge_start_cut_z_mm=...` and `program_height_control=True`. Declare the
+cutting Z in **the plan's coordinates**, for example 7.5 for stock whose
+top is Z6 and a 1.5 mm cutting gap. The selected material's `THR` must put
+the torch at that physical height, and the sheet's Z reference must already
+be established before the program starts. Every edge start is checked
+against the declared Z. Plan with fixed height and `height_control=True`
+so THC stays off over the lead and can turn on over the part.
+
+The sequence is derived from the plasma configuration distributed in
+[WinCNC's public demo installer](https://www.wincnc.net/webfiles/Demo/WinDemo.exe)
+(retrieved 2026-11-15): `torchon.mac` calls `M63` (touch-off) before `L38`,
+then separately waits for arc-good and the pierce delay; `torchcut.mac`
+returns to cut height with `L90 G0 Z{THR}`. The post writes:
+
+```text
+L37
+L90 G0 Z{THR}
+~L38
+```
+
+This disables THC, returns from the controller's travel/lift height to the
+selected material's cut height, and fires without the touch-off or pierce
+steps. `~L38` explicitly invokes the built-in command even if a macro
+overrides `L38` (Users Guide 3.1r5, Macro File Configuration, p. 112).
+The edge-start delay is written as `G4 D...` in seconds; the normal material
+pierce delay is not applied. With `material_feed_mm_min` declared, an edge
+start also writes `F{THF}` to select the material's feed, which `M61` would
+otherwise do. This reads the controller setting instead of supplying a
+numeric feed. Other cutting moves still carry no `F` words in this mode.
+
+Ordinary pierces in the same program retain the declared torch-on macro
+(`M61` by default), and both start types use the declared torch-off macro.
+The independent decoder requires cut-height positioning before native
+torch-on, verifies THC is off, checks the declared height and material-feed
+sequence, and preserves `BeamStart` separately from a pierce. No table
+macro file is needed to select this documented native sequence. As with
+ordinary fixed-height posting, controller-owned Z moves and the material
+setup are declared machine behavior, not measured by camlib.
+
+Without `edge_start_cut_z_mm`, edge starts remain refused. The public
+configuration establishes controller semantics, not physical validation on
+a ShopSabre; no real-machine cut has been performed for this implementation.
+
+Source archive SHA-256:
+`0e12a83b508b4306ac262fcf8829b973f4184add68715610501fe336edb28887`.

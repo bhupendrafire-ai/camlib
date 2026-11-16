@@ -44,6 +44,12 @@ Premises (declared, not checked on the machine):
   height_control=False: pierce delay, heights and THC belong to the WinCNC
   material setup. Start the job with the torch at the cut height, so no Z
   word is written.
+- edge_start_cut_z_mm: opt in to the native edge-start sequence documented
+  by WinCNC's public demo plasma macros. The selected material's THR must
+  represent this Z in the plan's coordinates, and sheet Z must already be
+  established. Requires program_height_control=True. L90 G0 Z{THR} returns
+  to cut height, ~L38 fires without touch-off, and G4 D supplies the edge
+  delay. With material feed declared, F{THF} selects it at the edge start.
 - WinCNC arcs are XY only (no plane words); its velocity smoothing (G9)
   must keep the path within the machine tolerance.
 - Arcs: post with lowering=LoweringOptions(native_arcs=True). At most half
@@ -137,6 +143,10 @@ class WinCNCPlasmaMachine(Machine):
     # The material setup's feed rate: no F word is written, and every cut
     # must be planned at this feed.
     material_feed_mm_min: float | None = None
+    # Opt in to native edge starts. THR in the selected material must put
+    # the torch at this Z in the plan's coordinates; sheet Z must already
+    # be established. This is not the controller's local Z value.
+    edge_start_cut_z_mm: float | None = None
     # The start/end radius mismatch an arc's words may have: WinCNC takes
     # arcs within its arc_err setting (WINCNC.INI, "allowable errors in arc
     # specifications", default .01 unit of measure). 0: exactly consistent
@@ -163,6 +173,10 @@ class WinCNCPlasmaMachine(Machine):
             raise ValueError("material_feed_mm_min must be positive and within the machine's max_feed_mm_min")
         if self.local_coordinates not in ('cancel', 'keep'):
             raise ValueError('local_coordinates must be "cancel" (G92 is written) or "keep" (it is not)')
+        if self.edge_start_cut_z_mm is not None and (
+            not math.isfinite(self.edge_start_cut_z_mm) or not self.program_height_control
+        ):
+            raise ValueError('edge_start_cut_z_mm needs a finite cut Z and program_height_control=True')
         if len(self.tools) != 1 or self.planes != ('xy',) or self.max_sweep_rad > math.pi:
             raise ValueError('WinCNC plasma: one torch, XY arcs of at most half a turn')
         if self.dialect != _dialect(self.end_code, self.arc_radius_tolerance_mm) or self.flood or self.mist:
@@ -181,6 +195,7 @@ def define_machine(
     program_height_control=False,
     arc_radius_tolerance_mm=0,
     material_feed_mm_min=None,
+    edge_start_cut_z_mm=None,
     **settings,
 ):
     """``torch``: the torch's ToolSetting. The macro codes are those of your
@@ -192,7 +207,11 @@ def define_machine(
     ``arc_radius_tolerance_mm``: the start/end radius mismatch arc words may
     have, at most the table's arc_err (WINCNC.INI) and at most 0.005 mm.
     ``material_feed_mm_min``: the feed rate of the material setup chosen at
-    the control; no F word is written and every cut must be planned at it."""
+    the control; every cut must be planned at it.
+    ``edge_start_cut_z_mm``: opt in to native edge starts at the declared Z
+    in plan coordinates. The selected material's THR must represent that
+    height and sheet Z must already be established. Requires
+    program_height_control=True; see docs/wincnc-plasma-post.md."""
     return WinCNCPlasmaMachine(
         name,
         (torch,),
@@ -207,6 +226,7 @@ def define_machine(
         program_height_control=program_height_control,
         arc_radius_tolerance_mm=arc_radius_tolerance_mm,
         material_feed_mm_min=material_feed_mm_min,
+        edge_start_cut_z_mm=edge_start_cut_z_mm,
         torch_on_code=torch_on_code,
         torch_off_code=torch_off_code,
         end_code=end_code,
@@ -215,7 +235,7 @@ def define_machine(
 
 
 class WinCNCPlasmaPost(GCodePost):
-    version = 'wincnc-3.1-plasma-1'
+    version = 'wincnc-3.1-plasma-2'
 
     def words(self, addresses, values, *, dimensional=True):
         # As WinCNC's posts: dimensional words always with a decimal point.
@@ -235,6 +255,8 @@ class WinCNCPlasmaPost(GCodePost):
         self._plane = 'xy'
         self._spindle_on = False
         self._coolant_mode = 'off'
+        self._edge_position = tuple(program.initial_position_mm)
+        self._edge_delay = False
 
     def on_work_offset(self, event):
         # WinCNC's work coordinates with no local offset (G92 alone). Its
@@ -254,9 +276,11 @@ class WinCNCPlasmaPost(GCodePost):
             self.emit(self.machine.start_code)
         else:
             self.emit(_torch_comment(self.machine))
+        self._edge_position = tuple(event.position_after_mm)
 
     def on_beam(self, event):
         m = self.machine
+        self._edge_delay = False
         if event.power_percent != 0 and m.program_height_control and getattr(self, '_thc', None) is None:
             # Height control is off over a lead-in: before the first cut
             # that is the program's to say, whatever state it starts in.
@@ -264,6 +288,30 @@ class WinCNCPlasmaPost(GCodePost):
             self._thc = False
         self.emit(m.torch_off_code if event.power_percent == 0 else m.torch_on_code)
         self._spindle_on = event.power_percent != 0
+
+    def on_beam_start(self, event):
+        m = self.machine
+        if m.edge_start_cut_z_mm is None:
+            return super().on_beam_start(event)
+        if self._edge_position[2] != m.edge_start_cut_z_mm:
+            raise ValueError('WinCNC edge start: planned Z differs from edge_start_cut_z_mm')
+        if event.power_percent != 100:
+            raise ValueError('WinCNC edge start: the material setup supplies full torch power (100 percent)')
+        # WinCNC's public demo: torchon.mac calls M63 (touch) BEFORE L38,
+        # and waits for arc-good / pierce delay AFTER it. torchcut.mac uses
+        # L90 G0 Z{THR}. Use those native primitives without the touch or
+        # pierce steps. The tilde bypasses a CNC.MAC override (Guide p.112).
+        # https://www.wincnc.net/webfiles/Demo/WinDemo.exe
+        if getattr(self, '_thc', None) is not False:
+            self.emit(_THC_OFF)
+        self._thc = False
+        self.emit('L90 G0 Z{THR}')
+        self.emit('~L38')
+        if m.material_feed_mm_min is not None:
+            # M61 normally establishes this feed; an edge start bypasses it.
+            self.emit('F{THF}')
+        self._spindle_on = True
+        self._edge_delay = True
 
     def on_beam_mark(self, event):
         raise ValueError(
@@ -282,11 +330,22 @@ class WinCNCPlasmaPost(GCodePost):
         self._thc = event.on
 
     def on_dwell(self, event):
+        if self._edge_delay:
+            from decimal import Decimal
+
+            # Guide p.137: G4 D is seconds. Preserve the planned delay;
+            # it is distinct from the material setup's pierce delay.
+            # WinCNC numeric words use decimal notation, not Python's
+            # exponent notation for small values.
+            self.emit(f'G4 D{Decimal(str(event.seconds)):f}')
+            self._edge_delay = False
+            return
         raise ValueError(
             'WinCNC plasma: the pierce delay belongs to the material setup (M61); plan with pierce_delay_s=0'
         )
 
     def on_motion(self, motion):
+        self._edge_delay = False
         c = motion.curve
         if c.start[2] != c.end[2]:
             raise ValueError(
@@ -307,6 +366,7 @@ class WinCNCPlasmaPost(GCodePost):
                 'program states its feeds'
             )
         super().on_motion(motion)
+        self._edge_position = tuple(c.end)
         d = m.dialect
         # No Z words; no F words where the material setup sets the feed.
         dropped = (d.axes[2], d.feed_word) if material is not None else (d.axes[2],)
@@ -333,6 +393,9 @@ class WinCNCPlasmaDecoder(NativeGCodeDecoder):
         # coolant state (none is on at the start).
         self.plane = 'xy'
         self.ready |= {'plane', 'spindle_off', 'coolant_off'}
+        self._edge_stage = None
+        self._edge_delay = False
+        self._thc = None
 
     def validate_initialized(self):
         # The frame reset (G92) is the work offset's own block: until that
@@ -347,10 +410,48 @@ class WinCNCPlasmaDecoder(NativeGCodeDecoder):
         super().validate_initialized()
 
     def read_line(self, line, context=None):
-        from camlib.motion import HeightControl, WorkOffset
+        from camlib.motion import Beam, BeamStart, Dwell, HeightControl, WorkOffset
 
         m = self.machine
         text = line.strip()
+        if self._edge_stage == 'fire' and text != '~L38':
+            raise ValueError('WinCNC edge start: cut-height positioning must be followed by native ~L38')
+        if self._edge_stage == 'feed' and text != 'F{THF}':
+            raise ValueError('WinCNC edge start: missing material feed F{THF}')
+        if text == 'L90 G0 Z{THR}':
+            if m.edge_start_cut_z_mm is None or self.rpm or self._thc is not False:
+                raise ValueError('WinCNC edge start: declare cut Z, turn the torch off and disable THC first')
+            self.validate_initialized()
+            if self.position[2] != m.edge_start_cut_z_mm:
+                raise ValueError('WinCNC edge start: decoded Z differs from edge_start_cut_z_mm')
+            self._edge_stage = 'fire'
+            return []
+        if text == '~L38':
+            if self._edge_stage != 'fire':
+                raise ValueError('WinCNC edge start: native ~L38 requires cut-height positioning first')
+            events = super().read_line('M3 S1', context)
+            if len(events) != 1 or not isinstance(events[0], Beam):
+                raise ValueError('WinCNC edge start: active tool must be a torch')
+            self._edge_stage = 'feed' if m.material_feed_mm_min is not None else None
+            self._edge_delay = True
+            return [BeamStart(events[0].power_percent)]
+        if text == 'F{THF}':
+            if self._edge_stage != 'feed':
+                raise ValueError('WinCNC edge start: unexpected material feed')
+            self._edge_stage = None
+            return []
+        if text.startswith('G4 '):
+            import re
+
+            match = re.fullmatch(r'G4 D([0-9]+(?:\.[0-9]+)?)', text)
+            if not self._edge_delay or not match:
+                raise ValueError('WinCNC plasma: only the delay immediately after an edge start may be programmed')
+            seconds = float(match[1])
+            if not math.isfinite(seconds) or seconds <= 0:
+                raise ValueError('WinCNC edge start: delay must be finite and positive')
+            self._edge_delay = False
+            return [Dwell(seconds)]
+        self._edge_delay = False
         if text == 'G92' and m.local_coordinates == 'cancel':
             # No local coordinates: WinCNC's work coordinates, offset 1.
             self.ready.add('frame_reset')
@@ -374,7 +475,8 @@ class WinCNCPlasmaDecoder(NativeGCodeDecoder):
                 raise ValueError('WinCNC plasma: this machine does not switch height control from the program')
             # With the torch off it only sets the state the next cut starts
             # in; with it on it is the plan's height control command.
-            return [HeightControl(text == _THC_ON)] if self.rpm else []
+            self._thc = text == _THC_ON
+            return [HeightControl(self._thc)] if self.rpm else []
         if text == m.torch_on_code:
             return super().read_line('M3 S1', context)
         words = text.split(' ')

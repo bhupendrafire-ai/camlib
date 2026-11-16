@@ -86,6 +86,7 @@ _EXPORTS = {
             "ChainCutting",
             "Bridges",
             "SkeletonCutUp",
+            "EdgeStarts",
             "LeadPlacement",
             "MicroJoints",
             "CommonLine",

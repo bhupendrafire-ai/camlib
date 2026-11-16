@@ -168,6 +168,10 @@ class Machine:
         elif name in ("STRAIGHT_TRAVERSE", "STRAIGHT_FEED"):
             start, end = self.position, tuple(float(a) for a in args[:3])
             self.position = end
+            # rs274 also emits canonical commands for repeated endpoints.
+            # They change no position; modal state still applies to later moves.
+            if start == end:
+                return []
             kind = "traverse" if name == "STRAIGHT_TRAVERSE" else "feed" if self.lead is None else "thread"
             return [(kind, _line(start, end), end)]
         elif name == "ARC_FEED":

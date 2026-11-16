@@ -11,7 +11,15 @@ island centred at (16, 12) with radius 2 mm, then uses a 2 mm tool to remove
 stock left by the 4 mm tool. Tool numbers are T7/T8, length registers H9/H10;
 both assemblies have a declared 60 mm gauge length. Feed is 600 mm/min,
 plunge 150 mm/min, spindle 12000 rpm, flood coolant; clearance is Z8.
-These are reproducible test inputs, not recommended cutting data.
+The pocket and rest cut explicitly declare `HelicalEntry(angle_deg=3,
+feed_mm_min=150)`; the existing fitter chooses an entry radius that fits the
+region and preceding stock. The fixture declares a 1e-6 mm stock-sweep
+tolerance and chord error, keeping its helical sweep bounds tight enough for
+the existing analytic height controls. The regression checks descents against the live
+stock and checks the helical slope and feed, alongside the existing island,
+floor and posted-output checks. These are reproducible test inputs, not
+recommended cutting data. A helix can be followed by full-width cutting:
+choose the actual entry angle and cutting feed for the real tool and setup.
 
 The machine declaration is `rest_machine_for(job)`: a synthetic LinuxCNC
 mill with millimetre output at three decimals, XY/XZ/YZ plane capability,
