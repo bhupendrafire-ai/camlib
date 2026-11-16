@@ -249,7 +249,17 @@ replay of the decoded program.
   bull lifted by the erosion, and `flat::Index::bull_chord_bound_clear` bounds
   its contact (concave along each edge and chord, so no Lipschitz bound is
   needed at the corner's vertical rim); a corner smaller than the erosion
-  falls back to the enclosing flat end, which is sound but conservative. Against a
+  falls back to the enclosing flat end, which is sound but conservative. For a
+  pointed section, the radius shrinks by `a`, the slope stays fixed, and the
+  apex rises by `h = min(B, (1 + slope) * a)`, with `sqrt(2) * a <= B`, where
+  `B` is the same tolerance minus source error and numerical guard (#324).
+  Every real point maps within `B` of this inner profile: for radius `r >= a`,
+  move inward by `a` and upward by at most `a`; for `r < a`, map to the axis.
+  The latter squared distance `r² + max(h - slope*r, 0)²` is convex, with
+  both endpoint bounds at most `B²`. This retains useful radial clearance at
+  nominal faceted hole walls without granting extra allowance to an acute tip.
+  Source enclosure, whole-assembly footprints, proof history and export's
+  refusal of unaccepted uncertainty remain unchanged. Against a
   prismatic `Target`, the floor is checked exactly and the walls by the region's
   1-Lipschitz signed clearance on bisected chords; the boundary error and floor
   error are the declared error. A possible

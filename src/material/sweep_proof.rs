@@ -18,7 +18,13 @@
 //!   is shrunk radially by a and lifted by a. Each point of the real tool is
 //!   within k·a of that eroded tool: k = √2 where the section is flat out
 //!   to r0 >= a (move the point a inward and a up), and √(1 + (1 + rise)²)
-//!   near a pointed tip.
+//!   near a narrow flat-tipped section. A pointed section instead caps its
+//!   outer radius at R-a, keeps its slope and lifts its apex by
+//!   h=min(B,(1+rise)*a), where B is the unchanged proof budget. Its real
+//!   points are within B: map r>=a inward by a and upward by at most a;
+//!   for r<a, the axis mapping has a convex squared-distance bound whose
+//!   endpoint bounds are h<=B and sqrt(2)*a<=B. This spends no extra source
+//!   error or gouge tolerance (#324).
 //! - A ball or bull-nose end (radius R, corner rc >= a) is proven with its
 //!   real shape (#107): eroded by a it is the bull of radius R - a and
 //!   corner rc - a lifted by a (the corner's tube and the flat both shrink
@@ -384,7 +390,7 @@ impl SweepProof {
                 let k = sections
                     .iter()
                     .map(|s| {
-                        if s.r0 >= flat {
+                        if s.r0 == 0. || s.r0 >= flat {
                             std::f64::consts::SQRT_2
                         } else {
                             (1. + (1. + s.rise).powi(2)).sqrt()
@@ -414,7 +420,18 @@ impl SweepProof {
                 let sections = rest
                     .iter()
                     .map(|s| Section {
-                        z0: s.z0 + s.rise * (a - s.r0).max(0.),
+                        // At a pointed section, cap the radius at R-a and
+                        // lift the apex by h=min(B,(1+rise)*a). For r>=a,
+                        // map a real point a inward and at most a upward.
+                        // For r<a, map to the axis: the squared displacement
+                        // is convex in r; at its ends it is <= B². Thus every
+                        // real point is within B, including an acute tip.
+                        z0: s.z0
+                            + if s.r0 == 0. {
+                                self.budget.min((1. + s.rise) * a) - a
+                            } else {
+                                s.rise * (a - s.r0).max(0.)
+                            },
                         r0: (s.r0 - a).max(0.),
                         r1: s.r1 - a,
                         rise: s.rise,
@@ -1817,5 +1834,117 @@ mod tests {
         assert!(!proves(&mut p, &prepared, line([5., 5., 9.], [6., 5., 9.])));
         let retained = p.tools["t"].as_ref().unwrap();
         assert!(retained.sections.iter().any(|s| s.z0 < 0.01 && s.r1 > 0.));
+    }
+
+    fn drilled_annulus() -> SurfaceTarget {
+        let mut triangles = Vec::new();
+        let count = 32;
+        let point = |r: f64, i: usize, z: f64| {
+            let a = std::f64::consts::TAU * i as f64 / count as f64;
+            [r * a.cos(), r * a.sin(), z]
+        };
+        let mut quad = |a, b, c, d| {
+            triangles.push([a, b, c]);
+            triangles.push([a, c, d]);
+        };
+        for i in 0..count {
+            let j = (i + 1) % count;
+            quad(
+                point(10., i, 4.),
+                point(10., j, 4.),
+                point(2.1, j, 4.),
+                point(2.1, i, 4.),
+            );
+            quad(
+                point(10., i, 0.),
+                point(2.1, i, 0.),
+                point(2.1, j, 0.),
+                point(10., j, 0.),
+            );
+            quad(
+                point(10., i, 0.),
+                point(10., j, 0.),
+                point(10., j, 4.),
+                point(10., i, 4.),
+            );
+            quad(
+                point(2.1, i, 0.),
+                point(2.1, i, 4.),
+                point(2.1, j, 4.),
+                point(2.1, j, 0.),
+            );
+        }
+        assert!(2.1 * (1. - (std::f64::consts::PI / count as f64).cos()) < 0.013);
+        let mut t = target(0.013);
+        t.id = "annulus".into();
+        t.base_z_mm = -2.;
+        t.surface.triangles = std::sync::Arc::new(triangles);
+        t
+    }
+
+    #[test]
+    fn pointed_drill_proves_nominal_polygonal_hole_but_not_real_wall_overcut() {
+        let mut spec = spec();
+        spec.min_mm[2] = -2.;
+        let target = drilled_annulus();
+        let options = Options {
+            gouge_tolerance_mm: Some(0.05),
+            ..Options::default()
+        };
+        let mut p =
+            SweepProof::new(&target, options, &spec, true, &AtomicBool::new(false)).unwrap();
+        let mut t = tool(CutterShape::Drill {
+            point_angle_rad: 118_f64.to_radians(),
+        });
+        t.cutter.diameter_mm = 4.2;
+        t.cutter.shank_diameter_mm = 4.2;
+        let t = t.prepare().unwrap();
+        let tip = -0.5 - 2.1 / 59_f64.to_radians().tan();
+        assert!(proves(&mut p, &t, line([0., 0., 12.], [0., 0., tip])));
+        assert!(proves(&mut p, &t, line([0., 0., tip], [0., 0., 12.])));
+        assert_eq!((p.proven, p.unproven), (2, 0));
+        assert!(!proves(&mut p, &t, line([0.2, 0., 12.], [0.2, 0., tip])));
+        let before = (p.proven, p.unproven);
+        assert!(
+            p.motion(
+                &t,
+                &motion(line([0., 0., 12.], [0., 0., tip])),
+                1e-5,
+                &AtomicBool::new(true)
+            )
+            .unwrap_err()
+            .contains("cancelled")
+        );
+        assert_eq!((p.proven, p.unproven), before);
+    }
+
+    #[test]
+    fn pointed_profile_mapping_stays_within_the_unchanged_proof_budget() {
+        for slope in [0.01, 0.1, 0.6, 1., 3., 5.] {
+            let angle = 2. * (1_f64 / slope).atan();
+            let t = tool(CutterShape::Drill {
+                point_angle_rad: angle,
+            })
+            .prepare()
+            .unwrap();
+            let mut p = proof(0.05, 0.013, true);
+            p.tool(&t).unwrap();
+            let model = p.tools.get("t").unwrap().as_ref().unwrap();
+            let section = model.sections[0];
+            let a = model.erosion;
+            let h = section.z0 + a;
+            let r = t.cutter().definition().diameter_mm / 2.;
+            for i in 0..=1024 {
+                let rho = r * i as f64 / 1024.;
+                let z = t.cutter().tip_height_at_radius(rho).unwrap();
+                let to = (rho - a).max(0.);
+                let up = z.max(h + section.rise * to);
+                assert!(
+                    (rho - to).hypot(up - z) <= p.budget + 1e-12,
+                    "slope {slope}, r {rho}"
+                );
+                assert!(to <= section.r1 + 1e-12);
+            }
+        }
     }
 }
