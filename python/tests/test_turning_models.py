@@ -101,13 +101,13 @@ def blade_check(**drawn):
     return camlib.TurningModelInsertCheck(insert=mesh(blade(2, 22, 0.2, 3, **drawn), 2e-4), **TOLERANCES)
 
 
-def groover(body, insert_check, error=0.0):
+def groover(body, insert_check, error=0.0, *, insert=None):
     model = camlib.TurningToolModel(
         body=mesh(body, error), placement=PLACEMENT, axial_resolution_mm=0.5, insert_check=insert_check
     )
     return camlib.TurningTool(
         "groove2",
-        insert=camlib.GrooveInsert(2, 22),
+        insert=camlib.GrooveInsert(2, 22) if insert is None else insert,
         nose_radius_mm=0.2,
         side="outer",
         hand="right",
@@ -143,6 +143,32 @@ def grooving(groove_tool):
 
 
 class ModelHolderTest(unittest.TestCase):
+    def test_a_model_filling_a_concave_insert_notch_is_not_certified_by_its_hull(self):
+        from camlib.turning import Arc, Line, Outline
+
+        # Same nose, nearby edges and convex hull as the solid blade model,
+        # but the declared back edge has a 1 mm-deep notch, 2 mm wide.
+        outline = Outline(
+            (22, 1.8),
+            (
+                Line((22, -0.2)),
+                Line((0, -0.2)),
+                Arc((0, 0), 0.2, 270, 180),
+                Line((-0.2, 1.6)),
+                Arc((0, 1.6), 0.2, 180, 90),
+                *(Line(p) for p in ((10, 1.8), (10, 0.8), (12, 0.8), (12, 1.8), (22, 1.8))),
+            ),
+        )
+        insert = camlib.InsertOutline(
+            outline, corner=2, cutting=(1, 2, 3, 4, 5), programming_point_mm=(-0.2, -0.2), edge_deg=90
+        )
+        groover(CARRIER, blade_check()).validate()
+        notched = groover(CARRIER, blade_check(), insert=insert)
+        with self.assertRaisesRegex(ValueError, "nonconvex.*not supported"):
+            notched.validate()
+        with self.assertRaisesRegex(camlib.SimulationError, "nonconvex.*not supported"):
+            grooving(notched).plan()
+
     def test_a_body_containing_the_insert_is_refused_before_any_move(self):
         fused = CARRIER + blade(2, 22, 0.2, 3)
         for check in (blade_check(), camlib.TurningModelWithoutInsert(reason="maker's cutting-point frame")):

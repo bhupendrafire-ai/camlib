@@ -6935,6 +6935,48 @@ test_tool("groove_in".into(), Insert::Groove { width_mm: 3.,
         }
 
         #[test]
+        fn a_model_filling_a_concave_insert_notch_is_refused() {
+            let j = groove_job();
+            let mut tool = j.tools[1].tool.clone();
+            let (lo, hi) = bounds(&geometry(&tool).holder_body);
+            let model = checked(box_mesh(lo, hi), insert_model(&tool, [0.; 3], 0.));
+            tool.body.as_mut().unwrap().model = Some(model);
+            validate_tool(&tool).unwrap();
+            // The solid model and this notched declaration have the same
+            // convex hull and the same reference corner. The missing
+            // rectangle is 2 mm wide by 1 mm deep, far beyond the tolerances.
+            tool.insert = serde_json::from_value(serde_json::json!({
+                "kind": "outline",
+                "outline": {"start_mm": [22., 1.8], "segments": [
+                    {"kind":"line", "to_mm":[22., -0.2]},
+                    {"kind":"line", "to_mm":[0., -0.2]},
+                    {"kind":"arc", "center_mm":[0., 0.], "radius_mm":0.2,
+                        "start_deg":270., "end_deg":180.},
+                    {"kind":"line", "to_mm":[-0.2, 1.6]},
+                    {"kind":"arc", "center_mm":[0., 1.6], "radius_mm":0.2,
+                        "start_deg":180., "end_deg":90.},
+                    {"kind":"line", "to_mm":[10., 1.8]},
+                    {"kind":"line", "to_mm":[10., 0.8]},
+                    {"kind":"line", "to_mm":[12., 0.8]},
+                    {"kind":"line", "to_mm":[12., 1.8]},
+                    {"kind":"line", "to_mm":[22., 1.8]}
+                ]},
+                "corner":2, "cutting":[1, 2, 3, 4, 5],
+                "programming_point_mm":[-0.2, -0.2]
+            }))
+            .unwrap();
+            tool.validate().unwrap();
+            let error = validate_tool(&tool).unwrap_err();
+            assert!(
+                error.contains("nonconvex") && error.contains("not supported"),
+                "{error}"
+            );
+            let mut rejected = j;
+            rejected.tools[1].tool = tool;
+            assert!(plan(&rejected).err().unwrap().contains("nonconvex"));
+        }
+
+        #[test]
         fn a_fused_insert_is_refused_before_any_move() {
             let j = job();
             let tool = &j.tools[0].tool;

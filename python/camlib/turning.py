@@ -430,7 +430,10 @@ class ModelInsertCheck:
     height), ``nose_radius_tolerance_mm`` and ``edge_angle_tolerance_deg``
     (each straight edge at the corner). They must cover the insert mesh's
     own error. A model outside one is refused before any move, as misplaced
-    or as a different insert; it is never fitted. No value has a default."""
+    or as a different insert; it is never fitted. The whole projected convex
+    envelopes are also compared. This requires a single convex declared
+    insert body; nonconvex or multi-piece declarations refuse because a hull
+    can hide extra model material in notches. No value has a default."""
 
     insert: object
     corner_region_mm: float

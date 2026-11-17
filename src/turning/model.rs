@@ -769,6 +769,15 @@ impl ModelBody {
                 "{tool}: a drill on the axis has no insert corner to compare a model with; give its model's body with the reason its placement is right"
             ));
         }
+        // The whole-insert comparison below bounds convex envelopes. A
+        // union of convex pieces may have a notch that its hull fills;
+        // an oversized model filling that notch would otherwise pass.
+        // Nonconvex agreement needs a separate continuous proof (#331).
+        if insert_body.len() != 1 {
+            return Err(format!(
+                "{tool}: the supplied insert cross-check cannot certify a nonconvex or multi-piece declared insert; its convex hull can hide material in notches. A convex declaration is supported only when it matches the real insert; nonconvex model comparison is not supported"
+            ));
+        }
         let region = *region;
         if region < 2. * nose_radius_mm {
             return Err(format!(
@@ -1068,7 +1077,7 @@ impl ModelBody {
                 d[0]
             ));
         }
-        // The entire projected insert, not only the reference corner.
+        // The projected convex envelopes, not only the reference corner.
         // For convex hulls the Hausdorff distance is bounded by the largest
         // vertex-to-opposite-hull distance in both directions. Include the
         // model's declared mesh error; do not infer or fit another insert.

@@ -2879,8 +2879,13 @@ tool.validate()   # the meshes, the placement and the insert cross-check
   compared: `without_insert_reason=` (`TurningModelWithoutInsert(reason=)`)
   states where its placement comes from, and the check is then the
   caller's.
-  The projected outline of the **whole insert** is also compared in both
-  directions, including its mesh error. Its allowance propagates the same
+  The projected **convex envelopes of the whole insert** are also compared
+  in both directions, including the mesh error. This check currently requires
+  a single convex declared insert body. Nonconvex or multi-piece declared
+  inserts refuse: a convex hull can hide extra model material in a notch.
+  Full nonconvex comparison is tracked in #331. An envelope comparison does
+  not prove that internal reliefs or holes in a model match the declaration.
+  Its allowance propagates the same
   declared position and edge-angle bounds to the full insert's extent
   (`position_tolerance_mm + 2 R sin(edge_angle_tolerance_deg / 2)`). Nothing
   is fitted. Round inserts need no straight edges; a sharp corner uses the
