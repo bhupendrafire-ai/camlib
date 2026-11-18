@@ -50,6 +50,9 @@ pub struct AdaptivePocketOperation {
     pub min_orbit_radius_mm: Option<f64>,
     pub local_orbit_tolerance_mm: Option<f64>,
     pub max_engagement_deg: f64,
+    /// Hard upper bound on horizontal clearing and links, including confined
+    /// retries at entry feed. Explicit helix and ramp entries are separate.
+    pub max_corner_engagement_deg: Option<f64>,
     pub boundary_tolerance_mm: f64,
     pub clockwise: bool,
     /// engagement_front only: see `RoughingOperation::rapid_descent_clearance_mm`.
@@ -84,6 +87,11 @@ impl AdaptivePocketOperation {
     /// The orbit planners' parameters (disk_front, stock_front).
     pub(crate) fn validate_parameters(&self, r: f64) -> Result<(f64, f64, f64), String> {
         if self.path_strategy != AdaptivePathStrategy::EngagementFront {
+            if self.max_corner_engagement_deg.is_some() {
+                return Err(
+                    "max_corner_engagement_deg requires path_strategy engagement_front".into(),
+                );
+            }
             self.front_motion_options().validate(
                 "adaptive pocket",
                 Some("; leave it unset or use path_strategy engagement_front (disk_front and stock_front relink by lifted re-entries)"),
@@ -186,6 +194,7 @@ impl TryFrom<serde_json::Value> for AdaptivePocketOperation {
         };
         let rapid_descent_clearance_mm = optional("rapid_descent_clearance_mm")?;
         let ramp_clearance_mm = optional("ramp_clearance_mm")?;
+        let max_corner_engagement_deg = optional("max_corner_engagement_deg")?;
         let link_feed_mm_min = optional("link_feed_mm_min")?;
         let link_chip_thinning = serde_json::from_value(
             fields
@@ -203,6 +212,7 @@ impl TryFrom<serde_json::Value> for AdaptivePocketOperation {
             min_orbit_radius_mm,
             local_orbit_tolerance_mm,
             max_engagement_deg,
+            max_corner_engagement_deg,
             boundary_tolerance_mm,
             clockwise,
             rapid_descent_clearance_mm,
@@ -245,6 +255,7 @@ impl From<AdaptivePocketOperation> for serde_json::Value {
             ("rapid_descent_clearance_mm", op.rapid_descent_clearance_mm),
             ("ramp_clearance_mm", op.ramp_clearance_mm),
             ("link_feed_mm_min", op.link_feed_mm_min),
+            ("max_corner_engagement_deg", op.max_corner_engagement_deg),
         ] {
             if let Some(v) = value {
                 fields.insert(name.into(), v.into());

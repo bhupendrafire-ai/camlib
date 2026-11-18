@@ -35,6 +35,8 @@ pub struct PocketFrontReport {
     /// stroke is proven against.
     pub max_radial_engagement_mm: f64,
     pub max_engagement_deg: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_corner_engagement_deg: Option<f64>,
     /// Each depth level's tip height and its `EngagementFrontReport`.
     pub layers: Vec<PocketFrontLayer>,
     pub completed_layers: usize,
@@ -103,8 +105,19 @@ impl PocketFrontPlan {
             ));
         }
         // A contact angle limit below the stepover's own narrows the width.
-        let width = if op.max_engagement_deg < 90. {
-            stepover.min(r * (1. - op.max_engagement_deg.to_radians().cos()))
+        if let Some(angle) = op.max_corner_engagement_deg
+            && !(1. ..=170.).contains(&angle)
+        {
+            return Err(format!(
+                "adaptive pocket {}: max_corner_engagement_deg must be within 1..170",
+                pocket.id
+            ));
+        }
+        let angle = op
+            .max_engagement_deg
+            .min(op.max_corner_engagement_deg.unwrap_or(180.));
+        let width = if angle < 90. {
+            stepover.min(r * (1. - angle.to_radians().cos()))
         } else {
             stepover
         };
@@ -189,6 +202,7 @@ impl PocketFrontPlan {
             .map_err(|e| format!("adaptive pocket level {level} at Z{z}: {e}"))?
             // A pocket's walls are finished surfaces.
             .with_wall_pass(true)
+            .with_corner_engagement_limit(op.max_corner_engagement_deg)
             // A pocket is asked to clear its whole region: an area of it
             // no entry reaches refuses the level, as `Pocket` refuses one
             // (#250, `crate::entry::UnenteredArea`).
@@ -231,6 +245,7 @@ impl PocketFrontPlan {
                 target_z_mm: floor,
                 max_radial_engagement_mm: width,
                 max_engagement_deg: (1. - width / r).acos().to_degrees(),
+                max_corner_engagement_deg: op.max_corner_engagement_deg,
                 layers,
                 completed_layers: 0,
                 active_layer: 0,

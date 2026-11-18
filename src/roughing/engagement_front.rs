@@ -2434,6 +2434,8 @@ pub(crate) struct EngagementFrontPlan {
     /// Finish each wall with one pass along it (`with_wall_pass`), and
     /// whether this level's have been planned.
     wall_pass: bool,
+    /// An explicitly declared cap applies even to confined retries.
+    max_corner_engagement_deg: Option<f64>,
     /// Cut along the walls only where material stands beside them
     /// (`with_wall_runs`).
     wall_runs: bool,
@@ -2616,6 +2618,7 @@ impl EngagementFrontPlan {
             proof: None,
             remnant: false,
             wall_pass: false,
+            max_corner_engagement_deg: None,
             wall_runs: false,
             walls_done: false,
             area_mm2: None,
@@ -2647,6 +2650,10 @@ impl EngagementFrontPlan {
     /// a wall; a roughing layer has `with_wall_runs` instead.
     pub(crate) fn with_wall_pass(mut self, on: bool) -> Self {
         self.wall_pass = on;
+        self
+    }
+    pub(crate) fn with_corner_engagement_limit(mut self, limit: Option<f64>) -> Self {
+        self.max_corner_engagement_deg = limit;
         self
     }
     /// After the level is cleared, cut along its walls wherever material
@@ -4539,7 +4546,8 @@ impl EngagementFrontPlan {
             }
         }
         let mark = scene.mark();
-        let limit = self.report.engagement_limit_deg;
+        let corner_limit = self.max_corner_engagement_deg.unwrap_or(180.);
+        let limit = self.report.engagement_limit_deg.min(corner_limit);
         let mut failed = None;
         let (mut proved, mut upper) = (0, 0f64);
         let entry_feed = self.entry.feed_mm_min().unwrap_or(self.op.plunge_mm_min);
@@ -4647,7 +4655,7 @@ impl EngagementFrontPlan {
                         let bound = scene.check_leading(
                             &motion,
                             self.r,
-                            180.,
+                            corner_limit,
                             EngagementOptions::default(),
                             cancel,
                         )?;
@@ -4659,6 +4667,23 @@ impl EngagementFrontPlan {
                         };
                         bound
                     };
+                    if self.max_corner_engagement_deg.is_some()
+                        && (bound.status != EngagementStatus::Bounded
+                            || bound.upper_angle_deg > corner_limit)
+                    {
+                        let a = curve.start();
+                        failed = Some((
+                            [a[0], a[1]],
+                            format!(
+                                "the stroke from ({:.3}, {:.3}) at Z{:.3} is not proven within max_corner_engagement_deg {corner_limit:.2} ({}); open the corner with a prior operation or use a smaller cutter",
+                                a[0],
+                                a[1],
+                                a[2],
+                                reason_text(bound.reason)
+                            ),
+                        ));
+                        break;
+                    }
                     match confine(&bound, limit) {
                         Confine::Proven(angle) => {
                             proved += 1;
@@ -4925,6 +4950,13 @@ impl EngagementFrontPlan {
                 }
             }
             let Some((k, first, second)) = entry else {
+                if self.max_corner_engagement_deg.is_some() {
+                    self.rollback(&mark);
+                    return Err(
+                        "engagement_front: no proven wall approach for max_corner_engagement_deg"
+                            .into(),
+                    );
+                }
                 self.report.wall_passes_skipped += 1;
                 return Ok(());
             };
@@ -4946,6 +4978,9 @@ impl EngagementFrontPlan {
             {
                 if self.entry.policy() == EntryPolicy::StockEdge {
                     self.rollback(&mark);
+                    if self.max_corner_engagement_deg.is_some() {
+                        return Err("engagement_front: wall pass outside steering limit with StockEdgeEntry and max_corner_engagement_deg".into());
+                    }
                     self.report.wall_passes_skipped += 1;
                     #[cfg(test)]
                     tests::REVIEW_ROLLBACKS.with(|c| c.set(c.get() + 1));

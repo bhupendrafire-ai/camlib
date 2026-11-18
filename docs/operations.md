@@ -414,6 +414,17 @@ no full-width slotting, for hard materials and high-speed toolpaths.
   [3D roughing](#3d-roughing-roughing-restroughing) for the proof and the
   report fields, which each level carries). A `max_engagement_deg` below that
   angle narrows the width further.
+- **Corner engagement (#25):** for a pocket where a hard angle is required,
+  use `AdaptivePocket(..., max_corner_engagement_deg=150)`. The limit
+  (1–170 degrees) applies to horizontal cutting and stay-down links, including
+  confined clearing and wall cuts handled at entry feed. A limit below the
+  angle set by the stepover narrows the steering width. Both queries use the
+  committed cleared sweeps. If a stroke cannot be proven within the declared
+  limit, the planner refuses it. The report records the requested limit and
+  each layer's ordinary and confined upper bounds. Helices and descent ramps
+  still use their qualified entry policies. Leave the option unset for the
+  default behavior. `Pocket`, `RestPocket`, and the orbit strategies retain
+  their own paths.
 - **Entry:** each level enters by a helix into uncut material, with `entry`'s
   helix (`HelicalEntry`) or `HelicalEntry`'s defaults when none is given, and
   straight down only through stock the committed cuts prove is gone. With

@@ -54,6 +54,7 @@ fn operation(top: f64, adaptive: bool) -> Operation {
     };
     if adaptive {
         Operation::AdaptivePocket(AdaptivePocketOperation {
+            max_corner_engagement_deg: None,
             pocket,
             path_strategy: AdaptivePathStrategy::DiskFront,
             cutting_sense: None,

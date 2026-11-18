@@ -1783,6 +1783,12 @@ class AdaptivePocket(Pocket):
     (about 0.19 mm a side with a 4 mm cutter; use a Pocket there), and a
     region the cutter fits nowhere in. Each level's report counts all the
     stock left in the region as its residual area.
+    Set max_corner_engagement_deg (1–170) to bound horizontal clearing and
+    links even in a confined corner where the planner would otherwise retry
+    at entry feed. The cap may also narrow the stepover. A stroke that cannot
+    be proven within it refuses the operation. Helical and ramp entries still
+    use their own entry rules.
+
     Orbit options, max_stay_down_mm and rest_tolerance_mm do not apply; the
     direction is cutting_sense ('climb' by default, or 'conventional').
 
@@ -1831,6 +1837,7 @@ class AdaptivePocket(Pocket):
     ramp_clearance_mm: float | None = None
     link_feed_mm_min: float | None = None
     link_chip_thinning: bool = False
+    max_corner_engagement_deg: float | None = field(default=None, kw_only=True)
 
     def to_dict(self):
         pocket = {field: getattr(self, field) for field in Pocket.__dataclass_fields__}
@@ -1864,7 +1871,7 @@ class AdaptivePocket(Pocket):
         if self.local_orbit_tolerance_mm is not None:
             result["local_orbit_tolerance_mm"] = self.local_orbit_tolerance_mm
         # Written only when set: a job without them is the job it was.
-        for key in ("rapid_descent_clearance_mm", "ramp_clearance_mm", "link_feed_mm_min"):
+        for key in ("rapid_descent_clearance_mm", "ramp_clearance_mm", "link_feed_mm_min", "max_corner_engagement_deg"):
             if getattr(self, key) is not None:
                 result[key] = getattr(self, key)
         if type(self.link_chip_thinning) is not bool:
