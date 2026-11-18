@@ -1631,7 +1631,9 @@ class Roughing:
     # material its bore meets (never above feed_z_mm), so it is already
     # ramping when it reaches stock. None: the helix starts at that material.
     ramp_clearance_mm: float | None = None
-    # engagement_front only: stay-down links at depth feed at this rate
+    # Raster: horizontal links at this rate only where the full assembly
+    # stays outside the original stock footprint. Unset keeps the old feeds.
+    # engagement_front: stay-down links at depth feed at this rate
     # (mm/min) where the committed stock bounds prove the cutter clear of
     # stock; elsewhere links keep feed_mm_min. None: links feed at feed_mm_min.
     link_feed_mm_min: float | None = None

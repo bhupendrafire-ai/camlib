@@ -816,6 +816,17 @@ WORKLOADS = (
         lambda: ("surface", _support("indexable").roughing_target(), 0),
     ),
     Workload(
+        "indexable-roughing-exterior-feed",
+        "mill",
+        "Synthetic high-feed raster roughing with a declared exterior link feed",
+        {"rough": ("Roughing", 27)},
+        lambda: dict(
+            (config := _support("indexable").roughing_job()),
+            operations=(replace(config["operations"][0], link_feed_mm_min=2000.),),
+        ),
+        lambda: ("surface", _support("indexable").roughing_target(), 0),
+    ),
+    Workload(
         "drilling-data-manual",
         "holes",
         "Synthetic declared drill rates written explicitly",

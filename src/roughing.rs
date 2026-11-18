@@ -713,7 +713,9 @@ pub struct RoughingOperation<G = SurfaceMesh> {
     /// material top.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ramp_clearance_mm: Option<f64>,
-    /// engagement_front only. Stay-down links at depth feed at this rate
+    /// Raster: use this feed only for horizontal links whose complete assembly
+    /// sweep is outside the initial rectangular stock footprint.
+    /// engagement_front: stay-down links at depth feed at this rate
     /// (mm/min) wherever the committed stock's whole-cell bounds prove the
     /// cutter's footprint clear of stock; stretches that may touch stock keep
     /// `feed_mm_min`. None: every link feeds at `feed_mm_min`.
@@ -1314,11 +1316,24 @@ impl RoughingPlan {
             feed_z_mm: op.feed_z_mm,
         };
         template.validate_authoring(tool, prepared_tool.cutter().definition(), initial, r)?;
+        let raster = matches!(op.clearing, RoughingClearing::Raster { .. });
+        let exterior_link = if let Some(feed) = op.link_feed_mm_min.filter(|_| raster) {
+            if !feed.is_finite() || !(op.feed_mm_min..=1e6).contains(&feed) {
+                return Err("raster roughing link_feed_mm_min must be finite and at least feed_mm_min, up to 1000000 mm/min".into());
+            }
+            let radius = crate::verification::parts(&prepared_tool)?
+                .iter()
+                .map(|p| p.radius.max_over(p.min, p.max))
+                .fold(r, f64::max);
+            Some((feed, radius))
+        } else {
+            None
+        };
         let front = FrontMotionOptions {
             rapid_descent_clearance_mm: op.rapid_descent_clearance_mm,
             travel_clearance_mm: op.travel_clearance_mm,
             ramp_clearance_mm: op.ramp_clearance_mm,
-            link_feed_mm_min: op.link_feed_mm_min,
+            link_feed_mm_min: op.link_feed_mm_min.filter(|_| !raster),
             link_chip_thinning: op.link_chip_thinning,
         };
         front.validate(
@@ -1619,6 +1634,10 @@ impl RoughingPlan {
                             &cancel,
                         )?)),
                     };
+                    if let (Some((feed, radius)), LayerPlan::Pocket(p)) = (exterior_link, &mut plan)
+                    {
+                        p.enable_exterior_links(feed, radius);
+                    }
                     if op.omit_empty_cuts {
                         match &mut plan {
                             LayerPlan::Pocket(p) => p.enable_empty_cuts(),

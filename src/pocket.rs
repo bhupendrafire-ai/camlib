@@ -530,6 +530,8 @@ pub struct PocketReport {
     pub max_ramp_angle_deg: Option<f64>,
     pub entry_turns: usize,
     pub entry_navigation_moves: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exterior_links: Option<usize>,
     #[serde(skip_serializing_if = "air_entry::none")]
     pub cleared_entry_descents: usize,
     /// Proofs that an entry's column or path is clear of stock which ran
@@ -1390,6 +1392,7 @@ pub struct PocketPlan {
     expected_stock_generation: Option<u64>,
     rest_tool: Option<ToolAssembly>,
     air_entry_parts: Vec<(f64, f64)>,
+    exterior_link: Option<(f64, f64)>, // authored feed and full assembly radius
     /// Committed-clearance scene for air entries, extended incrementally from
     /// the stock's column history (see `ClearanceCursor`).
     entry_scene: EntrySceneCache,
@@ -1432,6 +1435,10 @@ impl PocketPlan {
             plan.expected_stock_generation = Some(stock.generation());
         }
         Ok(plan)
+    }
+    pub(crate) fn enable_exterior_links(&mut self, feed: f64, radius: f64) {
+        self.exterior_link = Some((feed, radius));
+        self.report.exterior_links = Some(0);
     }
     pub(crate) fn enable_empty_cuts(&mut self) {
         self.report.empty_cuts = Some(Default::default());
@@ -1730,6 +1737,7 @@ impl PocketPlan {
             max_ramp_angle_deg: None,
             entry_turns: 0,
             entry_navigation_moves: 0,
+            exterior_links: None,
             cleared_entry_descents: 0,
             entry_proofs_unresolved: 0,
             entry_geometry_work: 0,
@@ -1795,6 +1803,7 @@ impl PocketPlan {
             },
             rest_stock_identity: None,
             rest_pending: None,
+            exterior_link: None,
             entry_helix_end: None,
             operation: op,
             source,
@@ -3390,8 +3399,8 @@ impl PocketPlan {
         let Some((curve, kind, entry_feed)) = self.pending.pop_front() else {
             return Ok(None);
         };
-        curve.prepare(self.operation.tolerance_mm)?;
-        let motion = Motion {
+        let path = curve.prepare(self.operation.tolerance_mm)?;
+        let mut motion = Motion {
             id: self.next_id,
             operation: self.operation.id.clone(),
             tool: self.operation.tool.clone(),
@@ -3407,6 +3416,34 @@ impl PocketPlan {
             kind,
             curve,
         };
+        if let Some((feed, radius)) = self.exterior_link
+            && kind == MoveKind::Link
+            && motion.curve.start()[2] == motion.curve.end()[2]
+            && motion.feed_mm_min.is_some_and(|previous| feed > previous)
+        {
+            // Rate is part of the motion bound to the next stock commit.
+            // Set it before that binding, and only after the complete assembly
+            // is separated in XY from the original stock.
+            let bounds = path.bounds();
+            let tolerance = self.operation.tolerance_mm;
+            let scale = bounds
+                .min
+                .into_iter()
+                .chain(bounds.max)
+                .map(f64::abs)
+                .fold(radius, f64::max);
+            let pad = radius
+                + 16. * tolerance
+                + crate::verification::path_error(&motion, tolerance)
+                + 1024. * f64::EPSILON * (1. + scale);
+            if (0..2).any(|axis| {
+                bounds.max[axis] + pad < self.stock_spec.min_mm[axis]
+                    || bounds.min[axis] - pad > self.stock_spec.max_mm[axis]
+            }) {
+                motion.feed_mm_min = Some(feed);
+                *self.report.exterior_links.as_mut().unwrap() += 1;
+            }
+        }
         let ramp = self
             .operation
             .entry

@@ -723,6 +723,11 @@ refused with its location: export the mesh with shared edge vertices
   bore that is clear to the layer gets a straight plunge (reported as
   `air_entries`). `ramp_clearance_mm` (opt-in, on `Roughing`) starts each
   helix that far above the material it meets, never above `feed_z_mm`.
+  For raster clearing, optional `link_feed_mm_min` applies only to horizontal
+  links with an entire tool assembly sweep outside the original stock
+  footprint. The guide geometry, entry and cutting feeds, and fixture,
+  machine, and posted checks are retained. The report counts promoted
+  `exterior_links`. For engagement-front clearing,
   `link_feed_mm_min` (opt-in, on `Roughing`) feeds the stay-down links at
   that rate wherever the committed stock's whole-cell upper bounds prove the
   cutter's footprint clear of stock (checked in stretches of at most 2 mm);
