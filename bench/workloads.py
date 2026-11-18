@@ -822,7 +822,7 @@ WORKLOADS = (
         {"rough": ("Roughing", 27)},
         lambda: dict(
             (config := _support("indexable").roughing_job()),
-            operations=(replace(config["operations"][0], link_feed_mm_min=2000.),),
+            operations=(replace(config["operations"][0], link_feed_mm_min=2000.0),),
         ),
         lambda: ("surface", _support("indexable").roughing_target(), 0),
     ),

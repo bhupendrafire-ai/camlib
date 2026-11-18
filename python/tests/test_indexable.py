@@ -149,8 +149,13 @@ class IndexableTest(unittest.TestCase):
         config = roughing_job()
         for mill in (
             config['tools'][0],
-            ToolAssembly('flat', EndMill('end', diameter=10, flute_length=10, overall_length=30),
-                         15, 40, (HolderSection(15, 40, 6, 6),)),
+            ToolAssembly(
+                'flat',
+                EndMill('end', diameter=10, flute_length=10, overall_length=30),
+                15,
+                40,
+                (HolderSection(15, 40, 6, 6),),
+            ),
         ):
             for omit in (False, True):
                 with self.subTest(tool=mill.id, omit_empty_cuts=omit):
@@ -175,11 +180,18 @@ class IndexableTest(unittest.TestCase):
                         self.assertEqual(start[2], end[2])
                         # Independent analytic check of this fixture's largest
                         # assembly radius, including the 6 mm holder.
-                        self.assertTrue(any(lo > edge + 6 or hi < -edge - 6
-                                            for (lo, hi), edge in zip(horizontal_bounds(b['curve']), (10, 8))), b)
+                        self.assertTrue(
+                            any(
+                                lo > edge + 6 or hi < -edge - 6
+                                for (lo, hi), edge in zip(horizontal_bounds(b['curve']), (10, 8))
+                            ),
+                            b,
+                        )
                         changed += 1
                     self.assertGreater(changed, 0)
-                    self.assertEqual(sum(layer['clearing']['exterior_links'] for layer in reports[-1]['layers']), changed)
+                    self.assertEqual(
+                        sum(layer['clearing']['exterior_links'] for layer in reports[-1]['layers']), changed
+                    )
 
     def test_insert_depth_limit_is_checked_before_planning(self):
         config = facing_job()
