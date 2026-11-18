@@ -1853,6 +1853,27 @@ fn front_run(edit: impl FnOnce(&mut AdaptivePocketOperation)) -> Result<FrontRun
     run.before.push(stock.cells().to_vec());
     Ok(run)
 }
+#[test]
+fn corner_limit_keeps_l_pocket_coverage_and_refuses_unproven_strokes() {
+    let plain = front_run(|op| op.pocket.stepdown_mm = 2.).unwrap();
+    let bounded = front_run(|op| {
+        op.pocket.stepdown_mm = 2.;
+        op.max_corner_engagement_deg = Some(150.);
+    })
+    .unwrap();
+    assert_eq!(plain.before.last(), bounded.before.last());
+    for m in bounded.motions.iter().filter(|m| m.kind == MoveKind::Cut) {
+        assert_entire_l_sweep(&m.curve, 2.);
+    }
+    let Err(error) = front_run(|op| {
+        op.pocket.stepdown_mm = 2.;
+        op.max_corner_engagement_deg = Some(65.);
+    }) else {
+        panic!("an unproven corner must be refused");
+    };
+    assert!(error.contains("not proven within max_corner_engagement_deg 65"), "{error}");
+}
+
 /// Straight links end to end on one line are one move: a link with a link
 /// feed is emitted in stretches, one per feed.
 fn joined(motions: &[Motion]) -> Vec<(MoveKind, Curve)> {

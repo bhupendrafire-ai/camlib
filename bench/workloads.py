@@ -239,6 +239,18 @@ def _adaptive():
     return _options(_support("adaptive_pocket").adaptive_job())
 
 
+def _adaptive_corner_cap():
+    config = _adaptive()
+    (operation,) = config["operations"]
+    config["operations"] = (replace(operation, stepdown_mm=2, max_corner_engagement_deg=150),)
+    return config
+
+
+def _adaptive_corner_target():
+    (operation,) = _adaptive()["operations"]
+    return ("region", operation.region, operation.floor_z_mm)
+
+
 def _roughing(**kind):
     return lambda: _options(_support("roughing").roughing_job(**kind))
 
@@ -878,6 +890,14 @@ WORKLOADS = (
         {"adaptive": ("AdaptivePocket", 26)},
         _adaptive,
         _solid("adaptive_pocket", "target"),
+    ),
+    Workload(
+        "adaptive-pocket-corner-cap",
+        "mill",
+        "L pocket with a hard cap on confined corner strokes",
+        {"adaptive": ("AdaptivePocket", 25)},
+        _adaptive_corner_cap,
+        _adaptive_corner_target,
     ),
     Workload(
         "roughing-raster",
