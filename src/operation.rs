@@ -94,6 +94,9 @@ fn facing_limits(
     let Some(limits) = f.limits.clone().filter(|l| !l.is_empty()) else {
         return Ok(Operation::Facing(f));
     };
+    if f.axis == crate::facing::TraverseAxis::Auto || f.auto_rapid_mm_min.is_some() {
+        return Err("automatic facing axis is unavailable with in-plane limits; choose an explicit axis without auto_rapid_mm_min".into());
+    }
     let r = tool.cutter.diameter_mm / 2.;
     if f.stepover_mm > r {
         return Err(format!(

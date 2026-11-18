@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 pub enum TraverseAxis {
     X,
     Y,
+    Auto,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +35,9 @@ pub struct FacingOperation {
     pub feed_mm_min: f64,
     pub plunge_mm_min: f64,
     pub axis: TraverseAxis,
+    /// Nominal rapid rate for comparing complete X and Y routes in `Auto`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_rapid_mm_min: Option<f64>,
     pub mode: FacingMode,
     pub reverse: bool,
     pub entry_air_gap_mm: f64,
@@ -55,7 +59,7 @@ pub struct FacingOperation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<crate::limits::Limits>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct FacingReport {
     pub strategy: &'static str,
     pub geometric_residual_status: ResidualStatus,
@@ -70,6 +74,9 @@ pub struct FacingReport {
     pub edge_overlap_mm: f64,
     pub entry_air_gap_mm: f64,
     pub axis: TraverseAxis,
+    /// Estimated seconds for X and Y, respectively, in opt-in mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_axis_seconds: Option<[f64; 2]>,
     pub mode: FacingMode,
     pub cut_rows_emitted: usize,
     pub side_links_emitted: usize,
@@ -91,6 +98,7 @@ enum Phase {
     Descend,
     Done,
 }
+#[derive(Clone)]
 pub struct FacingPlan {
     op: FacingOperation,
     heights: crate::heights::Heights,
@@ -121,6 +129,31 @@ impl FacingPlan {
     ) -> Result<Self, String> {
         if cancel.is_cancelled() {
             return Err("facing planning cancelled".into());
+        }
+        if op.axis == TraverseAxis::Auto {
+            if op.limits.as_ref().is_some_and(|limits| !limits.is_empty()) {
+                return Err("automatic facing axis requires whole rectangular stock without in-plane limits; choose an explicit axis".into());
+            }
+            let rapid = op
+                .auto_rapid_mm_min
+                .filter(|v| v.is_finite() && *v > 0.)
+                .ok_or("automatic facing axis requires a positive finite auto_rapid_mm_min")?;
+            let candidate = |axis| {
+                let mut concrete = op.clone();
+                concrete.axis = axis;
+                concrete.auto_rapid_mm_min = None;
+                Self::prepare(concrete, assembly, spec, initial, first_id, cancel)
+            };
+            let x = candidate(TraverseAxis::X)?;
+            let y = candidate(TraverseAxis::Y)?;
+            let x_time = x.clone().route_seconds(rapid, cancel)?;
+            let y_time = y.clone().route_seconds(rapid, cancel)?;
+            let mut selected = if y_time + 1e-9 < x_time { y } else { x };
+            selected.report.auto_axis_seconds = Some([x_time, y_time]);
+            return Ok(selected);
+        }
+        if op.auto_rapid_mm_min.is_some() {
+            return Err("auto_rapid_mm_min requires axis = auto".into());
         }
         spec.grid()?;
         let prepared = assembly.prepare()?;
@@ -316,6 +349,7 @@ impl FacingPlan {
             edge_overlap_mm: overlap,
             entry_air_gap_mm: op.entry_air_gap_mm,
             axis: op.axis,
+            auto_axis_seconds: None,
             mode: op.mode,
             cut_rows_emitted: 0,
             side_links_emitted: 0,
@@ -449,6 +483,34 @@ impl FacingPlan {
         {
             return Err("commit preceding facing motion to matching stock before planning".into());
         }
+        let motion = self.next_motion(cancel)?;
+        if motion.is_some() {
+            self.expected_generation = Some(stock.generation() + 1);
+        }
+        Ok(motion)
+    }
+
+    fn route_seconds(mut self, rapid: f64, cancel: &impl CancelSignal) -> Result<f64, String> {
+        let mut seconds = 0_f64;
+        for _ in 0..100_000 {
+            let Some(motion) = self.next_motion(cancel)? else {
+                return if seconds.is_finite() {
+                    Ok(seconds)
+                } else {
+                    Err("automatic facing axis timing is not finite; check the rates".into())
+                };
+            };
+            let (a, b) = (motion.curve.start(), motion.curve.end());
+            let length = (b[0] - a[0]).hypot(b[1] - a[1]).hypot(b[2] - a[2]);
+            seconds += 60. * length / motion.feed_mm_min.unwrap_or(rapid);
+        }
+        Err(
+            "automatic facing axis exceeds the route scoring budget; choose an explicit axis"
+                .into(),
+        )
+    }
+
+    fn next_motion(&mut self, cancel: &impl CancelSignal) -> Result<Option<Motion>, String> {
         loop {
             if cancel.is_cancelled() {
                 return Err("facing planning cancelled".into());
@@ -537,7 +599,6 @@ impl FacingPlan {
                 }
             };
             if result.is_some() {
-                self.expected_generation = Some(stock.generation() + 1);
                 return Ok(result);
             }
         }
@@ -547,6 +608,33 @@ impl FacingPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_axis_requires_rapid_rate_and_breaks_symmetric_ties_to_x() {
+        let mut manifest: crate::stream::StreamManifest =
+            serde_json::from_str(include_str!("../fixtures/operations/facing.json")).unwrap();
+        let crate::pocket::Operation::Facing(mut op) = manifest.operations.remove(0) else {
+            panic!("facing fixture")
+        };
+        let tool = &manifest.tools[0];
+        let mut spec = manifest.stock.height().unwrap().clone();
+        spec.max_mm[1] = spec.max_mm[0];
+        op.axis = TraverseAxis::Auto;
+        let prepare = |op| FacingPlan::prepare(op, tool, &spec, [0., 0., 12.], 1, &|| false);
+        assert!(
+            prepare(op.clone())
+                .err()
+                .unwrap()
+                .contains("auto_rapid_mm_min")
+        );
+        op.auto_rapid_mm_min = Some(f64::NAN);
+        assert!(prepare(op.clone()).is_err());
+        op.auto_rapid_mm_min = Some(6000.);
+        let plan = prepare(op).unwrap();
+        assert_eq!(plan.report().axis, TraverseAxis::X);
+        let [x, y] = plan.report().auto_axis_seconds.unwrap();
+        assert!((x - y).abs() < 1e-9);
+    }
 
     #[test]
     fn exhausted_motion_ids_refuse_without_advancing_position() {

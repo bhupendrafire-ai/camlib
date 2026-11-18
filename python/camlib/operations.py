@@ -1376,7 +1376,7 @@ class Contour:
 class Facing:
     """Level the whole stock rectangle; enter outside its cutting-axis edges.
 
-    axis is x/y, mode is zigzag/one_way. None edge overlap uses 10% of diameter.
+    axis is x/y or auto (requires auto_rapid_mm_min), mode is zigzag/one_way. None edge overlap uses 10% of diameter.
     The initial stock top is the depth reference. Cutter overtravel is intentional.
     """
 
@@ -1406,10 +1406,12 @@ class Facing:
     retract_z_mm: float | None = None
     feed_z_mm: float | None = None
 
+    auto_rapid_mm_min: float | None = field(default=None, kw_only=True)
+
     def to_dict(self):
         result = {field: getattr(self, field) for field in self.__dataclass_fields__}
         result.update(kind="facing", tool=getattr(self.tool, "id", self.tool))
-        for key in ('retract_z_mm', 'feed_z_mm'):
+        for key in ('retract_z_mm', 'feed_z_mm', 'auto_rapid_mm_min'):
             if result[key] is None:
                 result.pop(key)
         return result

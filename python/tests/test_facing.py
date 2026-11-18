@@ -70,6 +70,37 @@ class FacingTest(unittest.TestCase):
                 engine._request("validate_program", program=program, capabilities=None)["summary"]["motions"], count
             )
 
+    def test_automatic_axis_matches_the_cheaper_explicit_checked_route(self):
+        from camlib import StockSpec
+
+        config = example().facing_job()
+        config["stock"] = StockSpec((0, 0, 0), (24, 40, 10), 0.25)
+        base = config["operations"][0]
+
+        def run(axis, rapid=None):
+            op = replace(base, axis=axis, auto_rapid_mm_min=rapid)
+            cuts, reports = [], []
+            with Simulation(**dict(config, operations=(op,))) as sim:
+                for update in sim.run_operations():
+                    if isinstance(update, OperationUpdate):
+                        reports.append(update.report)
+                    else:
+                        cuts.append(update.motion)
+                self.assertTrue(sim.state.finished)
+                self.assertLessEqual(max(sim.state.heights[1::2]), 8.001)
+                self.assertGreaterEqual(min(sim.state.heights[::2]), 7.999)
+            return cuts, reports[-1]
+
+        x, x_report = run("x")
+        y, y_report = run("y")
+        auto, report = run("auto", 6000.)
+        self.assertLess(len(y), len(x))
+        self.assertEqual(auto, y)
+        self.assertEqual(report["axis"], "y")
+        self.assertLess(report["auto_axis_seconds"][1], report["auto_axis_seconds"][0])
+        self.assertNotIn("auto_axis_seconds", x_report)
+        self.assertEqual(y_report["nominal_uncovered_area_mm2"], 0)
+
     def test_retained_facing_seek_shows_partial_removal_and_replays_same_stock(self):
         with RecordedRun(**{'rapid_mm_min': 6000, **example().facing_job()}, checkpoint_every=8) as run:
             player = Player(run)

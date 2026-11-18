@@ -207,6 +207,28 @@ def _facing():
     return _options(_support("facing").facing_job())
 
 
+def _facing_axis(automatic):
+    def build():
+        from camlib import StockSpec
+
+        config = _facing()
+        config["stock"] = StockSpec((0, 0, 0), (24, 40, 10), 0.25)
+        if automatic:
+            config["operations"] = (
+                replace(config["operations"][0], axis="auto", auto_rapid_mm_min=6000.),
+            )
+        return config
+
+    return build
+
+
+def _facing_axis_target():
+    from camlib import Boundary, Component, PlanarRegion
+
+    boundary = Boundary.polygon(((0, 0), (24, 0), (24, 40), (0, 40)))
+    return ("region", PlanarRegion("facing rectangle", (Component(boundary),)), 8.)
+
+
 def _pocket():
     return _options(_support("pocket").cadquery_job())
 
@@ -844,6 +866,10 @@ WORKLOADS = (
         _drilling_preparation(True),
     ),
     Workload("facing", "mill", "Face a 40 x 24 block 2 mm", {"face": ("Facing", 24)}, _facing, _solid("facing")),
+    Workload("facing-axis-x", "mill", "Face a 24 x 40 block along X", {"face": ("Facing", 24)},
+             _facing_axis(False), _facing_axis_target),
+    Workload("facing-axis-auto", "mill", "Face the same block with automatic axis selection", {"face": ("Facing", 24)},
+             _facing_axis(True), _facing_axis_target),
     Workload(
         "pocket",
         "mill",

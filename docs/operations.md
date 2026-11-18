@@ -89,6 +89,17 @@ mills. Indexable rows use the profile's floor-cutting width, and each stepdown
 must respect the assembly's maximum depth of cut. See
 [indexable geometry and limits](indexable-geometry.md).
 
+`axis="auto"` compares the complete existing X and Y routes (including entry,
+retracts, overtravel and returns). Declare a positive `auto_rapid_mm_min` for
+scoring rapids. The report gives the selected `axis` and `auto_axis_seconds`
+in X, Y order. These are nominal distance/rate estimates, with no acceleration
+or controller effects, and a tie within 1 ns selects X. Python still defaults
+to X. Automatic mode requires whole rectangular stock, refuses active
+in-plane limits, and refuses when either route reaches the 100,000-motion
+scoring budget. An explicit axis remains available for larger routes. Only
+the selected route streams, through the same independent geometry and posting
+checks. Scoring cannot establish fixture or machine clearance.
+
 The Rust planner refuses exhausted motion IDs before emitting another move or
 changing its position; IDs never wrap to zero during facing.
 

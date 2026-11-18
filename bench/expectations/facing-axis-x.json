@@ -1,0 +1,34 @@
+{
+  "name": "facing-axis-x",
+  "operations": {
+    "face": {
+      "air_cut_mm": 74.201,
+      "cut_mm": 550.205,
+      "cycle_seconds_exact_stop": 58.357,
+      "cycle_seconds_tangent": 58.357,
+      "link_mm": 67.201,
+      "moves": 32,
+      "plunges": 2,
+      "rapid_mm": 60.738,
+      "removed_mm3": 1919.99,
+      "retracts": 2
+    }
+  },
+  "toolpath": {
+    "cycle_seconds_exact_stop": 58.357,
+    "cycle_seconds_tangent": 58.357,
+    "material": {
+      "leftover_mm3": [
+        0.0,
+        0.01
+      ],
+      "overcut_mm3": [
+        0.0,
+        63.51
+      ]
+    },
+    "moves": 32,
+    "post_error": null,
+    "posted_blocks": 55
+  }
+}

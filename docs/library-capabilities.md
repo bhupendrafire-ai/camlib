@@ -21,7 +21,7 @@ See [Operations](operations.md) for parameters. Summary:
 
 | Operation | Scope |
 | --- | --- |
-| Facing | Rectangular stock top; flat mills and declared indexable face/high-feed mills; zig-zag or one-way |
+| Facing | Rectangular stock top; flat mills and declared indexable face/high-feed mills; zig-zag or one-way; explicit or opt-in automatic X/Y |
 | Pocket / rest pocket | Line/arc regions with islands; plunge, helical, ramp (zigzag along the path) or stock-edge entry; rest pocket cuts only what the simulated stock still holds |
 | Adaptive pocket | Engagement-limited clearing of the same regions; helical or ramp entry into enclosed material |
 | 3D roughing / rest roughing | Layered clearing above a mesh part: raster, offset, adaptive (stock-edge, helical or ramp entry); air passes can be omitted |
