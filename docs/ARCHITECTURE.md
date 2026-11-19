@@ -123,7 +123,11 @@ can say clear, violation or uncertain honestly.
 - **Height field** (`src/stock.rs`, `Stock`): an XY grid of `HeightBounds`
   (lower: material certainly up to here; upper: no material above here). Used by
   milling and thermal runs. Moves are swept with the full tool assembly
-  (cutter and holder). A flat end mill's constant-height line or XY arc
+  (cutter and holder). In a segmented sweep, the distance from each cell
+  center to the segment and the cell's half-diagonal determine the radial
+  bounds passed to the cutter profile. Both distances use a portable
+  Euclidean norm so host math-library rounding does not alter those bounds.
+  A flat end mill's constant-height line or XY arc
   lowers a cell's upper bound when the whole cell lies in its swept disk, or
   when the cell, split into sub-squares down to 1/32 of a cell, has every
   sub-square entirely inside this move's disk or inside one committed
@@ -336,8 +340,16 @@ work refuses the move, independent of optional verification settings.
   products, sum and square root; its lazy search uses the same calculation
   for box bounds. This avoids platform-dependent `hypot` results deciding
   which passes are linked. It is an ordering convention, not an accuracy
-  improvement. Other platform-dependent planning comparisons and material
-  interval differences remain tracked in #245.
+  improvement.
+- For cutter positions and stock bounds, a last-bit difference can change
+  which side of a tolerance a point falls on. Milling uses the pinned
+  `metallic` routines for distances and angles in these calculations,
+  including when the planar offset library trims an arc. Keep the same
+  precision from planning through stock replay. Rounding the output can
+  conceal a different cut or a different stock bound.
+- When investigating a platform difference, compare the input geometry first,
+  then the individual motions, stock changes and posted blocks. Aggregate
+  lengths and material volumes can agree even when those records differ.
 
 ## What is proven and what is not
 

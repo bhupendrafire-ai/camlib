@@ -3,7 +3,7 @@ use crate::{
     Point,
     motion::{Curve, MoveKind, Plane, Vec3},
     navigation::Guide,
-    pocket::{PocketPlan, Stroke},
+    pocket::{PocketPlan, Stroke, norm},
     stock::CancelSignal,
 };
 use serde::{Deserialize, Serialize};
@@ -129,7 +129,7 @@ impl RampEntry {
     /// depth of cut: a lap cuts what the lap above left).
     pub(crate) fn laps(&self, length: f64, depth: f64, max_drop: f64) -> Result<usize, String> {
         let exact = 1. - 128. * f64::EPSILON;
-        let count = (depth / (length * self.angle_rad.tan()) * exact)
+        let count = (depth / (length * metallic::tan(self.angle_rad)) * exact)
             .max(depth / max_drop * exact)
             .ceil()
             .max(1.);
@@ -148,7 +148,7 @@ impl RampEntry {
             return Err("the ramp has no depth or no path to follow".into());
         }
         // Horizontal travel the angle needs for this depth.
-        let needed = depth / self.angle_rad.tan();
+        let needed = depth / metallic::tan(self.angle_rad);
         let legs = (needed / total * (1. - 128. * f64::EPSILON)).ceil().max(1.);
         let span = if legs == 1. { needed.min(total) } else { total };
         if legs > 1. {
@@ -345,7 +345,7 @@ impl HelicalEntry {
         radii
     }
     pub(crate) fn turns(&self, h: f64, depth: f64) -> Result<usize, String> {
-        let advance = TAU * h * self.angle_rad.tan() * (1. - 128. * f64::EPSILON);
+        let advance = TAU * h * metallic::tan(self.angle_rad) * (1. - 128. * f64::EPSILON);
         let count = (depth / advance).ceil().max(1.);
         if !count.is_finite() || count > 1000. {
             return Err(
@@ -400,9 +400,6 @@ impl HelicalEntry {
         });
         Ok(curves)
     }
-}
-fn dist(a: Point, b: Point) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
 }
 pub(crate) fn point_key(p: Point) -> [u64; 2] {
     p.map(|x| if x == 0. { 0 } else { x.to_bits() })
@@ -624,7 +621,7 @@ pub(crate) fn fit_entries(
                 };
                 let mut candidates = candidates.clone();
                 candidates
-                    .sort_by(|a, b| dist(*a, first.stroke.a).total_cmp(&dist(*b, first.stroke.a)));
+                    .sort_by(|a, b| norm(*a, first.stroke.a).total_cmp(&norm(*b, first.stroke.a)));
                 'candidate: for center in candidates {
                     if stock_edge
                         && !pocket.outside_stock_disk(center, cutter + radius.max(minimum))
@@ -658,7 +655,7 @@ pub(crate) fn fit_entries(
                     let mut nodes: Vec<_> = tour
                         .iter()
                         .enumerate()
-                        .map(|(i, g)| (dist(center, g.stroke.a), i))
+                        .map(|(i, g)| (norm(center, g.stroke.a), i))
                         .collect();
                     nodes.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
                     for (_, attachment) in nodes {
@@ -668,7 +665,7 @@ pub(crate) fn fit_entries(
                         work += pocket.link_work_per_query();
                         let mut center = center;
                         let node = tour[attachment].stroke.a;
-                        if dist(center, node) < 1e-9 && center != node {
+                        if norm(center, node) < 1e-9 && center != node {
                             work += pocket.link_work_per_query();
                             if !pocket.link_geometry_fits_radius(
                                 node,

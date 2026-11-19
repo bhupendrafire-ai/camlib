@@ -1656,7 +1656,7 @@ impl Stock {
             .fold(1., f64::max);
         let guard = options.tolerance_mm.max(512. * f64::EPSILON * magnitude);
         let radius = tool.cutter().definition().diameter_mm / 2.;
-        let cell_radius = self.step[0].hypot(self.step[1]) / 2.;
+        let cell_radius = metallic::hypot(self.step[0], self.step[1]) / 2.;
         let analytic = matches!(tool.cutter().definition().shape, CutterShape::Flat)
             && motion.curve.start()[2] == motion.curve.end()[2]
             && matches!(
@@ -1905,7 +1905,10 @@ impl Stock {
                         } else {
                             (((p[0] - s.a[0]) * dx + (p[1] - s.a[1]) * dy) / length2).clamp(0., 1.)
                         };
-                        let d = (p[0] - (s.a[0] + t * dx)).hypot(p[1] - (s.a[1] + t * dy));
+                        // Both radial bounds feed the cutter profile and persist in the
+                        // stock. Host hypot rounding can change a cell even on the
+                        // same straight move (#351).
+                        let d = metallic::hypot(p[0] - (s.a[0] + t * dx), p[1] - (s.a[1] + t * dy));
                         let near = (d - cell_radius - s.error).max(0.);
                         if near > touch {
                             continue;
@@ -2565,12 +2568,9 @@ fn segment_layout(curve: &Curve, options: SweepOptions) -> Result<(usize, f64), 
             sweep_rad,
         } => {
             let [u, v, w] = plane.axes();
-            let radius = (start[u] - center[u]).hypot(start[v] - center[v]);
+            let radius = metallic::hypot(start[u] - center[u], start[v] - center[v]);
             let max_angle = (4.
-                * (options.chord_error_mm / (2. * radius))
-                    .min(0.5)
-                    .sqrt()
-                    .asin())
+                * metallic::asin((options.chord_error_mm / (2. * radius)).min(0.5).sqrt()))
             .min(std::f64::consts::FRAC_PI_2);
             let z_travel = if w == 2 {
                 (end[2] - start[2]).abs()
