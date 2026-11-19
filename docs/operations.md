@@ -734,6 +734,11 @@ refused with its location: export the mesh with shared edge vertices
   bore that is clear to the layer gets a straight plunge (reported as
   `air_entries`). `ramp_clearance_mm` (opt-in, on `Roughing`) starts each
   helix that far above the material it meets, never above `feed_z_mm`.
+  For raster clearing, optional `link_feed_mm_min` applies only to horizontal
+  links with an entire tool assembly sweep outside the original stock
+  footprint. The guide geometry, entry and cutting feeds, and fixture,
+  machine, and posted checks are retained. The report counts promoted
+  `exterior_links`. For engagement-front clearing,
   `link_feed_mm_min` (opt-in, on `Roughing`) feeds the stay-down links at
   that rate wherever the committed stock's whole-cell upper bounds prove the
   cutter's footprint clear of stock (checked in stretches of at most 2 mm);
@@ -1667,7 +1672,9 @@ How it is computed:
   within a quarter of `path_error_mm` of the curve (the cutter path's
   smoothing takes another quarter: each pass within half the path error of
   its level, so neighbouring passes are the stepover apart within the path
-  error). Where an iso-curve turns back
+  error). Smoothing uses the same distance calculation on each platform so
+  its chord weights and displacement limit give reproducible vertices for
+  the same input polyline. Where an iso-curve turns back
   inside one triangle (it rounds a corner where the nearest source changes)
   the triangle is split until each piece is a simple arc.
 - **Coverage** is certified, not estimated: every point of the drive surface
@@ -2704,6 +2711,34 @@ roughing setup its allowance.
     round outline and refuses a nonzero size tolerance on it. Verification
     across a range of nose radii or corner angles remains open in
     [#336](https://github.com/stevecad/camlib/issues/336).
+  - **Straight taper with a round insert.** For a straight XZ finishing move
+    with tool compensation calculated by camlib, `CompiledSetup.taper_section` bounds the
+    cutting edge's radial reach at a drawing station. Supply the measured
+    radius limits and a chunk from the checked post. The compiled setup
+    supplies the programmed datum, tool and drawing.
+
+    ```python
+    section = setup.taper_section(
+        chunk, motion_index=i, profile_segment=1,  # zero-based indices
+        nose_radius_range_mm=(3.9, 4.1), z_mm=-20,
+    )
+    low, high = section["radial_error_mm"]
+    ```
+
+    A negative error means a smaller radius than drawn. On an outside
+    taper that is overcut, while in a bore it means material left. The
+    interval includes posting roundoff present in the decoded coordinates.
+    It covers the flank of this move at the requested Z. Stock already
+    absent, neighbouring cuts, body contact and controller wear require
+    separate checks. This diagnostic does not authorize export.
+
+    For slope `q = ΔX/ΔZ`, the circle tangent to the line reaches
+    `r sqrt(1+q²)` radially from its centre line at fixed Z. Tip programming
+    translates that centre line in both X and Z with the same radius r.
+    The resulting flank radius is affine in r. camlib evaluates it using
+    outward-rounded intervals and checks that all tangent points occur
+    within the programmed move. Facing moves, end caps, arcs, noncircular
+    inserts and sweeps reaching the spindle axis are outside this query.
   - The insert's in-plane size tolerance (#113). An insert is not exactly
     its nominal size: its ISO 1832 tolerance class (the code's third
     letter) bounds its inscribed circle d and its corner dimension m, as

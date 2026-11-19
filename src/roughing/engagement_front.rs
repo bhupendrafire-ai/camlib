@@ -2240,6 +2240,7 @@ struct PassMark {
     pending: usize,
     journal: usize,
     report: EngagementFrontReport,
+    position: [f64; 3],
 }
 
 type Pending = (Curve, MoveKind, Option<f64>);
@@ -3309,6 +3310,11 @@ impl EngagementFrontPlan {
         narrow: f64,
         cancel: &impl CancelSignal,
     ) -> Result<(Vec<Point>, bool, bool), String> {
+        // The fourth_review cancellation regression fires only at a poll
+        // taken inside the follow, which `slot_side_entry` reaches after
+        // advancing its position (test-only; no production reading).
+        #[cfg(test)]
+        tests::slot_side_stage(tests::SLOT_SIDE_ADVANCED, tests::SLOT_SIDE_IN_FOLLOW);
         let r = self.r;
         // Steering width: the declared width less what the grid cannot
         // resolve (see `steering_width`), narrowed by `narrow` when an
@@ -4295,7 +4301,8 @@ impl EngagementFrontPlan {
                 for w in waypoints {
                     self.report.certified_strokes += 1;
                     let next = [w[0], w[1], z];
-                    self.link(stock, at, next, cancel)?;
+                    self.link(stock, at, next, cancel)
+                        .inspect_err(|_| self.rollback(&base))?;
                     at = next;
                 }
             } else if let Some((p, proven_p, samples)) = descent {
@@ -4308,7 +4315,8 @@ impl EngagementFrontPlan {
                     layer.cut(s, r);
                 }
                 self.report.certified_strokes += 1;
-                self.link(stock, [p[0], p[1], z], [q[0], q[1], z], cancel)?;
+                self.link(stock, [p[0], p[1], z], [q[0], q[1], z], cancel)
+                    .inspect_err(|_| self.rollback(&base))?;
                 self.report.lifts += 1;
                 self.report.stock_edge_entries += 1;
                 self.report.offset_descents += 1;
@@ -4318,7 +4326,10 @@ impl EngagementFrontPlan {
                 self.report.lifts += 1;
                 self.report.stock_edge_entries += 1;
             }
-            let Some(pts) = self.proven_pass(stock, q, heading, true, base.pending, cancel)? else {
+            let Some(pts) = self
+                .proven_pass(stock, q, heading, true, base.pending, cancel)
+                .inspect_err(|_| self.rollback(&base))?
+            else {
                 self.rollback(&base);
                 if !self.remnant {
                     self.layer.as_mut().unwrap().thin.push(q);
@@ -4336,12 +4347,19 @@ impl EngagementFrontPlan {
         }
     }
 
-    /// Everything a planned pass changes, to undo it.
+    /// Everything a planned pass changes, to undo it: the queued strokes,
+    /// the layer's fitted marks, the staged report, and the position the
+    /// planner keeps. The position is restored with the rest, so a rolled
+    /// back attempt cannot leave the planner at a point the surviving
+    /// queue never reaches (the review of 67a7981: an attempt optimistically
+    /// advances the position, and a later cancellation must not leave the
+    /// resumed motion starting somewhere the tool is not).
     fn checkpoint(&mut self) -> PassMark {
         PassMark {
             pending: self.pending.len(),
             journal: self.layer.as_ref().unwrap().journal.len(),
             report: self.report.clone(),
+            position: self.position,
         }
     }
     fn rollback(&mut self, mark: &PassMark) {
@@ -4350,6 +4368,7 @@ impl EngagementFrontPlan {
         let replans = self.report.engagement_replans;
         self.report = mark.report.clone();
         self.report.engagement_replans = replans;
+        self.position = mark.position;
     }
 
     /// The declared width less what the steering grid cannot resolve: the
@@ -4382,13 +4401,22 @@ impl EngagementFrontPlan {
         let mut proven = from;
         loop {
             let mark = self.checkpoint();
-            let (pts, cut, more) = self.follow(start, heading, approach, narrow, cancel)?;
+            // Every error below leaves the attempt: what follow, emit_cuts
+            // and prove queued since the mark is undone first, so neither a
+            // refusal nor a propagated proof or cancellation error can leave
+            // an unproven stroke to drain on a later call (#309, the review
+            // of 6163295).
+            let (pts, cut, more) = self
+                .follow(start, heading, approach, narrow, cancel)
+                .inspect_err(|_| self.rollback(&mark))?;
             if !cut {
                 self.rollback(&mark);
                 return Ok((!kept.is_empty()).then_some(kept));
             }
-            self.emit_cuts(&pts)?;
-            let proved = self.prove(stock, from, proven, false, cancel)?;
+            self.emit_cuts(&pts).inspect_err(|_| self.rollback(&mark))?;
+            let proved = self
+                .prove(stock, from, proven, false, cancel)
+                .inspect_err(|_| self.rollback(&mark))?;
             let Some((at, detail)) = proved else {
                 let (n, first) = (pts.len(), kept.is_empty());
                 let (before, last) = (pts[n - 2], pts[n - 1]);
@@ -4410,6 +4438,10 @@ impl EngagementFrontPlan {
                 // between walls within the limit. It is entry motion, as the
                 // helix that opened it is, where the entry policy allows one.
                 if self.entry.policy() == EntryPolicy::StockEdge {
+                    // The refusal leaves the attempt: nothing of it stays
+                    // queued, so the stroke it names cannot be drained
+                    // unproven on the next call (the review of 6163295).
+                    self.rollback(&mark);
                     return Err(format!(
                         "engagement_front: {detail}, even steered at half the declared width: \
                          the material there may be confined (a pocket barely wider than the \
@@ -4417,8 +4449,10 @@ impl EngagementFrontPlan {
                          motion; allow a helical entry, use a smaller tool, or exclude the area"
                     ));
                 }
-                self.prove(stock, from, proven, true, cancel)?
+                self.prove(stock, from, proven, true, cancel)
+                    .inspect_err(|_| self.rollback(&mark))?
                     .map_or(Ok(()), |(_, detail)| {
+                        self.rollback(&mark);
                         Err(format!("engagement_front: {detail}"))
                     })?;
                 if let Some((_, detail)) = self.unresolved_refusal() {
@@ -4882,7 +4916,10 @@ impl EngagementFrontPlan {
             let mut entry = None;
             for k in order {
                 let (first, second) = halves(wall[k]);
-                if self.wall_entry(second, stock, cancel)? {
+                if self
+                    .wall_entry(second, stock, cancel)
+                    .inspect_err(|_| self.rollback(&mark))?
+                {
                     entry = Some((k, first, second));
                     break;
                 }
@@ -4896,13 +4933,17 @@ impl EngagementFrontPlan {
                 .chain((1..wall.len()).map(|i| wall[(k + i) % wall.len()]))
                 .chain(std::iter::once(first));
             for s in round {
-                self.certify(s)?;
+                self.certify(s).inspect_err(|_| self.rollback(&mark))?;
                 if s.arc.is_some() {
                     self.report.arcs += 1;
                 }
                 self.queue(s.curve(z), MoveKind::Cut, None);
             }
-            if self.prove(stock, from, from, false, cancel)?.is_some() {
+            if self
+                .prove(stock, from, from, false, cancel)
+                .inspect_err(|_| self.rollback(&mark))?
+                .is_some()
+            {
                 if self.entry.policy() == EntryPolicy::StockEdge {
                     self.rollback(&mark);
                     self.report.wall_passes_skipped += 1;
@@ -4910,8 +4951,10 @@ impl EngagementFrontPlan {
                     tests::REVIEW_ROLLBACKS.with(|c| c.set(c.get() + 1));
                     return Ok(());
                 }
-                self.prove(stock, from, from, true, cancel)?
+                self.prove(stock, from, from, true, cancel)
+                    .inspect_err(|_| self.rollback(&mark))?
                     .map_or(Ok(()), |(_, detail)| {
+                        self.rollback(&mark);
                         Err(format!("engagement_front: {detail}"))
                     })?;
                 if let Some((_, detail)) = self.unresolved_refusal() {
@@ -4921,7 +4964,8 @@ impl EngagementFrontPlan {
                     return Err(format!("engagement_front: {detail}"));
                 }
             }
-            self.mark_pending_cuts(from, cancel)?;
+            self.mark_pending_cuts(from, cancel)
+                .inspect_err(|_| self.rollback(&mark))?;
             self.position = [start[0], start[1], z];
             self.report.wall_passes += 1;
         }
@@ -5213,7 +5257,9 @@ impl EngagementFrontPlan {
             self.layer.as_mut().unwrap().journal.clear();
             let mark = self.checkpoint();
             let from = self.pending.len();
-            let mut entered = self.wall_entry(strokes[0], stock, cancel)?;
+            let mut entered = self
+                .wall_entry(strokes[0], stock, cancel)
+                .inspect_err(|_| self.rollback(&mark))?;
             if !entered {
                 // No lead-in arc fits or is reached: start on the loop, in
                 // the air before the run, at the nearest point whose column
@@ -5221,9 +5267,10 @@ impl EngagementFrontPlan {
                 for back in [0.25, 0.5, 0.75, 1.] {
                     let lead = stroke_part(before, 1. - back, 1.);
                     let q = lead.a;
-                    let (height, _) =
-                        self.guides
-                            .cleared_entry_start(q, 0., z, Some(stock), cancel)?;
+                    let (height, _) = self
+                        .guides
+                        .cleared_entry_start(q, 0., z, Some(stock), cancel)
+                        .inspect_err(|_| self.rollback(&mark))?;
                     if height - z > crate::entry::skin(self.op.tolerance_mm) {
                         continue;
                     }
@@ -5233,7 +5280,7 @@ impl EngagementFrontPlan {
                     let above = self.travel(stock, here, q, proven, z);
                     self.line(above, [q[0], q[1], z], MoveKind::Plunge);
                     self.report.lifts += 1;
-                    self.certify(lead)?;
+                    self.certify(lead).inspect_err(|_| self.rollback(&mark))?;
                     if lead.arc.is_some() {
                         self.report.arcs += 1;
                     }
@@ -5247,20 +5294,26 @@ impl EngagementFrontPlan {
                 continue;
             }
             for &s in &strokes {
-                self.certify(s)?;
+                self.certify(s).inspect_err(|_| self.rollback(&mark))?;
                 if s.arc.is_some() {
                     self.report.arcs += 1;
                 }
                 self.queue(s.curve(z), MoveKind::Cut, None);
             }
-            if self.prove(stock, from, from, false, cancel)?.is_some() {
+            if self
+                .prove(stock, from, from, false, cancel)
+                .inspect_err(|_| self.rollback(&mark))?
+                .is_some()
+            {
                 if self.entry.policy() == EntryPolicy::StockEdge {
                     self.rollback(&mark);
                     self.report.wall_passes_skipped += 1;
                     continue;
                 }
-                self.prove(stock, from, from, true, cancel)?
+                self.prove(stock, from, from, true, cancel)
+                    .inspect_err(|_| self.rollback(&mark))?
                     .map_or(Ok(()), |(_, detail)| {
+                        self.rollback(&mark);
                         Err(format!("engagement_front: {detail}"))
                     })?;
                 if let Some((_, detail)) = self.unresolved_refusal() {
@@ -5269,7 +5322,8 @@ impl EngagementFrontPlan {
                     return Err(format!("engagement_front: {detail}"));
                 }
             }
-            self.mark_pending_cuts(from, cancel)?;
+            self.mark_pending_cuts(from, cancel)
+                .inspect_err(|_| self.rollback(&mark))?;
             let end = strokes.last().unwrap().b;
             self.position = [end[0], end[1], z];
             self.report.wall_passes += 1;
@@ -5644,7 +5698,8 @@ impl EngagementFrontPlan {
                 .map(|h| h.max(self.guides.cell_entry_height(stock, p)));
             let above = self.travel(stock, here, p, proven, z);
             self.line(above, [p[0], p[1], z], MoveKind::Plunge);
-            self.certify(Stroke::line(p, q))?;
+            self.certify(Stroke::line(p, q))
+                .inspect_err(|_| self.rollback(&mark))?;
             self.queue(
                 Curve::Line {
                     start: [p[0], p[1], z],
@@ -5659,8 +5714,15 @@ impl EngagementFrontPlan {
                 let f = i as f64 / steps as f64;
                 layer.cut([p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f], r);
             }
-            if self.prove(stock, from, from, false, cancel)?.is_some() {
-                if let Some((_, detail)) = self.prove(stock, from, from, true, cancel)? {
+            if self
+                .prove(stock, from, from, false, cancel)
+                .inspect_err(|_| self.rollback(&mark))?
+                .is_some()
+            {
+                if let Some((_, detail)) = self
+                    .prove(stock, from, from, true, cancel)
+                    .inspect_err(|_| self.rollback(&mark))?
+                {
                     self.rollback(&mark);
                     return Err(format!("engagement_front: {detail}"));
                 }
@@ -5677,8 +5739,16 @@ impl EngagementFrontPlan {
             self.report.stock_edge_entries += 1;
             self.report.slot_side_entries += 1;
             self.position = [q[0], q[1], z];
+            // The fourth_review regression pins its cancellation to the
+            // follow this advance feeds: the guarded stage tells the signal
+            // where the attempt stands (test-only; no production reading).
+            #[cfg(test)]
+            tests::slot_side_stage(tests::SLOT_SIDE_BEFORE_ADVANCE, tests::SLOT_SIDE_ADVANCED);
             let heading = (q[1] - p[1]).atan2(q[0] - p[0]);
-            if let Some(pts) = self.proven_pass(stock, q, heading, false, from, cancel)? {
+            if let Some(pts) = self
+                .proven_pass(stock, q, heading, false, from, cancel)
+                .inspect_err(|_| self.rollback(&mark))?
+            {
                 let end = *pts.last().unwrap();
                 self.position = [end[0], end[1], z];
             }
@@ -6971,6 +7041,199 @@ mod tests {
         }
     }
 
+    /// The StockEdge entry-policy refusal restores the attempt it rejects:
+    /// a caller that keeps requesting motions after the error must not be
+    /// handed the stroke the refusal rejected. This is the natural
+    /// refusal — default proof budgets, no forced outcomes — on the
+    /// plate-with-bosses corner no declared width can prove, driven
+    /// through the public `OperationPlan` API with every preceding motion
+    /// committed to stock (the review of 6163295).
+    #[test]
+    fn third_review_stock_edge_refusal_cannot_emit_rejected_cut() {
+        let mut value = plate_with_bosses_manifest();
+        value["operations"][0]["entry"]["kind"] = "stock_edge".into();
+        let m: crate::stream::StreamManifest = serde_json::from_value(value).unwrap();
+        let tool = m.tools[0].prepare().unwrap();
+        let mut stock = Stock::new(m.stock.height().unwrap().clone()).unwrap();
+        let mut plan = crate::operation::OperationPlan::prepare_with_stock(
+            m.operations[0].clone(),
+            &m.tools[0],
+            &stock,
+            m.initial_position_mm,
+            1,
+            &NeverCancelled,
+        )
+        .unwrap();
+        let mut refused = false;
+        for _ in 0..4000 {
+            match plan.next_motion_with_stock(&stock, &NeverCancelled) {
+                Err(e) => {
+                    eprintln!("original refusal: {e}");
+                    assert!(e.contains("forbids cutting it as entry motion"));
+                    refused = true;
+                    break;
+                }
+                Ok(Some(motion)) => {
+                    let delta = stock
+                        .preview_sweep(&tool, &motion, 1., m.sweep, &NeverCancelled)
+                        .unwrap();
+                    stock.apply_delta(&delta).unwrap();
+                }
+                Ok(None) => break,
+            }
+        }
+        assert!(refused);
+        for _ in 0..1000 {
+            match plan.next_motion_with_stock(&stock, &NeverCancelled) {
+                Ok(Some(motion)) => {
+                    eprintln!("published after refusal: {motion:?}");
+                    let start = motion.curve.start();
+                    assert!(
+                        motion.kind != MoveKind::Cut
+                            || (start[0] - 59.30423836596916).abs() > 1e-6
+                            || (start[1] - 24.40582527946715).abs() > 1e-6,
+                        "published the specifically rejected cut: {motion:?}"
+                    );
+                    let delta = stock
+                        .preview_sweep(&tool, &motion, 1., m.sweep, &NeverCancelled)
+                        .unwrap();
+                    stock.apply_delta(&delta).unwrap();
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// The slot-side entry attempt used by the cancellation regression
+    /// below: the fixture's first operation, a committed precut slot, the
+    /// layer built on it, and the slot offered for a stock-edge-or-helix
+    /// entry beside it.
+    fn fourth_review_setup(
+        manifest: &mut crate::stream::StreamManifest,
+    ) -> Result<(EngagementFrontPlan, Stock), String> {
+        let crate::pocket::Operation::AdaptivePocket(mut op) = manifest.operations.remove(0) else {
+            panic!("fixture");
+        };
+        op.pocket.entry = Some(
+            serde_json::from_value(serde_json::json!({
+                "kind": "stock_edge_or_helix",
+                "angle_rad": 0.05235987755982989
+            }))
+            .unwrap(),
+        );
+        let mut stock = Stock::new(manifest.stock.height().unwrap().clone())?;
+        let mut plan = EngagementFrontPlan::prepare(
+            op.pocket,
+            &manifest.tools[0],
+            stock.spec(),
+            manifest.initial_position_mm,
+            0.5,
+            true,
+            &NeverCancelled,
+        )?;
+        let z = plan.z;
+        let (a, b) = ([6., 8.], [10., 8.]);
+        let slot = Motion {
+            id: 0,
+            operation: "precut-slot".into(),
+            tool: manifest.tools[0].id.clone(),
+            kind: MoveKind::Cut,
+            curve: Curve::Line {
+                start: [a[0], a[1], z],
+                end: [b[0], b[1], z],
+            },
+            feed_mm_min: Some(600.),
+        };
+        let tool = manifest.tools[0].prepare()?;
+        let delta = stock.preview_sweep(&tool, &slot, 1., manifest.sweep, &NeverCancelled)?;
+        stock.apply_delta(&delta)?;
+        plan.build_layer(&stock, &NeverCancelled)?;
+        plan.ramp_slots.push((a, b));
+        Ok((plan, stock))
+    }
+
+    /// A cancellation after the slot-side entry: the attempt is rolled back
+    /// to its checkpoint — queue, journal, report and position — so the
+    /// resumed motion starts from the last actual tool position, not from
+    /// the point the discarded attempt had optimistically advanced to (the
+    /// review of 67a7981).
+    ///
+    /// The signal locates itself instead of trusting a poll count: it fires
+    /// only when a poll is taken with the attempt in its follow stage, which
+    /// `slot_side_entry` reaches only after the across-slot proof has
+    /// succeeded and the position has advanced beside the slot. A candidate
+    /// rejected before the attempt — a clearance query that polls and then
+    /// turns the entry down — cannot reach that stage, cannot fire the
+    /// signal, and leaves the call Ok, which fails this test instead of
+    /// passing it. The stage transitions themselves are guarded while this
+    /// test is armed: the follow's marker must begin at the advanced marker,
+    /// which must begin at the start, so the ordering the assertions rely on
+    /// is enforced by the markers, not assumed from the call path. Every
+    /// assertion is unconditional: the cancellation is
+    /// required and must be the cancellation, no stroke of the discarded
+    /// attempt may survive, the position must restore with the attempt, and
+    /// the retried planner must produce a motion starting where the tool
+    /// actually is.
+    #[test]
+    fn fourth_review_slot_side_cancel_restores_position() {
+        let _stages = tests::SlotSideStages::arm();
+        let mut m: crate::stream::StreamManifest = serde_json::from_str(include_str!(
+            "../../fixtures/operations/adaptive-pocket.json"
+        ))
+        .unwrap();
+        let (mut plan, stock) = fourth_review_setup(&mut m).unwrap();
+        let before = plan.position;
+        let polls = std::cell::Cell::new(0usize);
+        let fired_stage = std::cell::Cell::new(tests::SLOT_SIDE_BEFORE_ADVANCE);
+        let error = plan
+            .slot_side_entry([10., 9.], &stock, &|| {
+                let stage = tests::SLOT_SIDE_STAGE.with(|c| c.get());
+                polls.set(polls.get() + 1);
+                if stage == tests::SLOT_SIDE_IN_FOLLOW {
+                    fired_stage.set(stage);
+                    return true;
+                }
+                false
+            })
+            .expect_err("the slot-side attempt must cancel inside its follow");
+        assert!(
+            polls.get() > 0,
+            "the signal must have been polled at a real cancellation point"
+        );
+        assert_eq!(
+            fired_stage.get(),
+            tests::SLOT_SIDE_IN_FOLLOW,
+            "the cancellation must fire at a poll the follow takes, \
+             after the position advance beside the slot"
+        );
+        assert!(
+            error.contains("cancel"),
+            "the failure must be the cancellation, not another defect: {error}"
+        );
+        assert_eq!(
+            plan.pending.len(),
+            0,
+            "no stroke of the cancelled attempt may survive"
+        );
+        assert_eq!(
+            plan.position, before,
+            "the rollback must restore the position with the attempt"
+        );
+        // The resumed planning is ordinary; disarm the guards before it, so
+        // the retry's own entries are not held to the observed attempt's
+        // stage sequence.
+        drop(_stages);
+        let resumed = plan
+            .next_motion_with_stock(&stock, &NeverCancelled)
+            .expect("the retry after cancellation must not error");
+        let motion = resumed.expect("the retry must plan a motion to resume with");
+        assert_eq!(
+            motion.curve.start(),
+            before,
+            "resumed motion must start at the last actual tool position"
+        );
+    }
+
     #[test]
     fn open_block_plan_matches_the_scans_at_every_decision() {
         let (motions, report) = plan_checked(
@@ -7323,6 +7586,15 @@ mod tests {
     // --- production knob): the limit and wider queries come back unresolved
     // --- with chosen reasons and counters, for a chosen number of queries.
 
+    /// Where the fourth_review slot-side cancellation stands in its attempt:
+    /// 0 up to the position advance beside the slot, 1 from that advance on,
+    /// 2 once the follow that the advance feeds has begun. The regression's
+    /// signal fires only at a poll read at 2, so a candidate rejected before
+    /// the attempt can neither trigger the cancellation nor pass the test.
+    pub(super) const SLOT_SIDE_BEFORE_ADVANCE: u8 = 0;
+    pub(super) const SLOT_SIDE_ADVANCED: u8 = 1;
+    pub(super) const SLOT_SIDE_IN_FOLLOW: u8 = 2;
+
     thread_local! {
         /// Test-only branch counters: rollback calls in the wall paths, and
         /// whole-loop wall cuts (`Wall::Whole`, as a pocket's wall pass).
@@ -7332,11 +7604,62 @@ mod tests {
             const { std::cell::Cell::new(0) };
         pub(super) static REVIEW_WALL_RUNS: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
+        /// The slot-side attempt's stage marker, set by the guarded
+        /// `#[cfg(test)]` transitions in `slot_side_entry` (at the position
+        /// advance) and `follow` (at its start); read by the fourth_review
+        /// regression's signal.
+        pub(super) static SLOT_SIDE_STAGE: std::cell::Cell<u8> =
+            const { std::cell::Cell::new(SLOT_SIDE_BEFORE_ADVANCE) };
+        /// Whether the guarded stages are enforced for the fourth_review
+        /// regression: hooks in ordinary tests must not touch them.
+        static SLOT_SIDE_ARMED: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
         static REVIEW_REASONS: std::cell::Cell<Option<(UnresolvedReason, UnresolvedReason)>> =
             const { std::cell::Cell::new(None) };
         static FORCED_QUERIES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(usize::MAX) };
         static FORCED_SKIP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// One guarded stage transition of the fourth_review slot-side
+    /// regression (test-only hooks in `slot_side_entry` and `follow`, no
+    /// production reading): while the regression is armed, each stage must
+    /// begin at the one before it — `BEFORE_ADVANCE`, then `ADVANCED`, then
+    /// `IN_FOLLOW` — so the ordering its assertions rely on is enforced by
+    /// these markers themselves and not assumed from the call path. A
+    /// transition taken out of order fails loudly; unarmed hooks do not
+    /// touch the stage.
+    pub(super) fn slot_side_stage(expected: u8, next: u8) {
+        SLOT_SIDE_ARMED.with(|armed| {
+            if !armed.get() {
+                return;
+            }
+            SLOT_SIDE_STAGE.with(|stage| {
+                assert_eq!(
+                    stage.get(),
+                    expected,
+                    "slot-side stage out of order: the {next} transition requires the attempt at {expected}, found {}",
+                    stage.get()
+                );
+                stage.set(next);
+            });
+        });
+    }
+
+    /// Arms the guarded stages for one scope. Dropping disarms, so a failed
+    /// assertion cannot leave unrelated tests on the thread under guards.
+    pub(super) struct SlotSideStages;
+    impl SlotSideStages {
+        pub(super) fn arm() -> SlotSideStages {
+            SLOT_SIDE_STAGE.with(|c| c.set(SLOT_SIDE_BEFORE_ADVANCE));
+            SLOT_SIDE_ARMED.with(|c| c.set(true));
+            SlotSideStages
+        }
+    }
+    impl Drop for SlotSideStages {
+        fn drop(&mut self) {
+            SLOT_SIDE_ARMED.with(|c| c.set(false));
+        }
     }
 
     /// The reasons to force, and one query fewer left to force. Queries

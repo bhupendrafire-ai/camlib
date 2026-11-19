@@ -110,6 +110,26 @@ Key settings:
   tangential_accel_mm_s2, rapid_feed_mm_min, junction_mode="exact_stop" or
   "tangent")` enables `machine.schedule(program)` (time estimate, feeds that
   respect the limits) and `schedule_post_feeds=True` (posts the scheduled feeds).
+  Optional `per_block_s=0.0` adds caller-declared seconds to every segment ending
+  at rest, including rapids. It must be finite and between 0 and 10 seconds.
+  Exact-stop mode adds it to every motion block; tangent mode adds it only at
+  stops, including the final endpoint. Checked posting reports exact-stop
+  source and decoded totals separately, so lowering one source motion into
+  several decoded motions can increase the decoded stop cost.
+  This term models a fixed stop cost separately from tangential acceleration.
+  It does not infer a controller's cost or model speed-dependent settling.
+  Zero preserves the previous schedule identity.
+
+  For a synthetic example, consider three consecutive 20 mm lines at
+  1200 mm/min with 100 mm/s² tangential acceleration and no feed reserve.
+  Each exact-stop line takes 1.2 s: two 0.2 s ramps cover 4 mm, and the
+  remaining 16 mm takes 0.8 s. If an example controller spends another
+  0.125 s at each stop, `MotionPolicy(100, 6000, feed_reserve_fraction=0,
+  per_block_s=0.125)` predicts 3.975 s for the three lines instead of 3.6 s.
+  With `junction_mode="tangent"`, the continuous 60 mm path takes 3.2 s plus
+  one final stop, giving 3.325 s. The cost is chosen for this example and is
+  not a measured controller value. The runnable synthetic case is
+  `fixed_stop_cost_matches_synthetic_controller_timeline` in `tests/dynamics.rs`.
 - `revision`: your machine definition's version, recorded with the run.
 
 ## Dialect

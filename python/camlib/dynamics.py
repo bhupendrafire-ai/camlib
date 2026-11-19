@@ -16,6 +16,11 @@ class MotionPolicy:
     rapid_feed_mm_min: float
     junction_mode: str = 'exact_stop'
     feed_reserve_fraction: float = 0.01
+    # Seconds added at every stop (a segment ending at rest): a controller's
+    # per-block cost tangential acceleration does not model, such as
+    # acceleration/deceleration after interpolation, block processing and
+    # in-position checks. 0 keeps the schedule and its identity unchanged.
+    per_block_s: float = 0.0
 
 
 @dataclass(frozen=True)

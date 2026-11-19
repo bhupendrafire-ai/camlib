@@ -10,6 +10,7 @@ fn settings(mode: JunctionMode) -> Settings {
             rapid_feed_mm_min: 6000.,
             junction_mode: mode,
             feed_reserve_fraction: 0.,
+            per_block_s: 0.,
         },
         max_feed_mm_min: 10000.,
         max_normal_accel_mm_s2: None,
@@ -83,6 +84,59 @@ fn exact_stop_triangle_and_trapezoid_match_integrated_velocity() {
         assert_eq!(r.feed_limited_motions, 0);
     }
 }
+#[test]
+fn fixed_stop_cost_matches_synthetic_controller_timeline() {
+    let p = program(vec![line(0., 20.), line(20., 40.), line(40., 60.)], vec![1200.; 3]);
+    let mut s = settings(JunctionMode::ExactStop);
+    s.policy.per_block_s = 0.125;
+    let exact = schedule(&p, s.clone(), &|| false).unwrap();
+    // Each 20 mm block has two 0.2 s ramps, 0.8 s cruise and 0.125 s at rest.
+    near(exact.motion_seconds, 3.975);
+    for segment in &exact.segments {
+        near(segment.seconds, 1.325);
+        near(segment.exit_mm_s, 0.);
+    }
+    s.policy.junction_mode = JunctionMode::Tangent;
+    let tangent = schedule(&p, s, &|| false).unwrap();
+    // A 60 mm continuous path takes 3.2 s, followed by one 0.125 s stop.
+    near(tangent.motion_seconds, 3.325);
+    near(tangent.segments[0].exit_mm_s, 20.);
+    near(tangent.segments[1].exit_mm_s, 20.);
+    near(tangent.segments[2].exit_mm_s, 0.);
+}
+
+#[test]
+fn omitted_stop_cost_defaults_to_zero_and_preserves_schedule_identity() {
+    let p = program(vec![line(0., 20.)], vec![1200.]);
+    let zero = settings(JunctionMode::ExactStop);
+    let mut legacy = serde_json::to_value(&zero).unwrap();
+    legacy["policy"].as_object_mut().unwrap().remove("per_block_s");
+    let restored: Settings = serde_json::from_value(legacy.clone()).unwrap();
+    near(restored.policy.per_block_s, 0.);
+    assert_eq!(serde_json::to_value(&zero).unwrap(), legacy);
+    let plain = schedule(&p, restored, &|| false).unwrap();
+    near(plain.motion_seconds, 1.2);
+    assert_eq!(schedule(&p, zero.clone(), &|| false).unwrap().identity, plain.identity);
+    let mut with_cost = zero;
+    with_cost.policy.per_block_s = 0.125;
+    let changed = schedule(&p, with_cost, &|| false).unwrap();
+    near(changed.motion_seconds, 1.325);
+    assert_ne!(changed.identity, plain.identity);
+}
+
+#[test]
+fn stop_cost_requires_finite_seconds_in_range() {
+    let p = program(vec![line(0., 20.)], vec![1200.]);
+    for invalid in [-0.001, f64::NAN, f64::INFINITY, 10.001] {
+        let mut s = settings(JunctionMode::ExactStop);
+        s.policy.per_block_s = invalid;
+        assert!(schedule(&p, s, &|| false).is_err(), "{invalid} accepted");
+    }
+    let mut s = settings(JunctionMode::ExactStop);
+    s.policy.per_block_s = 10.;
+    near(schedule(&p, s, &|| false).unwrap().motion_seconds, 11.2);
+}
+
 #[test]
 fn lookahead_brakes_before_short_slow_block_and_recovers_at_tangent_join() {
     let p = program(
@@ -274,4 +328,20 @@ fn cancellation_invalid_source_identity_and_check_only_have_no_partial_result() 
         },
     };
     assert!(schedule(&changed, settings(JunctionMode::Tangent), &|| false).is_err());
+}
+
+#[test]
+fn dense_finish_junction_uses_the_same_unit_directions_on_every_host() {
+    // The largest component difference between the exact unit tangents is
+    // 63.95651 epsilons, just inside the existing 64-epsilon join threshold.
+    let a = [16.91277459536761, -1.1, 6.129397685938713];
+    let b = [16.699175699916843, -1.1, 6.2005973177556335];
+    let c = [16.485576804466078, -1.1, 6.271796949572558];
+    let p = program(
+        vec![Curve::Line { start: a, end: b }, Curve::Line { start: b, end: c }],
+        vec![600.; 2],
+    );
+    let report = schedule(&p, settings(JunctionMode::Tangent), &|| false).unwrap();
+    assert!(report.segments[0].exit_mm_s > 0.);
+    assert_eq!(report.segments[0].exit_mm_s, report.segments[1].entry_mm_s);
 }

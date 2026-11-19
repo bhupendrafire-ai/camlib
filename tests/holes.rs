@@ -62,6 +62,7 @@ fn ordering(max_work: usize) -> camlib::ordering::HoleOrdering {
                 rapid_feed_mm_min: 6000.,
                 junction_mode: JunctionMode::ExactStop,
                 feed_reserve_fraction: 0.,
+                per_block_s: 0.,
             },
             max_feed_mm_min: 6000.,
             max_normal_accel_mm_s2: None,

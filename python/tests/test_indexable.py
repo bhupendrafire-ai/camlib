@@ -1,7 +1,9 @@
 """Indexable cutters through the public API, native stock, reports and posting."""
 
+from copy import deepcopy
 from dataclasses import replace
 import json
+import math
 import unittest
 from tempfile import TemporaryDirectory
 
@@ -36,6 +38,36 @@ def run(config, target=None):
             target or floor_target(), Options(comparison_tolerance_mm=0.002, scope_to_region=True)
         ).check(sim.state)
         return events, reports, material, sim.state.heights.tolist()
+
+
+def physical_material_assessment(report):
+    assessment = deepcopy(report)
+    # A feed edit creates a different run and exact motion identity. The
+    # stock heights, regions, tolerances and physical findings must match.
+    assessment.pop('stock_sha256')
+    binding = assessment['context']['run']
+    binding.pop('manifest_sha256')
+    binding['run'].pop('id')
+    return assessment
+
+
+def horizontal_bounds(curve):
+    start, end = curve['start'], curve['end']
+    points = [start, end]
+    if curve['kind'] == 'arc':
+        assert curve['plane'] == 'xy'
+        cx, cy, z = curve['center']
+        x, y = start[0] - cx, start[1] - cy
+        radius, phase = math.hypot(x, y), math.atan2(y, x)
+        sweep = curve['sweep_rad']
+        for cardinal in range(4):
+            angle = cardinal * math.pi / 2
+            travelled = ((angle - phase) * math.copysign(1, sweep)) % math.tau
+            if travelled <= abs(sweep):
+                points.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle), z))
+    else:
+        assert curve['kind'] == 'line'
+    return [(min(p[i] for p in points), max(p[i] for p in points)) for i in (0, 1)]
 
 
 class IndexableTest(unittest.TestCase):
@@ -121,6 +153,56 @@ class IndexableTest(unittest.TestCase):
         self.assertEqual(material['gouge']['assessment'], 'within_tolerance')
         self.assertEqual(material['residual']['assessment'], 'definite_excess')
         self.assertLess(min(heights[1::2]), 4)
+
+    def test_raster_exterior_links_keep_geometry_and_stock(self):
+        from camlib import EndMill, HolderSection
+
+        config = roughing_job()
+        for mill in (
+            config['tools'][0],
+            ToolAssembly(
+                'flat',
+                EndMill('end', diameter=10, flute_length=10, overall_length=30),
+                15,
+                40,
+                (HolderSection(15, 40, 6, 6),),
+            ),
+        ):
+            for omit in (False, True):
+                with self.subTest(tool=mill.id, omit_empty_cuts=omit):
+                    base_op = replace(config['operations'][0], tool=mill, omit_empty_cuts=omit)
+                    prepared = dict(config, tools=(mill,), operations=(base_op,))
+                    baseline, _, base_check, base_stock = run(prepared)
+                    edited = replace(base_op, link_feed_mm_min=2000)
+                    actual, reports, material, heights = run(dict(prepared, operations=(edited,)))
+                    self.assertEqual(heights, base_stock)
+                    self.assertNotEqual(material['stock_sha256'], base_check['stock_sha256'])
+                    self.assertEqual(physical_material_assessment(material), physical_material_assessment(base_check))
+                    self.assertEqual(len(baseline), len(actual))
+                    changed = 0
+                    for old, new in zip(baseline, actual):
+                        if old == new:
+                            continue
+                        a, b = old['motion'], new['motion']
+                        self.assertEqual(a['kind'], 'link')
+                        self.assertEqual(dict(b, feed_mm_min=a['feed_mm_min']), a)
+                        self.assertEqual(b['feed_mm_min'], 2000)
+                        start, end = b['curve']['start'], b['curve']['end']
+                        self.assertEqual(start[2], end[2])
+                        # Independent analytic check of this fixture's largest
+                        # assembly radius, including the 6 mm holder.
+                        self.assertTrue(
+                            any(
+                                lo > edge + 6 or hi < -edge - 6
+                                for (lo, hi), edge in zip(horizontal_bounds(b['curve']), (10, 8))
+                            ),
+                            b,
+                        )
+                        changed += 1
+                    self.assertGreater(changed, 0)
+                    self.assertEqual(
+                        sum(layer['clearing']['exterior_links'] for layer in reports[-1]['layers']), changed
+                    )
 
     def test_insert_depth_limit_is_checked_before_planning(self):
         config = facing_job()

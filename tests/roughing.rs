@@ -2231,6 +2231,48 @@ fn scheduled_run(m: &StreamManifest) -> ScheduledRun {
         nominal,
     }
 }
+#[test]
+fn raster_exterior_links_change_only_the_feed_and_keep_committed_stock() {
+    let base = fixture(false);
+    let old = scheduled_run(&base);
+    let mut auto = base.clone();
+    let Operation::Roughing(op) = &mut auto.operations[0] else {
+        panic!("rough")
+    };
+    op.link_feed_mm_min = Some(1800.);
+    let new = scheduled_run(&auto);
+    assert_eq!(new.motions.len(), old.motions.len());
+    assert_eq!(new.stock.cells(), old.stock.cells());
+    let mut changed = 0;
+    let spec = base.stock.height().unwrap();
+    for (a, b) in old.motions.iter().zip(&new.motions) {
+        let mut restored = b.clone();
+        restored.feed_mm_min = a.feed_mm_min;
+        assert_eq!(
+            serde_json::to_value(a).unwrap(),
+            serde_json::to_value(restored).unwrap()
+        );
+        if a.feed_mm_min == b.feed_mm_min {
+            continue;
+        }
+        assert_eq!(b.kind, MoveKind::Link);
+        assert_eq!(b.feed_mm_min, Some(1800.));
+        let range = bounds(&b.curve, 0., 1.);
+        assert_eq!(b.curve.start()[2], b.curve.end()[2]);
+        assert!((0..2).any(|axis| range[1][axis] + 4. < spec.min_mm[axis]
+            || range[0][axis] - 4. > spec.max_mm[axis]));
+        changed += 1;
+    }
+    assert!(changed > 0 && new.nominal < old.nominal);
+    let reported: u64 = new.report["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|layer| layer["clearing"]["exterior_links"].as_u64().unwrap())
+        .sum();
+    assert_eq!(reported, changed);
+}
+
 fn set_routing(m: &mut StreamManifest) {
     let Operation::Roughing(op) = &mut m.operations[0] else {
         panic!("rough")

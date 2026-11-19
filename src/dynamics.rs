@@ -21,6 +21,15 @@ pub struct Policy {
     pub junction_mode: JunctionMode,
     /// Reserve on configured speed/normal-acceleration caps, not geometry error.
     pub feed_reserve_fraction: f64,
+    /// Seconds added to every segment that ends at rest: a controller's
+    /// per-stop cost that tangential acceleration does not model, such as
+    /// acceleration/deceleration after interpolation, block processing and
+    /// in-position checking. Zero (the default) is omitted from identity.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub per_block_s: f64,
+}
+fn is_zero(x: &f64) -> bool {
+    *x == 0.
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,6 +77,8 @@ impl Settings {
             || !positive(self.max_feed_mm_min, 1e7)
             || !self.policy.feed_reserve_fraction.is_finite()
             || !(0.0..1.0).contains(&self.policy.feed_reserve_fraction)
+            || !self.policy.per_block_s.is_finite()
+            || !(0.0..=10.0).contains(&self.policy.per_block_s)
             || !self.feed_quantum_mm_min.is_finite()
             || !(1e-12..=1e3).contains(&self.feed_quantum_mm_min)
             || self
@@ -189,6 +200,7 @@ pub(crate) fn capped_segment(
         rapid_estimate: original.is_none(),
     };
     time_segment(&mut segment, 0., 0., settings.policy.tangential_accel_mm_s2);
+    segment.seconds += settings.policy.per_block_s;
     Ok(segment)
 }
 
@@ -229,7 +241,7 @@ pub(crate) fn decoded_seconds(
         rapid_estimate: false,
     };
     time_segment(&mut segment, 0., 0., settings.policy.tangential_accel_mm_s2);
-    Ok(segment.seconds)
+    Ok(segment.seconds + settings.policy.per_block_s)
 }
 
 /// O(n) forward/backward lookahead on one complete, validated program. Returns
@@ -324,6 +336,9 @@ pub fn schedule(
     for (i, s) in segments.iter_mut().enumerate() {
         cancelled(cancel)?;
         time_segment(s, joins[i], joins[i + 1], a);
+        if joins[i + 1] == 0. {
+            s.seconds += settings.policy.per_block_s;
+        }
         seconds += s.seconds;
         identity.update(s.scheduled_feed_mm_min.unwrap_or(0.).to_le_bytes());
     }
@@ -336,6 +351,6 @@ pub fn schedule(
         feed_limited_motions: limited,
         unmodeled_state_events: unmodeled,
         segments,
-        scope: "Nominal line/arc/helix path; constant scalar tangential acceleration, optional separate normal/axis-speed limits, no jerk or axis-acceleration model. Stops at state events, rapid boundaries and non-tangent corners. Rapid speed is an authored estimate. Excludes tool-change/spindle/operator dwell, endpoint correction and controller behavior; not physical cycle time.",
+        scope: "Nominal line/arc/helix path; constant scalar tangential acceleration, optional separate normal/axis-speed limits, no jerk or axis-acceleration model. Stops at state events, rapid boundaries and non-tangent corners; each stop adds the policy's per-block seconds. Rapid speed is an authored estimate. Excludes tool-change/spindle/operator dwell, endpoint correction and controller behavior; not physical cycle time.",
     })
 }
