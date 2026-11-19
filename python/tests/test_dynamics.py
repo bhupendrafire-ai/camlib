@@ -13,6 +13,53 @@ from test_post import fixture
 
 
 class MotionPolicyTest(unittest.TestCase):
+    def test_fixed_stop_cost_schedule_and_checked_post(self):
+        program, machine = fixture()
+        start = (0, 0, 3)
+        program = replace(
+            program,
+            initial_position_mm=start,
+            events=(
+                program.events[0],
+                replace(program.events[1], position_after_mm=start),
+                program.events[2],
+                *(Motion(i + 1, 'timing', 't1', Line((20 * i, 0, 3), (20 * (i + 1), 0, 3)), 1200) for i in range(3)),
+            ),
+        )
+        machine = replace(
+            machine,
+            tools=(replace(machine.tools[0], position_after_mm=start),),
+            motion_policy=MotionPolicy(100, 6000, feed_reserve_fraction=0, per_block_s=0.125),
+            schedule_post_feeds=True,
+        )
+        exact = machine.schedule(program)
+        self.assertAlmostEqual(exact.motion_seconds, 3.975)
+        tangent = replace(machine, motion_policy=replace(machine.motion_policy, junction_mode='tangent'))
+        self.assertAlmostEqual(tangent.schedule(program).motion_seconds, 3.325)
+        zero = replace(machine, motion_policy=replace(machine.motion_policy, per_block_s=0))
+        plain = zero.schedule(program)
+        self.assertAlmostEqual(plain.motion_seconds, 3.6)
+        self.assertNotEqual(exact.report['identity'], plain.report['identity'])
+        chunks = list(post_program(program, machine))
+        summary = chunks[-1].data['motion_scheduling']['summary']
+        self.assertAlmostEqual(summary['source_exact_stop_seconds'], 3.975)
+        self.assertAlmostEqual(summary['decoded_exact_stop_seconds'], 3.975)
+
+    def test_fixed_stop_cost_checked_post_includes_rapid(self):
+        program, machine = fixture()
+        events = list(program.events)
+        events[4] = replace(events[4], kind='rapid', feed_mm_min=None)
+        program = replace(program, events=tuple(events))
+        machine = replace(
+            machine,
+            motion_policy=MotionPolicy(100, 1200, feed_reserve_fraction=0, per_block_s=0.125),
+            schedule_post_feeds=True,
+        )
+        chunks = list(post_program(program, machine))
+        summary = chunks[-1].data['motion_scheduling']['summary']
+        self.assertAlmostEqual(summary['source_exact_stop_seconds'], 0.575)
+        self.assertAlmostEqual(summary['decoded_exact_stop_seconds'], 0.575)
+
     def test_source_unchanged_feed_limited_checked_post_and_definition_identity(self):
         program, setup = fixture()
         machine = Machine(
