@@ -119,7 +119,7 @@ fn arc_step(radius: f64, sagitta: f64) -> f64 {
     if radius <= sagitta {
         PI / 8.
     } else {
-        (2. * (1. - sagitta / radius).acos()).clamp(1e-6, PI / 8.)
+        (2. * metallic::acos(1. - sagitta / radius)).clamp(1e-6, PI / 8.)
     }
 }
 
@@ -149,7 +149,7 @@ fn push_spiral_point(
 pub(crate) fn reach(center: [f64; 2], lo: [f64; 2], hi: [f64; 2]) -> f64 {
     [lo[0], hi[0]]
         .iter()
-        .flat_map(|x| [lo[1], hi[1]].map(|y| (x - center[0]).hypot(y - center[1])))
+        .flat_map(|x| [lo[1], hi[1]].map(|y| metallic::hypot(x - center[0], y - center[1])))
         .fold(0., f64::max)
 }
 
@@ -172,10 +172,10 @@ pub(crate) fn spiral(
     let sign = if clockwise { -1. } else { 1. };
     let point = |theta: f64| {
         let r = inner + pitch * theta / TAU;
-        [
-            center[0] + r * (sign * theta).cos(),
-            center[1] + r * (sign * theta).sin(),
-        ]
+        // These vertices are clipped and swept into stock. Even a last-bit
+        // host trig difference can change a clipped endpoint (#353).
+        let (sin, cos) = metallic::sincos(sign * theta);
+        [center[0] + r * cos, center[1] + r * sin]
     };
     let mut points = Vec::with_capacity(max_points);
     push_spiral_point(&mut points, point(0.), max_points)?;
@@ -206,7 +206,7 @@ pub(crate) fn radial(
     (0..spokes)
         .map(|k| {
             let angle = start_rad + k as f64 * step;
-            let (s, c) = angle.sin_cos();
+            let (s, c) = metallic::sincos(angle);
             let a = [center[0] + inner * c, center[1] + inner * s];
             let b = [center[0] + outer * c, center[1] + outer * s];
             if alternate && k % 2 == 1 {
@@ -237,7 +237,7 @@ pub(crate) fn flatten(
         match *segment {
             TraceSegment::Line { end_mm } => {
                 if !end_mm.iter().all(|v| v.is_finite())
-                    || (end_mm[0] - at[0]).hypot(end_mm[1] - at[1]) <= guard
+                    || metallic::hypot(end_mm[0] - at[0], end_mm[1] - at[1]) <= guard
                 {
                     return Err(format!(
                         "path {index}, segment {i}: line needs a finite end away from its start"
@@ -250,7 +250,7 @@ pub(crate) fn flatten(
                 center_mm,
                 sweep_rad,
             } => {
-                let radius = (at[0] - center_mm[0]).hypot(at[1] - center_mm[1]);
+                let radius = metallic::hypot(at[0] - center_mm[0], at[1] - center_mm[1]);
                 if !center_mm.iter().all(|v| v.is_finite())
                     || !sweep_rad.is_finite()
                     || sweep_rad == 0.
@@ -263,12 +263,12 @@ pub(crate) fn flatten(
                 }
                 let count = (sweep_rad.abs() / arc_step(radius, sagitta)).ceil();
                 check_points(count, "projected arc")?;
-                let start = (at[1] - center_mm[1]).atan2(at[0] - center_mm[0]);
+                let start = metallic::atan2(at[1] - center_mm[1], at[0] - center_mm[0]);
                 for k in 1..=count as usize {
                     let angle = start + sweep_rad * k as f64 / count;
                     points.push([
-                        center_mm[0] + radius * angle.cos(),
-                        center_mm[1] + radius * angle.sin(),
+                        center_mm[0] + radius * metallic::cos(angle),
+                        center_mm[1] + radius * metallic::sin(angle),
                     ]);
                 }
                 at = *points.last().unwrap();
@@ -413,6 +413,32 @@ pub(crate) fn clip(points: &[[f64; 2]], lo: [f64; 2], hi: [f64; 2]) -> Vec<Vec<[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pattern_reach_and_chord_step_match_high_precision_geometry() {
+        // Correctly rounded hypot and acos, evaluated at 100 decimal digits.
+        assert_eq!(
+            reach([0., 0.], [0., 0.], [1.1435546875, 1.1484375]),
+            1.6206868959516743
+        );
+        assert_eq!(arc_step(6., 0.0068359375), 0.09547939359692625);
+    }
+
+    #[test]
+    fn spiral_partial_turns_end_at_reproducible_polar_coordinates() {
+        // Reference values use the binary64 terminal angles from the pitch
+        // and turn count, with sin and cos evaluated to 100 decimal digits
+        // and rounded to binary64 before multiplication by the radius.
+        for (outer, pitch, xy) in [
+            (2.17578125, 1., [0.9782559008500616, 1.943460686585555]),
+            (2.3154296875, 0.75, [1.976205250452715, 1.206576746767263]),
+        ] {
+            let ccw = spiral([0., 0.], 0., outer, pitch, true, false, 0.005).unwrap();
+            assert_eq!(ccw.last(), Some(&xy));
+            let cw = spiral([0., 0.], 0., outer, pitch, false, true, 0.005).unwrap();
+            assert_eq!(cw[0], [xy[0], -xy[1]]);
+        }
+    }
 
     #[test]
     fn spiral_checked_buffer_refuses_growth_before_reallocation() {

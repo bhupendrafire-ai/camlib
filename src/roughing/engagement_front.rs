@@ -92,13 +92,13 @@ impl Grid {
         Some((lo, [hi[0] as usize, hi[1] as usize]))
     }
     /// Whether a cell centre `dx`, `dy` from a point is within `rad` of it,
-    /// as `dx.hypot(dy) <= rad` decides. The squared distance settles all
-    /// but the cells within `DISTANCE_SLACK` of the rim (`sure` and `rim`
-    /// from `rim_bounds`); only those need the root.
+    /// using the same portable distance as the nearest-cell search. Only cells
+    /// within `DISTANCE_SLACK` of the rim need the root. For the others, the
+    /// squared distance and the bounds from `rim_bounds` decide membership.
     #[inline]
     fn within(dx: f64, dy: f64, rad: f64, sure: f64, rim: f64) -> bool {
         let d2 = dx * dx + dy * dy;
-        d2 <= sure || (d2 <= rim && dx.hypot(dy) <= rad)
+        d2 <= sure || (d2 <= rim && metallic::hypot(dx, dy) <= rad)
     }
     /// Squared distances surely within `rad`, and the largest that can be.
     /// Nothing is within a negative radius.
@@ -140,7 +140,7 @@ impl Grid {
             let cy = self.y0 + (j as f64 + 0.5) * self.c;
             for i in lo[0]..=hi[0] {
                 let cx = self.x0 + (i as f64 + 0.5) * self.c;
-                let d = (cx - p[0]).hypot(cy - p[1]);
+                let d = metallic::hypot(cx - p[0], cy - p[1]);
                 if d <= rad {
                     f(self.idx(i, j), [cx, cy], d);
                 }
@@ -1360,7 +1360,7 @@ impl Layer {
             let mut from = i0;
             while let Some(i) = bit_at_or_above(row(j), from, i1) {
                 let x = cx(i);
-                let d = (x - p[0]).hypot(y - p[1]);
+                let d = metallic::hypot(x - p[0], y - p[1]);
                 if d <= rad && best.is_none_or(|(_, _, b)| d < b) {
                     best = Some((g.idx(i, j), [x, y], d));
                 }
@@ -1398,7 +1398,7 @@ impl Layer {
             let mut from = i0;
             while let Some(i) = bit_at_or_above(row, from, i1) {
                 let x = g.x0 + (i as f64 + 0.5) * g.c;
-                let d = (x - p[0]).hypot(y - p[1]);
+                let d = metallic::hypot(x - p[0], y - p[1]);
                 if d <= rad && d <= limit {
                     return true;
                 }
@@ -1794,7 +1794,7 @@ fn fresh_cells(cells: &[Point], prev: Point, p: Point, r: f64, c: f64) -> f64 {
 fn fresh_cells_plain(cells: &[Point], prev: Point, p: Point, r: f64, c: f64) -> f64 {
     let mut new = 0.;
     for q in cells {
-        if (q[0] - prev[0]).hypot(q[1] - prev[1]) > r {
+        if metallic::hypot(q[0] - prev[0], q[1] - prev[1]) > r {
             new += ((r - (q[0] - p[0]).hypot(q[1] - p[1])) / c + 0.5).clamp(0., 1.);
         }
     }
@@ -1981,17 +1981,17 @@ fn flatten(b: &Boundary, sag: f64, out: &mut Vec<(Point, Point)>) {
             out.push((s.a, s.b));
             continue;
         };
-        let rho = (s.a[0] - c[0]).hypot(s.a[1] - c[1]);
-        let step = 2. * (1. - sag / rho).clamp(-1., 1.).acos();
+        let rho = metallic::hypot(s.a[0] - c[0], s.a[1] - c[1]);
+        let step = 2. * metallic::acos((1. - sag / rho).clamp(-1., 1.));
         let n = ((sweep.abs() / step.max(1e-6)).ceil() as usize).clamp(1, 1 << 16);
-        let a0 = (s.a[1] - c[1]).atan2(s.a[0] - c[0]);
+        let a0 = metallic::atan2(s.a[1] - c[1], s.a[0] - c[0]);
         let mut prev = s.a;
         for t in 1..=n {
             let p = if t == n {
                 s.b
             } else {
                 let a = a0 + sweep * t as f64 / n as f64;
-                [c[0] + rho * a.cos(), c[1] + rho * a.sin()]
+                [c[0] + rho * metallic::cos(a), c[1] + rho * metallic::sin(a)]
             };
             out.push((prev, p));
             prev = p;
@@ -2005,7 +2005,7 @@ fn fit_strokes(pts: &[Point], tol: f64, max_radius: f64) -> Vec<Stroke> {
     fn one(q: &[Point], tol: f64, max_radius: f64) -> Option<Option<(Point, f64)>> {
         let (a, b) = (q[0], *q.last().unwrap());
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-        let l = dx.hypot(dy);
+        let l = metallic::hypot(dx, dy);
         if l < 1e-9 {
             return None;
         }
@@ -2034,17 +2034,17 @@ fn fit_strokes(pts: &[Point], tol: f64, max_radius: f64) -> Vec<Stroke> {
             (a2 * (m[1] - b[1]) + m2 * (b[1] - a[1]) + b2 * (a[1] - m[1])) / d,
             (a2 * (b[0] - m[0]) + m2 * (a[0] - b[0]) + b2 * (m[0] - a[0])) / d,
         ];
-        let rho = (a[0] - c[0]).hypot(a[1] - c[1]);
+        let rho = metallic::hypot(a[0] - c[0], a[1] - c[1]);
         if rho > max_radius
             || q.iter()
-                .any(|p| ((p[0] - c[0]).hypot(p[1] - c[1]) - rho).abs() > tol)
+                .any(|p| (metallic::hypot(p[0] - c[0], p[1] - c[1]) - rho).abs() > tol)
         {
             return None;
         }
         let mut sweep = 0.;
         for w in q.windows(2) {
-            let mut da =
-                (w[1][1] - c[1]).atan2(w[1][0] - c[0]) - (w[0][1] - c[1]).atan2(w[0][0] - c[0]);
+            let mut da = metallic::atan2(w[1][1] - c[1], w[1][0] - c[0])
+                - metallic::atan2(w[0][1] - c[1], w[0][0] - c[0]);
             if da > PI {
                 da -= TAU;
             }
@@ -3332,7 +3332,7 @@ impl EngagementFrontPlan {
         // resolve (see `steering_width`), narrowed by `narrow` when an
         // earlier attempt at this pass was not proven within the limit.
         let w = narrow * self.steering_width();
-        let limit = (1. - w / r).acos();
+        let limit = metallic::acos(1. - w / r);
         let side = if self.climb { 1. } else { -1. };
         let remnant = self.remnant;
         let layer = self.layer.as_mut().unwrap();
@@ -3364,7 +3364,10 @@ impl EngagementFrontPlan {
             // Every sum of this step is taken at a point `ds` from `p`.
             step_cells(&cells, p, ds, r, c, &mut near);
             let f = |phi: f64, layer: &Layer| {
-                let q = [p[0] + ds * (th + phi).cos(), p[1] + ds * (th + phi).sin()];
+                let q = [
+                    p[0] + ds * metallic::cos(th + phi),
+                    p[1] + ds * metallic::sin(th + phi),
+                ];
                 if !layer.allowed_at(q) {
                     return f64::INFINITY;
                 }
@@ -3377,8 +3380,8 @@ impl EngagementFrontPlan {
                 let a0 = f(-side * PI / 2., layer);
                 if a0 == 0. && approached < 0.4 * r {
                     p = [
-                        p[0] + ds * (th - side * PI / 2.).cos(),
-                        p[1] + ds * (th - side * PI / 2.).sin(),
+                        p[0] + ds * metallic::cos(th - side * PI / 2.),
+                        p[1] + ds * metallic::sin(th - side * PI / 2.),
                     ];
                     approached += ds;
                     pts.push(p);
@@ -3414,7 +3417,7 @@ impl EngagementFrontPlan {
             // nearer its bound. Area alone under-reads the contact where
             // the path turns into the material.
             let load = |phi: f64, layer: &Layer| {
-                let u = [(th + phi).cos(), (th + phi).sin()];
+                let u = [metallic::cos(th + phi), metallic::sin(th + phi)];
                 let q = [p[0] + ds * u[0], p[1] + ds * u[1]];
                 if !layer.allowed_at(q) {
                     return f64::INFINITY;
@@ -3469,7 +3472,7 @@ impl EngagementFrontPlan {
                 break;
             }
             th += phi;
-            p = [p[0] + ds * th.cos(), p[1] + ds * th.sin()];
+            p = [p[0] + ds * metallic::cos(th), p[1] + ds * metallic::sin(th)];
             max_eng = max_eng.max(a / ds);
             // Progress is material this plan marks cleared, not material the
             // step merely meets: cells just beyond the cutter's reach along a
@@ -4259,7 +4262,7 @@ impl EngagementFrontPlan {
             let q = self.layer.as_ref().unwrap().g.center(k);
             let here = self.position;
             let at_layer = (here[2] - z).abs() < 1e-9;
-            let len = (q[0] - here[0]).hypot(q[1] - here[1]);
+            let len = metallic::hypot(q[0] - here[0], q[1] - here[1]);
             let from = [here[0], here[1]];
             let link = if !at_layer {
                 None
@@ -4292,7 +4295,7 @@ impl EngagementFrontPlan {
                 descent = self.offset_descent(stock, q, dir, proven, cancel)?;
             }
             let side = if self.climb { 1. } else { -1. };
-            let heading = (side * dir[0]).atan2(-side * dir[1]);
+            let heading = metallic::atan2(side * dir[0], -side * dir[1]);
             // The link or entry is queued first, so the pass's cuts are
             // proven with it already cleared; all of it is undone if the
             // pass turns out to cut nothing.
@@ -4439,7 +4442,7 @@ impl EngagementFrontPlan {
                 proven = self.pending.len();
                 // The next stretch of the same pass, a step wider again
                 // where an earlier stretch had to be narrowed.
-                heading = (last[1] - before[1]).atan2(last[0] - before[0]);
+                heading = metallic::atan2(last[1] - before[1], last[0] - before[0]);
                 start = last;
                 approach = false;
                 narrow = (narrow / RETRY_SCALE).min(1.);
@@ -4493,7 +4496,7 @@ impl EngagementFrontPlan {
                 }
                 self.emit_cuts(prefix)?;
                 let before = prefix[split - 1];
-                heading = (at[1] - before[1]).atan2(at[0] - before[0]);
+                heading = metallic::atan2(at[1] - before[1], at[0] - before[0]);
                 start = at;
                 approach = false;
                 kept.extend(prefix.iter().copied().skip(usize::from(!kept.is_empty())));
@@ -5562,7 +5565,7 @@ impl EngagementFrontPlan {
                 .min(self.heights.feed)
                 .max(top)
         };
-        let tan = ramp.angle_rad.tan();
+        let tan = metallic::tan(ramp.angle_rad);
         let highest = begin_at(self.op.top_z_mm.max(z));
         let (mut a, mut b) = self
             .ramp_line(q, (highest - z).max(skin) / tan, cancel)?
@@ -5578,7 +5581,7 @@ impl EngagementFrontPlan {
                 .cleared_path_start(&[Stroke::line(a, b)], z, stock, cancel)?
                 .min(self.guides.cell_path_height(stock, &path, 0.))
                 .max(z);
-            let length = (b[0] - a[0]).hypot(b[1] - a[1]);
+            let length = metallic::hypot(b[0] - a[0], b[1] - a[1]);
             let needed = (begin_at(top) - z) / tan;
             if top - z <= skin || needed >= length {
                 break;
@@ -5586,8 +5589,8 @@ impl EngagementFrontPlan {
             // Keep `needed` of it, as evenly about `q` as it allows.
             let u = [(b[0] - a[0]) / length, (b[1] - a[1]) / length];
             let (behind, ahead) = (
-                (q[0] - a[0]).hypot(q[1] - a[1]),
-                (b[0] - q[0]).hypot(b[1] - q[1]),
+                metallic::hypot(q[0] - a[0], q[1] - a[1]),
+                metallic::hypot(b[0] - q[0], b[1] - q[1]),
             );
             let back = behind.min((needed / 2.).max(needed - ahead));
             let fore = needed - back;
@@ -5604,7 +5607,7 @@ impl EngagementFrontPlan {
         let air = top - z <= skin;
         let begin = begin_at(top);
         let chain = [Stroke::line(b, a)];
-        let total = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let total = metallic::hypot(b[0] - a[0], b[1] - a[1]);
         // The ramp ends at `b` at depth; the flat pass then runs to `a`.
         let (curves, legs) = if air {
             (vec![], 0)
@@ -5648,9 +5651,8 @@ impl EngagementFrontPlan {
                 self.queue(curve, MoveKind::Lead, feed);
             }
             let drop = begin - z;
-            let angle = (drop / (travel * travel - drop * drop).max(0.).sqrt())
-                .atan()
-                .to_degrees();
+            let angle =
+                metallic::atan(drop / (travel * travel - drop * drop).max(0.).sqrt()).to_degrees();
             self.queue(
                 Curve::Line {
                     start: [b[0], b[1], z],
@@ -5678,7 +5680,7 @@ impl EngagementFrontPlan {
         // into one of its walls (the far side of the first step is the slot
         // itself; 0.6 pi is `follow`'s widest turn).
         let side = if self.climb { 1. } else { -1. };
-        let heading = (b[1] - a[1]).atan2(b[0] - a[0]) - side * 0.6 * PI;
+        let heading = metallic::atan2(b[1] - a[1], b[0] - a[0]) - side * 0.6 * PI;
         if let Some(pts) = self.proven_pass(stock, a, heading, false, from, cancel)? {
             let end = *pts.last().unwrap();
             self.position = [end[0], end[1], z];
@@ -5718,7 +5720,7 @@ impl EngagementFrontPlan {
                 0.
             };
             let p = [a[0] + t * d[0], a[1] + t * d[1]];
-            let across = (q[0] - p[0]).hypot(q[1] - p[1]);
+            let across = metallic::hypot(q[0] - p[0], q[1] - p[1]);
             if across <= 0.
                 || across > r + 4. * c
                 || !self
@@ -5788,7 +5790,7 @@ impl EngagementFrontPlan {
             // where the attempt stands (test-only; no production reading).
             #[cfg(test)]
             tests::slot_side_stage(tests::SLOT_SIDE_BEFORE_ADVANCE, tests::SLOT_SIDE_ADVANCED);
-            let heading = (q[1] - p[1]).atan2(q[0] - p[0]);
+            let heading = metallic::atan2(q[1] - p[1], q[0] - p[0]);
             if let Some(pts) = self
                 .proven_pass(stock, q, heading, false, from, cancel)
                 .inspect_err(|_| self.rollback(&mark))?
@@ -6100,8 +6102,14 @@ impl EngagementFrontPlan {
                 continue;
             }
             for half in [0., PI] {
-                let a = [q[0] + rh * half.cos(), q[1] + rh * half.sin()];
-                let b = [q[0] - rh * half.cos(), q[1] - rh * half.sin()];
+                let a = [
+                    q[0] + rh * metallic::cos(half),
+                    q[1] + rh * metallic::sin(half),
+                ];
+                let b = [
+                    q[0] - rh * metallic::cos(half),
+                    q[1] - rh * metallic::sin(half),
+                ];
                 self.certify(Stroke {
                     a,
                     b,
@@ -6177,7 +6185,7 @@ impl EngagementFrontPlan {
             let side = if self.climb { 1. } else { -1. };
             let p = [start[0], start[1]];
             let radial = [(p[0] - q[0]) / rh, (p[1] - q[1]) / rh];
-            let heading = (side * radial[0]).atan2(-side * radial[1]);
+            let heading = metallic::atan2(side * radial[0], -side * radial[1]);
             if let Some(pts) = self.proven_pass(stock, p, heading, false, from, cancel)? {
                 let end = *pts.last().unwrap();
                 self.position = [end[0], end[1], z];
@@ -6733,6 +6741,20 @@ mod tests {
                 "cell {k}"
             );
         }
+    }
+
+    #[test]
+    fn disk_rim_excludes_a_center_just_outside_the_radius() {
+        // sqrt(1171² + 1176²) / 1024 is strictly greater than this radius.
+        let radius = 1.620686895951674;
+        let (sure, rim) = Grid::rim_bounds(radius);
+        assert!(!Grid::within(
+            1171. / 1024.,
+            1176. / 1024.,
+            radius,
+            sure,
+            rim
+        ));
     }
 
     /// #202: the searches that read the material bits return exactly what
