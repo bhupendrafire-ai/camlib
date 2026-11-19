@@ -67,6 +67,8 @@ pub struct PocketFrontPlan {
     position: Vec3,
     next_id: u64,
     generation: Option<u64>,
+    // A declined whole-operation cap cannot be salvaged by advancing a layer.
+    corner_refusal: Option<String>,
     spec: StockSpec,
     report: PocketFrontReport,
 }
@@ -238,6 +240,7 @@ impl PocketFrontPlan {
             position: initial,
             next_id: first_id,
             generation: None,
+            corner_refusal: None,
             spec: spec.clone(),
             report: PocketFrontReport {
                 strategy: "adaptive_pocket",
@@ -294,6 +297,9 @@ impl PocketFrontPlan {
         stock: &Stock,
         cancel: &impl CancelSignal,
     ) -> Result<Option<Motion>, String> {
+        if let Some(error) = &self.corner_refusal {
+            return Err(error.clone());
+        }
         if cancel.is_cancelled() {
             return Err("adaptive pocket planning cancelled".into());
         }
@@ -319,12 +325,20 @@ impl PocketFrontPlan {
                 plan.report().helical_entries,
                 plan.report().ramp_entries,
             );
-            if let Some(m) = plan.next_motion_with_stock(stock, cancel).map_err(|e| {
-                format!(
-                    "{e}; adaptive pocket level {layer} at Z{}",
-                    self.report.layers[layer].tip_z_mm
-                )
-            })? {
+            let motion = match plan.next_motion_with_stock(stock, cancel) {
+                Ok(motion) => motion,
+                Err(error) => {
+                    let error = format!(
+                        "{error}; adaptive pocket level {layer} at Z{}",
+                        self.report.layers[layer].tip_z_mm
+                    );
+                    if plan.corner_cap_refused() {
+                        self.corner_refusal = Some(error.clone());
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(m) = motion {
                 self.report.stock_edge_entries += plan.report().stock_edge_entries - before.0;
                 self.report.helical_entries += plan.report().helical_entries - before.1;
                 self.report.ramp_entries += plan.report().ramp_entries - before.2;
@@ -357,6 +371,9 @@ impl PocketFrontPlan {
         }
     }
     pub fn finish_report(&mut self, cancel: &impl CancelSignal) -> Result<(), String> {
+        if let Some(error) = &self.corner_refusal {
+            return Err(error.clone());
+        }
         if cancel.is_cancelled() {
             return Err("adaptive pocket report cancelled".into());
         }

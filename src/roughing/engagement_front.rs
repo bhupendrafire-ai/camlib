@@ -2436,6 +2436,7 @@ pub(crate) struct EngagementFrontPlan {
     wall_pass: bool,
     /// An explicitly declared cap applies even to confined retries.
     max_corner_engagement_deg: Option<f64>,
+    corner_cap_refused: bool,
     /// Cut along the walls only where material stands beside them
     /// (`with_wall_runs`).
     wall_runs: bool,
@@ -2619,6 +2620,7 @@ impl EngagementFrontPlan {
             remnant: false,
             wall_pass: false,
             max_corner_engagement_deg: None,
+            corner_cap_refused: false,
             wall_runs: false,
             walls_done: false,
             area_mm2: None,
@@ -2655,6 +2657,9 @@ impl EngagementFrontPlan {
     pub(crate) fn with_corner_engagement_limit(mut self, limit: Option<f64>) -> Self {
         self.max_corner_engagement_deg = limit;
         self
+    }
+    pub(crate) fn corner_cap_refused(&self) -> bool {
+        self.corner_cap_refused
     }
     /// After the level is cleared, cut along its walls wherever material
     /// still stands beside them, and nowhere else (`plan_wall_runs`).
@@ -4449,6 +4454,7 @@ impl EngagementFrontPlan {
                     // queued, so the stroke it names cannot be drained
                     // unproven on the next call (the review of 6163295).
                     self.rollback(&mark);
+                    self.corner_cap_refused = self.max_corner_engagement_deg.is_some();
                     return Err(format!(
                         "engagement_front: {detail}, even steered at half the declared width: \
                          the material there may be confined (a pocket barely wider than the \
@@ -4671,6 +4677,7 @@ impl EngagementFrontPlan {
                         && (bound.status != EngagementStatus::Bounded
                             || bound.upper_angle_deg > corner_limit)
                     {
+                        self.corner_cap_refused = true;
                         let a = curve.start();
                         failed = Some((
                             [a[0], a[1]],
@@ -4952,6 +4959,7 @@ impl EngagementFrontPlan {
             let Some((k, first, second)) = entry else {
                 if self.max_corner_engagement_deg.is_some() {
                     self.rollback(&mark);
+                    self.corner_cap_refused = true;
                     return Err(
                         "engagement_front: no proven wall approach for max_corner_engagement_deg"
                             .into(),
@@ -4979,6 +4987,7 @@ impl EngagementFrontPlan {
                 if self.entry.policy() == EntryPolicy::StockEdge {
                     self.rollback(&mark);
                     if self.max_corner_engagement_deg.is_some() {
+                        self.corner_cap_refused = true;
                         return Err("engagement_front: wall pass outside steering limit with StockEdgeEntry and max_corner_engagement_deg".into());
                     }
                     self.report.wall_passes_skipped += 1;

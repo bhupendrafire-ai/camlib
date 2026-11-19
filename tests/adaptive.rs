@@ -1874,6 +1874,52 @@ fn corner_limit_keeps_l_pocket_coverage_and_refuses_unproven_strokes() {
     assert!(error.contains("not proven within max_corner_engagement_deg 65"), "{error}");
 }
 
+#[test]
+fn corner_cap_refusal_never_completes_on_retry() {
+    use camlib::operation::{OperationPlan, OperationReport};
+    use camlib::pocket::ResidualStatus;
+
+    let cancel = AtomicBool::new(false);
+    for angle in [100., 65.] {
+        let m = fixture();
+        let mut op = operation();
+        op.path_strategy = AdaptivePathStrategy::EngagementFront;
+        op.pocket.stepdown_mm = 2.;
+        op.max_corner_engagement_deg = Some(angle);
+        let tool = m.tools[0].prepare().unwrap();
+        let mut stock = Stock::new(m.stock.height().unwrap().clone()).unwrap();
+        let mut plan = OperationPlan::prepare_with_stock(
+            Operation::AdaptivePocket(op),
+            &m.tools[0],
+            &stock,
+            m.initial_position_mm,
+            1,
+            &cancel,
+        )
+        .unwrap();
+        let refusal = loop {
+            match plan.next_motion_with_stock(&stock, &cancel) {
+                Ok(Some(motion)) => {
+                    let delta = stock.preview_sweep(&tool, &motion, 1., m.sweep, &cancel).unwrap();
+                    stock.apply_delta(&delta).unwrap();
+                }
+                Ok(None) => panic!("{angle} degrees must be refused before completion"),
+                Err(error) => break error,
+            }
+        };
+        assert!(refusal.contains("not proven within max_corner_engagement_deg"), "{refusal}");
+        let generation = stock.generation();
+        for _ in 0..4 {
+            assert_eq!(plan.next_motion_with_stock(&stock, &cancel).unwrap_err(), refusal);
+            assert_eq!(plan.finish_report(&cancel).unwrap_err(), refusal);
+            let OperationReport::AdaptiveFront(report) = plan.report() else { panic!("adaptive report") };
+            assert_eq!(report.completed_layers, 0);
+            assert_eq!(report.geometric_residual_status, ResidualStatus::Pending);
+        }
+        assert_eq!(stock.generation(), generation);
+    }
+}
+
 /// Straight links end to end on one line are one move: a link with a link
 /// feed is emitted in stretches, one per feed.
 fn joined(motions: &[Motion]) -> Vec<(MoveKind, Curve)> {

@@ -420,7 +420,9 @@ no full-width slotting, for hard materials and high-speed toolpaths.
   confined clearing and wall cuts handled at entry feed. A limit below the
   angle set by the stepover narrows the steering width. Both queries use the
   committed cleared sweeps. If a stroke cannot be proven within the declared
-  limit, the planner refuses it. The report records the requested limit and
+  limit, the planner refuses the operation. After a corner-cap refusal, the
+  planner cannot emit more moves or complete its report, even if called again.
+  The report records the requested limit and
   each layer's ordinary and confined upper bounds. Helices and descent ramps
   still use their qualified entry policies. Leave the option unset for the
   default behavior. `Pocket`, `RestPocket`, and the orbit strategies retain
