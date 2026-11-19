@@ -519,7 +519,7 @@ impl FacingPlan {
         let mut seconds = 0_f64;
         while let Some(motion) = self.next_motion(cancel)? {
             let (a, b) = (motion.curve.start(), motion.curve.end());
-            let length = (b[0] - a[0]).hypot(b[1] - a[1]).hypot(b[2] - a[2]);
+            let length = metallic::hypot(metallic::hypot(b[0] - a[0], b[1] - a[1]), b[2] - a[2]);
             seconds += 60. * length / motion.feed_mm_min.unwrap_or(rapid);
         }
         if seconds.is_finite() {
@@ -655,6 +655,25 @@ mod tests {
             panic!("two available axes")
         };
         assert!((x - y).abs() < 1e-9);
+    }
+
+    #[test]
+    fn auto_axis_selects_x_at_the_one_nanosecond_boundary() {
+        let mut manifest: crate::stream::StreamManifest =
+            serde_json::from_str(include_str!("../fixtures/operations/facing.json")).unwrap();
+        let crate::pocket::Operation::Facing(mut op) = manifest.operations.remove(0) else {
+            panic!("facing fixture")
+        };
+        let mut spec = manifest.stock.height().unwrap().clone();
+        spec.max_mm[0] = 24.;
+        op.axis = TraverseAxis::Auto;
+        op.auto_rapid_mm_min = Some(6000.);
+        op.floor_z_mm = 9.;
+        // On this square the initial diagonal rapid decides the near tie.
+        let initial = [0.058823529411764705, 0.05882345679234425, 12.];
+        let plan =
+            FacingPlan::prepare(op, &manifest.tools[0], &spec, initial, 1, &|| false).unwrap();
+        assert_eq!(plan.report().axis, TraverseAxis::X);
     }
 
     #[test]
