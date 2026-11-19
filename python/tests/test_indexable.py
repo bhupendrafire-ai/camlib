@@ -138,7 +138,6 @@ class IndexableTest(unittest.TestCase):
         self.assertEqual(auto_material['residual']['assessment'], 'within_tolerance')
         self.assertTrue(list(post_events(header, auto_events, machine=machine, lowering=LoweringOptions())))
 
-
     def test_high_feed_roughing_keeps_layer_depth_and_reports_real_stock(self):
         config = roughing_job()
         # This strip is entirely OUTSIDE the retained boss. Its excess is

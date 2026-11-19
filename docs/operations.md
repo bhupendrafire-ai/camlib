@@ -92,7 +92,10 @@ must respect the assembly's maximum depth of cut. See
 `axis="auto"` compares the complete existing X and Y routes (including entry,
 retracts, overtravel and returns). Declare a positive `auto_rapid_mm_min` for
 scoring rapids. The report gives the selected `axis` and `auto_axis_seconds`
-in X, Y order. These are nominal distance/rate estimates, with no acceleration
+in X, Y order. An unavailable axis has a null score and a reason in
+`auto_axis_refusals`. If only one route can be planned, that route is used.
+If neither can be planned, the operation reports the refusal. These are
+nominal distance/rate estimates, with no acceleration
 or controller effects, and a tie within 1 ns selects X. Python still defaults
 to X. Automatic mode requires whole rectangular stock, refuses active
 in-plane limits, and refuses when either route reaches the 100,000-motion

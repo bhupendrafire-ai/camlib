@@ -93,13 +93,42 @@ class FacingTest(unittest.TestCase):
 
         x, x_report = run("x")
         y, y_report = run("y")
-        auto, report = run("auto", 6000.)
+        auto, report = run("auto", 6000.0)
         self.assertLess(len(y), len(x))
         self.assertEqual(auto, y)
         self.assertEqual(report["axis"], "y")
         self.assertLess(report["auto_axis_seconds"][1], report["auto_axis_seconds"][0])
         self.assertNotIn("auto_axis_seconds", x_report)
         self.assertEqual(y_report["nominal_uncovered_area_mm2"], 0)
+
+    def test_automatic_axis_reports_unavailable_overtravel_and_keeps_the_y_stream(self):
+        from camlib import StockSpec
+
+        config = example().facing_job()
+        config["stock"] = StockSpec((999960, 0, 0), (999999, 24, 10), 0.5)
+        config["initial_position_mm"] = (999950, 0, 12)
+
+        def run(axis, rapid=None):
+            op = replace(config["operations"][0], axis=axis, auto_rapid_mm_min=rapid)
+            moves, report = [], None
+            with Simulation(**dict(config, operations=(op,))) as sim:
+                for update in sim.run_operations():
+                    if not isinstance(update, OperationUpdate):
+                        moves.append(update.motion)
+                    elif update.stage == "end":
+                        report = update.report
+                self.assertTrue(sim.state.finished)
+            return moves, report
+
+        with self.assertRaisesRegex(SimulationError, "coordinate overtravel"):
+            run("x")
+        explicit, _ = run("y")
+        auto, report = run("auto", 6000.0)
+        self.assertEqual(auto, explicit)
+        self.assertEqual(report["axis"], "y")
+        self.assertIsNone(report["auto_axis_seconds"][0])
+        self.assertIsNone(report["auto_axis_refusals"][1])
+        self.assertIn("coordinate overtravel", report["auto_axis_refusals"][0])
 
     def test_retained_facing_seek_shows_partial_removal_and_replays_same_stock(self):
         with RecordedRun(**{'rapid_mm_min': 6000, **example().facing_job()}, checkpoint_every=8) as run:
