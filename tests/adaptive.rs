@@ -1875,6 +1875,20 @@ fn corner_limit_keeps_l_pocket_coverage_and_refuses_unproven_strokes() {
 }
 
 #[test]
+fn corner_cap_steering_width_is_reproducible() {
+    let m = fixture();
+    let mut op = operation();
+    op.path_strategy = AdaptivePathStrategy::EngagementFront;
+    op.pocket.stepdown_mm = 2.;
+    op.max_corner_engagement_deg = Some(45.14);
+    let plan = camlib::pocket_front::PocketFrontPlan::prepare(
+        op, &m.tools[0], m.stock.height().unwrap(), m.initial_position_mm, 1, &|| false,
+    ).unwrap();
+    // Radius 2 mm times (1 - cos(45.14 degrees)), with binary64 intermediates.
+    assert_eq!(plan.report().max_radial_engagement_mm, 0.5892462315868332);
+}
+
+#[test]
 fn corner_cap_refusal_never_completes_on_retry() {
     use camlib::operation::{OperationPlan, OperationReport};
     use camlib::pocket::ResidualStatus;

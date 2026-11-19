@@ -119,7 +119,7 @@ impl PocketFrontPlan {
             .max_engagement_deg
             .min(op.max_corner_engagement_deg.unwrap_or(180.));
         let width = if angle < 90. {
-            stepover.min(r * (1. - angle.to_radians().cos()))
+            stepover.min(r * (1. - metallic::cos(angle.to_radians())))
         } else {
             stepover
         };
