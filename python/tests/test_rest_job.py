@@ -10,12 +10,12 @@ import unittest
 
 from camlib.jobs import RegenerationCache
 from camlib.playback import Cursor, Player
-from camlib.simulation import OperationUpdate, ProtocolError, StockState, Update
+from camlib.simulation import OperationUpdate, ProtocolError, StockState, Update, curve_length
 
 
 @lru_cache(None)
-def example():
-    path = Path(__file__).resolve().parents[2] / "examples/cadquery_job.py"
+def example(name="cadquery_job"):
+    path = Path(__file__).resolve().parents[2] / "examples" / f"{name}.py"
     spec = importlib.util.spec_from_file_location("rest_job_example", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -28,6 +28,7 @@ def engine():
 
 def collect(job, cache=None):
     ends, volumes, completed, motions = {}, {}, {}, []
+    rest_air_mm = 0.0
     first_frame = None
     with job.regenerate(cache, executable=engine()) as run:
         for event in run:
@@ -39,6 +40,12 @@ def collect(job, cache=None):
                 completed[update.operation] = sim.state.completed
             elif isinstance(update, Update):
                 motions.append(update.motion)
+                if (
+                    update.motion["operation"] == "rest"
+                    and update.motion["kind"] != "rapid"
+                    and not update.changed_count
+                ):
+                    rest_air_mm += curve_length(update.motion["curve"])
                 if first_frame is None:
                     first_frame = update.frame
             manifest = sim.manifest_frame
@@ -47,6 +54,7 @@ def collect(job, cache=None):
             ends=ends,
             volumes=volumes,
             completed=completed,
+            rest_air_mm=rest_air_mm,
             motions=motions,
             stats=run.statistics,
             state=run.states["top"],
@@ -56,6 +64,15 @@ def collect(job, cache=None):
 
 
 class RestJobTest(unittest.TestCase):
+    def test_rest_pocket_skips_air_above_committed_cuts(self):
+        fixture = example("standalone_job")
+        job = fixture.build_rest_job()
+        result = collect(job)
+        self.assertGreater(result["ends"]["rest"]["rest_history_skipped_strokes"], 0)
+        self.assertLess(result["rest_air_mm"], 35.0)
+        # Four fractions of the corner cells, including the stock sweep guard.
+        self.assertAlmostEqual(result["volumes"]["rest"] - result["volumes"]["pocket"], 1.999995, places=7)
+
     def test_cad_two_tools_stock_cache_and_upstream_changes(self):
         with TemporaryDirectory() as directory:
             cache = RegenerationCache(directory)

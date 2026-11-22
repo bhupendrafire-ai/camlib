@@ -558,6 +558,8 @@ pub struct PocketReport {
     pub rest_tolerance_mm: Option<f64>,
     pub rest_candidates: u64,
     pub rest_skipped_strokes: u64,
+    #[serde(skip_serializing_if = "air_entry::none")]
+    pub rest_history_skipped_strokes: usize,
     pub rest_query_work: usize,
     pub rest_query_work_exhausted: bool,
     pub rest_from_generation: Option<u64>,
@@ -1449,6 +1451,7 @@ pub struct PocketPlan {
     source_magnitude: f64,
     strokes: Vec<Stroke>,
     rest_group_ends: Vec<usize>,
+    rest_history_work: u64,
     report: PocketReport,
     initial: Vec3,
     position: Vec3,
@@ -1821,6 +1824,7 @@ impl PocketPlan {
             rest_tolerance_mm: op.rest_tolerance_mm,
             rest_candidates: 0,
             rest_skipped_strokes: 0,
+            rest_history_skipped_strokes: 0,
             rest_query_work: 0,
             rest_query_work_exhausted: false,
             rest_from_generation: None,
@@ -1887,6 +1891,7 @@ impl PocketPlan {
             source_edges,
             strokes,
             rest_group_ends: vec![],
+            rest_history_work: 0,
             report,
             initial,
             position: initial,
@@ -2929,7 +2934,24 @@ impl PocketPlan {
             curve: s.curve(z),
             feed_mm_min: Some(self.operation.feed_mm_min),
         };
-        self.material_on_motion(stock, &candidate, tolerance, cancel)
+        if !self.material_on_motion(stock, &candidate, tolerance, cancel)? {
+            return Ok(false);
+        }
+        // A whole cell may reach outside the swept cutter and retain the
+        // surrounding wall height. Ask the committed cuts to prove the
+        // complete footprint empty down to the same rest height budget.
+        // Work exhaustion retains the guide just like a negative proof.
+        const HISTORY_LIMIT: u64 = 1_000_000;
+        let budget = (HISTORY_LIMIT - self.rest_history_work).min(32_768);
+        if budget == 0 {
+            return Ok(true);
+        }
+        let mut work = budget;
+        let clear =
+            stock.history_clearance(&candidate, self.radius, tolerance, &mut work, cancel)?;
+        self.rest_history_work += budget - work;
+        self.report.rest_history_skipped_strokes += usize::from(clear);
+        Ok(!clear)
     }
     fn material_on_motion(
         &mut self,

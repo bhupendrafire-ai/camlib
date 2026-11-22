@@ -166,6 +166,26 @@ fn shrink_simplify(boundary: &Boundary, budget: f64) -> Option<(Boundary, f64)> 
 }
 
 impl PreparedRegion {
+    /// Cover small notches in a protective shadow before expanding it.
+    /// Every hull contains its original outer ring, and the holes stay fixed.
+    pub(crate) fn protective_outer_envelope(&self) -> Option<PreparedRegion> {
+        let mut definition = self.definition.clone();
+        let mut error = 0f64;
+        for component in &mut definition.components {
+            if let Some((outer, bound)) = envelope(&component.outer, EROSION_SIMPLIFY_BUDGET_MM) {
+                component.outer = outer;
+                error = error.max(bound);
+            }
+        }
+        if error == 0. {
+            return None;
+        }
+        definition.boundary_error_mm += error;
+        // A proposed hull can close a gap to another component. Use it
+        // only if the full result passes ordinary topology validation.
+        definition.prepare(self.options).ok()
+    }
+
     /// Only positive offsets dilate holes. Dilation is monotone and preserves
     /// this Hausdorff bound. Other boundaries and the original source stay exact.
     pub(super) fn erosion_envelope(&self) -> Option<(PreparedRegion, f64, usize)> {
@@ -227,6 +247,26 @@ mod tests {
             .to_vec(),
         }
     }
+
+    #[test]
+    fn protective_envelope_fills_only_bounded_notches_and_reports_the_error() {
+        let options = ConstructionOptions::default();
+        for depth in [0.0001, 0.01] {
+            let mut source = PlanarRegion::circle("shadow", [0., 0.], 1.).unwrap();
+            source.components[0].outer = boundary(0., depth);
+            let shadow = source.prepare(options).unwrap();
+            let result = shadow.protective_outer_envelope();
+            if depth < EROSION_SIMPLIFY_BUDGET_MM {
+                let covered = result.unwrap();
+                assert!((covered.summary().area_mm2 - 100.).abs() < 1e-10);
+                assert!(covered.definition().boundary_error_mm >= depth);
+                assert_eq!(shadow.definition().components[0].outer.vertices.len(), 5);
+            } else {
+                assert!(result.is_none());
+            }
+        }
+    }
+
     #[test]
     fn envelope_is_bounded_and_preserves_retained_vertices_in_both_orientations() {
         for shift in [0., 100_000.] {

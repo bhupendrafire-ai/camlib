@@ -517,14 +517,24 @@ fn contains_impl(
         let may_hold =
             |s: &ClearedSweep| (0..2).all(|k| lo[k] >= s.bounds[0][k] && hi[k] <= s.bounds[1][k]);
         let n = eligible.len();
+        // Every candidate tested costs work; out of it, the scan stops and
+        // the section is not proven (a witness past the budget proves nothing).
+        let mut exhausted = false;
         let witness = (0..n).map(|i| (hint + i) % n).find(|&i| {
             let s = eligible[i];
             if !may_hold(s) {
                 return false;
             }
-            *work = work.saturating_sub(1);
+            if *work == 0 {
+                exhausted = true;
+                return true;
+            }
+            *work -= 1;
             holds(s, &polygon, guard)
         });
+        if exhausted {
+            return Ok(false);
+        }
         if let Some(i) = witness {
             hint = i;
             continue;
@@ -607,6 +617,37 @@ mod tests {
     }
     fn proven(cuts: &[ClearedSweep], m: &Motion, radius: f64, bottom: f64) -> bool {
         proof(cuts, m, radius, bottom).0
+    }
+
+    /// A proof needs the work it takes: with any smaller budget it is not
+    /// proven, even when the budget runs out in the last tile's witness scan
+    /// (the last visit of a successful proof is a witness test).
+    #[test]
+    fn a_proof_short_of_work_is_not_proven() {
+        let cuts = sweeps(&[(line([90., 50.], [110., 50.], 5.), 4.)]);
+        let m = arc([100.5, 50.], [100.5, 50.], [100., 50.], TAU, 6.);
+        let (ok, needed) = proof(&cuts, &m, 1., B);
+        assert!(ok && needed > 1, "{ok} {needed}");
+        for budget in 0..needed {
+            let mut work = budget;
+            let proven = contains(
+                &cuts.iter().collect::<Vec<_>>(),
+                Section {
+                    curve: &m.curve,
+                    radius: 1.,
+                    bottom: B,
+                    error: crate::verification::path_error(&m, 1e-5),
+                },
+                STOCK,
+                &mut work,
+                &|| false,
+            )
+            .unwrap();
+            assert!(
+                !proven,
+                "proven with {budget} of the {needed} visits it takes"
+            );
+        }
     }
     /// Independent of the proof: sample the section's sweep densely and
     /// test each point against every sweep's footprint, by the distance

@@ -582,6 +582,17 @@ fn group_loops(
     mut negatives: Vec<Polyline<f64>>,
     origin: Point,
 ) -> Result<Vec<Component>, String> {
+    // Cavalier can return a closed segment traversed in both directions.
+    // This has zero winding everywhere off the segment and encloses no
+    // area. Keep curved two-vertex loops and validate all retained geometry.
+    let has_boundary = |p: &Polyline<f64>| {
+        !p.is_closed
+            || p.vertex_count() != 2
+            || p.iter_vertexes()
+                .any(|v| v.bulge != 0. || !v.x.is_finite() || !v.y.is_finite())
+    };
+    positives.retain(has_boundary);
+    negatives.retain(has_boundary);
     for p in &mut positives {
         if p.area() < 0. {
             p.invert_direction_mut();

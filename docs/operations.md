@@ -138,7 +138,12 @@ these tools. Contour supports exterior air entry without tabs.
   Required order: stock top < `feed_z_mm` ≤ `retract_z_mm` ≤ `clearance_z_mm`.
 - `RestPocket` cuts only material left by earlier operations (it reads the
   simulated stock), typically with a smaller tool. `rest_tolerance_mm` (0.01)
-  is how much leftover is ignored.
+  is how much leftover is ignored. A cell that straddles a wall can still
+  report material after its lower portion was cut. When a cell check cannot
+  omit a stroke, the planner also checks the complete cutter sweep against
+  committed cleared columns at the same height allowance. The report counts
+  these extra omissions in `rest_history_skipped_strokes`. Unproven strokes
+  stay in the plan, including when the clearance query budget runs out.
 - An entry comes straight down, or starts its helix or ramp, from the lowest
   height at which the cuts already committed (by this or an earlier
   operation) prove the whole tool clear of stock, so a level cut where an
@@ -1646,7 +1651,13 @@ the face and its disk takes one stepover of it like every later pass, minus the
 shadow of everything standing above it grown by the radius plus
 `radial_stock_to_leave_mm` (default 0) plus its stated errors, so near walls
 the tool stays a radius plus the radial stock away and cuts only the horizontal
-faces: the walls keep their radial stock for a wall finish. Its inward offsets
+faces: the walls keep their radial stock for a wall finish. Flat covers small
+notches between straight facets of the protective shadow with a
+validated outer envelope before expansion. This can only add protection, with
+the displacement included in the boundary error, and the cuts are still
+checked against the original part. An erosion that fails to advance or leaves
+area beyond the component's geometric depth limit refuses the operation.
+The inward offsets at
 0, `stepover_mm`, 2 `stepover_mm`, ... are the passes; after the last one, a
 core deeper than a radius is covered by half-step passes while it lasts, and
 where an offset pinches off in a corner between two boundaries of the region
