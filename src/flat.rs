@@ -1965,7 +1965,12 @@ impl FlatPlan {
                     cancel,
                 )?
             };
-            let Some((region, face)) = level_region else {
+            let Some(LevelRegion {
+                centres: region,
+                face,
+                shadow_wall_reserve_mm,
+            }) = level_region
+            else {
                 continue;
             };
             // Offset loops per connected component, outside in.
@@ -1978,8 +1983,12 @@ impl FlatPlan {
             let groups = level_loops(&region, r, op.stepover_mm, op.tolerance_mm, bridge, cancel)?;
             let level_chains = chains.len();
             let mut walls = Vec::new();
+            // Mesh-derived contours include the reserve added around the
+            // raised shadow. Include it only when identifying which contours
+            // follow a wall. The path proof below still uses the cutter.
             let wall_probe = r
                 + op.radial_stock_to_leave_mm
+                + shadow_wall_reserve_mm
                 + region.definition().boundary_error_mm
                 + op.surface.surface_error_mm
                 + guard;
@@ -3461,6 +3470,12 @@ pub(crate) fn segment_stock_top(
     Ok(top)
 }
 
+struct LevelRegion {
+    centres: crate::planar::PreparedRegion,
+    face: std::sync::Arc<crate::planar::PreparedRegion>,
+    shadow_wall_reserve_mm: f64,
+}
+
 /// The region of tool centres the passes on the flat level `z` run in: the
 /// shadow of the part standing above `z - level_tolerance`, grown by the
 /// overhang `r - stepover` (none at a stepover of a radius or more), minus
@@ -3492,13 +3507,7 @@ fn level_region(
     stepover: f64,
     tolerance: f64,
     cancel: &impl CancelSignal,
-) -> Result<
-    Option<(
-        crate::planar::PreparedRegion,
-        std::sync::Arc<crate::planar::PreparedRegion>,
-    )>,
-    String,
-> {
+) -> Result<Option<LevelRegion>, String> {
     use crate::planar::{Boolean, ConstructionOptions};
     let options = ConstructionOptions {
         tolerance_mm: tolerance,
@@ -3525,16 +3534,17 @@ fn level_region(
     let above = target
         .shadow_for_cutter(above_tip, 0., r, &mut work, cancel)
         .map_err(|e| format!("flat-area shadow at Z{z}: {e}"))?;
-    let (region, face) = if above.region.components.is_empty() {
+    let (region, face, shadow_wall_reserve_mm) = if above.region.components.is_empty() {
         let face = below
             .region
             .prepare(options)
             .map_err(|e| format!("flat-area face at Z{z}: {e}"))?;
-        (resting, face)
+        (resting, face, 0.)
     } else {
         // A radius plus the radial stock left on the walls off everything
         // standing above the level.
-        let reach = r + radial + (above.report.boundary_error_mm - source_error).max(0.);
+        let shadow_wall_reserve_mm = above.report.boundary_error_mm;
+        let reach = r + radial + (shadow_wall_reserve_mm - source_error).max(0.);
         let blocked = above
             .region
             .prepare(options)
@@ -3570,12 +3580,16 @@ fn level_region(
             .map_err(|e| format!("flat-area face at Z{z}: {e}"))?
             .into_parts()
             .1;
-        (region, face)
+        (region, face, shadow_wall_reserve_mm)
     };
     if region.definition().components.is_empty() {
         return Ok(None);
     }
-    Ok(Some((region, std::sync::Arc::new(face))))
+    Ok(Some(LevelRegion {
+        centres: region,
+        face: std::sync::Arc::new(face),
+        shadow_wall_reserve_mm,
+    }))
 }
 
 fn cad_level_region(
@@ -3585,13 +3599,7 @@ fn cad_level_region(
     r: f64,
     cad: &crate::planar::PlanarRegion,
     cancel: &impl CancelSignal,
-) -> Result<
-    (
-        crate::planar::PreparedRegion,
-        std::sync::Arc<crate::planar::PreparedRegion>,
-    ),
-    String,
-> {
+) -> Result<LevelRegion, String> {
     let options = crate::planar::ConstructionOptions {
         tolerance_mm: op.tolerance_mm,
     };
@@ -3625,7 +3633,11 @@ fn cad_level_region(
         .map_err(|e| format!("flat-area CAD floor offset at Z{z}: {e}"))?
         .into_parts()
         .1;
-    Ok((region, std::sync::Arc::new(face)))
+    Ok(LevelRegion {
+        centres: region,
+        face: std::sync::Arc::new(face),
+        shadow_wall_reserve_mm: 0.,
+    })
 }
 
 /// The offset loops of one connected component of a level's region: the
@@ -5006,7 +5018,9 @@ mod tests {
         )
         .unwrap();
         let circle = crate::planar::PlanarRegion::circle("floor", [5., 5.], 2.).unwrap();
-        let (centres, _) = cad_level_region(&target, &op, 4., 1., &circle, &cancel).unwrap();
+        let centres = cad_level_region(&target, &op, 4., 1., &circle, &cancel)
+            .unwrap()
+            .centres;
         let reach = 2. - 1. - op.radial_stock_to_leave_mm - op.tolerance_mm;
         assert!((centres.summary().area_mm2 - std::f64::consts::PI * reach.powi(2)).abs() < 1e-8);
         let outside = crate::planar::PlanarRegion::circle("outside", [25., 5.], 2.).unwrap();

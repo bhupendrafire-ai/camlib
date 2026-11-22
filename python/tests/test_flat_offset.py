@@ -633,6 +633,14 @@ class FlatOffsetTest(unittest.TestCase):
                 f"{name}: tool within {worst[0] - R:.4f} mm of a wall at {worst[1]}",
             )
 
+    def test_mesh_only_wall_pass_finishes_after_the_floor(self):
+        report, motions, *_ = run(STEPPED, finish_walls=True)
+        self.assertEqual(report["wall_passes"], 1)
+        self.assertEqual(report["runs_completed"], report["runs"])
+        last = [move for move in level_cuts(motions, 4) if move["kind"] == "cut"][-1]
+        endpoint = last["curve"]["end"]
+        self.assertAlmostEqual(Field(STEPPED).clearance(endpoint, 4), R, delta=0.01)
+
     def test_each_area_is_finished_before_crossing_to_the_next(self):
         # The base level of WIDE splits into areas left and right of the
         # boss. Each is finished before the tool moves on: between cutting
