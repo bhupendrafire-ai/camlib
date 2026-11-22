@@ -517,6 +517,15 @@ def _stepped_target():
     return ("surface", _mesh(_stepped), 0)
 
 
+def _flat_cad_walls():
+    from camlib.cadquery import flat_floors
+
+    job = _flat()
+    (op,) = job["operations"]
+    job["operations"] = (replace(op, floors=flat_floors(_stepped()), finish_walls=True),)
+    return job
+
+
 def _pencil():
     import camlib
     import cadquery as cq
@@ -1080,6 +1089,14 @@ WORKLOADS = (
     Workload("trace", "mill", "Engrave a rectangle and a hook", {"engrave": ("Trace", 36)}, _trace),
     Workload("vcarve", "mill", "V-carve an L-shaped letter", {"carve": ("VCarve", 37)}, _vcarve),
     Workload("flat", "mill", "Flat areas of a stepped part", {"flats": ("Flat", 38)}, _flat, _stepped_target),
+    Workload(
+        "flat-cad-walls",
+        "mill",
+        "CAD floor trims and final wall contours of a stepped part",
+        {"flats": ("Flat", 371)},
+        _flat_cad_walls,
+        _stepped_target,
+    ),
     Workload(
         "rough-parallel",
         "mill",

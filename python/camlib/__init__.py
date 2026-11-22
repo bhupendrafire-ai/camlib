@@ -98,6 +98,7 @@ _EXPORTS = {
             "MicroJoints",
             "CommonLine",
             "Flat",
+            "FlatFloor",
             "Pencil",
             "Scallop",
             "Geodesic",

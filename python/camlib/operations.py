@@ -744,6 +744,17 @@ class ThreadMilling:
 
 
 @dataclass(frozen=True)
+class FlatFloor:
+    """A selected horizontal CAD trim, including holes, in work coordinates."""
+
+    z_mm: float
+    region: object
+
+    def to_dict(self):
+        return dict(z_mm=self.z_mm, region=self.region.to_dict())
+
+
+@dataclass(frozen=True)
 class Flat:
     """Flat-area finishing: finds the horizontal faces of ``surface`` above
     ``floor_z_mm`` and finishes each at its exact height (plus
@@ -800,6 +811,8 @@ class Flat:
     # Radial stock left on the walls: the passes stay this much farther than
     # the cutter's radius from everything standing above a flat.
     radial_stock_to_leave_mm: float = 0
+    floors: tuple[FlatFloor, ...] = ()
+    finish_walls: bool = False
 
     def to_dict(self):
         result = {field: getattr(self, field) for field in self.__dataclass_fields__}
@@ -811,6 +824,11 @@ class Flat:
         entry = result.pop("entry")
         if entry is not None:
             result["entry"] = entry.to_dict() if hasattr(entry, "to_dict") else dict(entry)
+        floors = result.pop("floors")
+        if floors:
+            result["floors"] = [floor.to_dict() for floor in floors]
+        if not result["finish_walls"]:
+            result.pop("finish_walls")
         for key in ("retract_z_mm", "feed_z_mm"):
             if result[key] is None:
                 result.pop(key)

@@ -76,10 +76,23 @@ fn split_arc(seg: &crate::pocket::Stroke, sagitta: f64) -> Vec<crate::pocket::St
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct FlatFloor {
+    pub z_mm: f64,
+    pub region: crate::planar::PlanarRegion,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FlatOperation<G = SurfaceMesh> {
     pub id: String,
     pub tool: String,
     pub surface: G,
+    /// Optional CAD trims of the selected horizontal faces in work coordinates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub floors: Vec<FlatFloor>,
+    /// Cut the outermost wall-following contours after the floor, keeping the radial allowance.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub finish_walls: bool,
     /// Machining base: flats at or below it are not machined.
     pub floor_z_mm: f64,
     pub stepover_mm: f64,
@@ -130,6 +143,8 @@ impl<G> FlatOperation<G> {
             id: self.id,
             tool: self.tool,
             surface: f(self.surface)?,
+            floors: self.floors,
+            finish_walls: self.finish_walls,
             floor_z_mm: self.floor_z_mm,
             stepover_mm: self.stepover_mm,
             clearance_z_mm: self.clearance_z_mm,
@@ -162,6 +177,8 @@ pub struct FlatReport {
     pub runs: usize,
     /// Closed offset loops planned, before any chord was dropped.
     pub loops: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub wall_passes: usize,
     /// Links cut at depth between the passes of one chain.
     #[serde(skip_serializing_if = "is_zero")]
     pub links_at_depth: usize,
@@ -1876,12 +1893,35 @@ impl FlatPlan {
                 _ => levels.push((z, lo, hi)),
             }
         }
-        if let Some(l) = levels.iter().find(|l| {
-            l.0 > spec.max_mm[2] || spec.max_mm[2] - l.0 > cutter.cutting_length_mm - guard
+        let mut selected = Vec::new();
+        if op.floors.is_empty() {
+            selected.extend(levels.iter().map(|l| (l.0, None)));
+        } else {
+            for floor in &op.floors {
+                if cancel.is_cancelled() {
+                    return Err("flat-area planning cancelled".into());
+                }
+                if !floor.z_mm.is_finite()
+                    || floor.z_mm <= op.floor_z_mm + op.level_tolerance_mm
+                    || !levels
+                        .iter()
+                        .any(|l| (l.0 - floor.z_mm).abs() <= op.level_tolerance_mm)
+                {
+                    return Err(format!(
+                        "flat-area CAD floor Z{} has no matching horizontal mesh level",
+                        floor.z_mm
+                    ));
+                }
+                selected.push((floor.z_mm, Some(&floor.region)));
+            }
+            selected.sort_by(|a, b| b.0.total_cmp(&a.0));
+        }
+        if let Some((z, _)) = selected.iter().find(|(z, _)| {
+            *z > spec.max_mm[2] || spec.max_mm[2] - *z > cutter.cutting_length_mm - guard
         }) {
             return Err(format!(
                 "invalid flat-area finishing parameters: flat level Z {} is above the stock top or deeper below it than the cutting length {}",
-                l.0, cutter.cutting_length_mm
+                z, cutter.cutting_length_mm
             ));
         }
         let region_limits = op
@@ -1902,25 +1942,30 @@ impl FlatPlan {
         let h = op.stepover_mm.min(r) / 4.;
         let mut chains: Vec<Chain> = vec![];
         let (mut rows, mut loops, mut links, mut dropped) = (0usize, 0usize, 0usize, 0f64);
+        let mut wall_passes = 0;
         let mut tool_xy = [initial[0], initial[1]];
-        for &(level, _, _) in &levels {
+        for &(level, cad) in &selected {
             if cancel.is_cancelled() {
                 return Err("flat-area planning cancelled".into());
             }
             let z = level + op.stock_to_leave_mm;
             // The tool centres resting on this level, as a planar region, and
             // the level's face (for keeping entries off it).
-            let Some((region, face)) = level_region(
-                &target,
-                level,
-                op.level_tolerance_mm,
-                r,
-                op.radial_stock_to_leave_mm,
-                op.stepover_mm,
-                op.tolerance_mm,
-                cancel,
-            )?
-            else {
+            let level_region = if let Some(cad) = cad {
+                Some(cad_level_region(&target, &op, level, r, cad, cancel)?)
+            } else {
+                level_region(
+                    &target,
+                    level,
+                    op.level_tolerance_mm,
+                    r,
+                    op.radial_stock_to_leave_mm,
+                    op.stepover_mm,
+                    op.tolerance_mm,
+                    cancel,
+                )?
+            };
+            let Some((region, face)) = level_region else {
                 continue;
             };
             // Offset loops per connected component, outside in.
@@ -1932,6 +1977,12 @@ impl FlatPlan {
                 .max((heights.feed - z).max(0.) * op.feed_mm_min / op.plunge_mm_min);
             let groups = level_loops(&region, r, op.stepover_mm, op.tolerance_mm, bridge, cancel)?;
             let level_chains = chains.len();
+            let mut walls = Vec::new();
+            let wall_probe = r
+                + op.radial_stock_to_leave_mm
+                + region.definition().boundary_error_mm
+                + op.surface.surface_error_mm
+                + guard;
             // Nearest component first.
             let mut order: Vec<usize> = (0..groups.len()).collect();
             order.sort_by(|&a, &b| {
@@ -1942,7 +1993,8 @@ impl FlatPlan {
             });
             for gi in order {
                 loops += groups[gi].outers.len() + groups[gi].holes.len();
-                for (_, ring, runs) in groups[gi].ordered(tool_xy, 2. * r, 2. * op.stepover_mm) {
+                for (depth, ring, runs) in groups[gi].ordered(tool_xy, 2. * r, 2. * op.stepover_mm)
+                {
                     if cancel.is_cancelled() {
                         return Err("flat-area planning cancelled".into());
                     }
@@ -1958,6 +2010,17 @@ impl FlatPlan {
                         Some(runs) => open_runs_from_nearest(runs, tool_xy),
                     };
                     if ring.is_empty() {
+                        continue;
+                    }
+                    if op.finish_walls
+                        && depth == 0.
+                        && ring.iter().any(|s| {
+                            let mid = stroke_point(s, 0.5);
+                            index.max_height(mid, mid, wall_probe, &mut seen, &mut stamp)
+                                > z + op.tolerance_mm
+                        })
+                    {
+                        walls.push(ring);
                         continue;
                     }
                     // Prove each chord; halve failures down to h / 16, keep
@@ -2017,14 +2080,93 @@ impl FlatPlan {
                     }
                 }
             }
+            if let Some(cad) = cad {
+                // The nominal outline is reachable at an open edge even at
+                // a sharp corner. Use an enlarged disk for this proof so
+                // an overhanging pass cannot take the declared wall stock.
+                let reserve = op.radial_stock_to_leave_mm + cad.boundary_error_mm + op.tolerance_mm;
+                for component in &cad.components {
+                    let outline = boundary_strokes(&component.outer, false, op.tolerance_mm)?;
+                    let mut omitted = 0.;
+                    let pieces = prove_ring(
+                        &outline,
+                        z,
+                        r + reserve,
+                        &index,
+                        &mut seen,
+                        &mut stamp,
+                        h,
+                        op.tolerance_mm,
+                        region_limits.as_ref(),
+                        &mut omitted,
+                        cancel,
+                    )?;
+                    for piece in pieces {
+                        let side = side_candidates(&piece);
+                        tool_xy = [piece.end()[0], piece.end()[1]];
+                        chains.push(Chain {
+                            pieces: vec![piece],
+                            side,
+                            face: face.clone(),
+                        });
+                        rows += 1;
+                    }
+                }
+            }
+            for ring in walls {
+                let ring = rotate_to_nearest(ring, tool_xy);
+                let mut omitted = 0.;
+                let pieces = prove_ring(
+                    &ring,
+                    z,
+                    r,
+                    &index,
+                    &mut seen,
+                    &mut stamp,
+                    h,
+                    op.tolerance_mm,
+                    region_limits.as_ref(),
+                    &mut omitted,
+                    cancel,
+                )?;
+                if omitted > 0. || pieces.is_empty() {
+                    return Err(format!(
+                        "flat-area wall pass at Z{level} could not be proven within the part and limits"
+                    ));
+                }
+                wall_passes += 1;
+                for piece in pieces {
+                    tool_xy = [piece.end()[0], piece.end()[1]];
+                    let side = side_candidates(&piece);
+                    chains.push(Chain {
+                        pieces: vec![piece],
+                        side,
+                        face: face.clone(),
+                    });
+                    rows += 1;
+                }
+            }
+            if cad.is_some() && chains.len() == level_chains {
+                return Err(format!(
+                    "flat-area CAD floor Z{level} has no proven pass for this cutter"
+                ));
+            }
         }
+        if op.finish_walls && wall_passes == 0 {
+            return Err(
+                "flat-area wall finishing needs a reachable wall beside a selected flat".into(),
+            );
+        }
+        let mut reported_levels: Vec<_> = selected.iter().map(|(z, _)| *z).collect();
+        reported_levels.dedup();
         let report = FlatReport {
             strategy: "flat",
             geometric_residual_status: ResidualStatus::Pending,
-            levels_z_mm: levels.iter().map(|l| l.0).collect(),
+            levels_z_mm: reported_levels,
             rows,
             runs: chains.len(),
             loops,
+            wall_passes,
             links_at_depth: links,
             cut_length_mm: chains
                 .iter()
@@ -3436,6 +3578,56 @@ fn level_region(
     Ok(Some((region, std::sync::Arc::new(face))))
 }
 
+fn cad_level_region(
+    target: &crate::roughing::PreparedRoughingTarget,
+    op: &FlatOperation,
+    z: f64,
+    r: f64,
+    cad: &crate::planar::PlanarRegion,
+    cancel: &impl CancelSignal,
+) -> Result<
+    (
+        crate::planar::PreparedRegion,
+        std::sync::Arc<crate::planar::PreparedRegion>,
+    ),
+    String,
+> {
+    let options = crate::planar::ConstructionOptions {
+        tolerance_mm: op.tolerance_mm,
+    };
+    let cad = cad
+        .prepare(options)
+        .map_err(|e| format!("flat-area CAD floor at Z{z}: {e}"))?;
+    let bounds = cad
+        .bounds()
+        .ok_or_else(|| format!("flat-area CAD floor at Z{z} is empty"))?;
+    // Entries continue to use a conservative shadow of the actual mesh.
+    // The caller's trim must never authorize a plunge onto the part.
+    let shadow = target.shadow_for_cutter(z - op.level_tolerance_mm, 0., r, &mut 0, cancel)?;
+    let face = shadow.region.prepare(options)?;
+    let mesh = face
+        .bounds()
+        .ok_or_else(|| format!("flat-area CAD floor at Z{z} has no mesh shadow"))?;
+    let error = cad.definition().boundary_error_mm + face.definition().boundary_error_mm;
+    if bounds[0] < mesh[0] - error
+        || bounds[1] < mesh[1] - error
+        || bounds[2] > mesh[2] + error
+        || bounds[3] > mesh[3] + error
+    {
+        return Err(format!(
+            "flat-area CAD floor at Z{z} extends beyond the mesh shadow"
+        ));
+    }
+    let reach =
+        r + op.radial_stock_to_leave_mm + cad.definition().boundary_error_mm + op.tolerance_mm;
+    let region = cad
+        .offset_prepared(reach)
+        .map_err(|e| format!("flat-area CAD floor offset at Z{z}: {e}"))?
+        .into_parts()
+        .1;
+    Ok((region, std::sync::Arc::new(face)))
+}
+
 /// The offset loops of one connected component of a level's region: the
 /// outer-boundary loops and the hole loops, each with its inward offset.
 /// One offset loop: its offset depth, its closed strokes, and the stretches
@@ -4794,6 +4986,37 @@ fn allows_segment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cad_floor_retains_the_radial_reserve_and_rejects_an_outside_trim() {
+        let op: FlatOperation = serde_json::from_value(serde_json::json!({
+            "id":"flat", "tool":"mill", "floor_z_mm":0., "stepover_mm":1., "clearance_z_mm":8.,
+            "feed_mm_min":300., "plunge_mm_min":100., "tolerance_mm":0.00001, "spindle_rpm":6000.,
+            "tool_number":1, "length_register":1, "work_offset":1, "coolant":"flood",
+            "radial_stock_to_leave_mm":0.2, "surface":{
+                "version":1, "units":"mm", "surface_error_mm":0., "source":null,
+                "triangles":[[[0.,0.,4.],[10.,0.,4.],[10.,10.,4.]],[[0.,0.,4.],[10.,10.,4.],[0.,10.,4.]]]
+            }
+        })).unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let target = crate::roughing::PreparedRoughingTarget::prepare(
+            op.surface.clone(),
+            op.tolerance_mm,
+            &cancel,
+        )
+        .unwrap();
+        let circle = crate::planar::PlanarRegion::circle("floor", [5., 5.], 2.).unwrap();
+        let (centres, _) = cad_level_region(&target, &op, 4., 1., &circle, &cancel).unwrap();
+        let reach = 2. - 1. - op.radial_stock_to_leave_mm - op.tolerance_mm;
+        assert!((centres.summary().area_mm2 - std::f64::consts::PI * reach.powi(2)).abs() < 1e-8);
+        let outside = crate::planar::PlanarRegion::circle("outside", [25., 5.], 2.).unwrap();
+        assert!(
+            cad_level_region(&target, &op, 4., 1., &outside, &cancel)
+                .err()
+                .unwrap()
+                .contains("beyond the mesh shadow")
+        );
+    }
 
     fn tri(p: [Vec3; 3]) -> Tri {
         Tri {

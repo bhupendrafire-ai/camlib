@@ -453,6 +453,30 @@ def export_floor_region(face, *, name, source, work_frame=None, max_error_mm=0.0
     return region
 
 
+def flat_floors(shape, *, source=None, max_error_mm=0.005, cancel=None):
+    """Export upward horizontal face trims for Flat in the shape's work frame."""
+    from .operations import FlatFloor
+
+    solid = shape.val() if hasattr(shape, "val") else shape
+    floors = []
+    for index, face in enumerate(solid.Faces()):
+        _fixture_cancel(cancel)
+        if face.geomType() != "PLANE":
+            continue
+        normal = face.normalAt()
+        if normal.z <= 0 or math.hypot(normal.x, normal.y) > 1e-12:
+            continue
+        region = export_floor_region(
+            face,
+            name=f"flat-face-{index}",
+            source=dict(source or {}, face=index),
+            max_error_mm=max_error_mm,
+            cancel=cancel,
+        )
+        floors.append(FlatFloor(face.Center().z, region))
+    return tuple(sorted(floors, key=lambda floor: -floor.z_mm))
+
+
 def deburr_levels(
     shape, *, source=None, max_error_mm=0.005, level_tolerance_mm=1e-6, tangent_tolerance_deg=0.05, cancel=None
 ):

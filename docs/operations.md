@@ -1615,6 +1615,23 @@ the passes; the surface mesh decides the heights and the clearance proof.
 
 ## Flat-area finishing: `Flat`
 
+Optional `floors` selects horizontal CAD trims in work coordinates as
+`FlatFloor(z_mm, region)` values. The region carries its outer loops,
+holes and boundary error. `camlib.cadquery.flat_floors(shape)` exports
+upward horizontal faces using the analytic CAD floor exporter. Each
+selected height must match a horizontal level on the supplied mesh.
+The trims shape the insets and the engine proves overhang at open outlines.
+The mesh remains the clearance authority and supplies a conservative
+entry shadow. Omitting `floors` uses the mesh-derived levels.
+
+`finish_walls=True` schedules the outermost contours beside raised walls
+after the floor passes at each level. They keep `radial_stock_to_leave_mm`
+and the floor's axial allowance. Every contour uses the ordinary tool,
+part, limit and live-stock checks. An explicit request with no reachable
+wall or with an unproven wall contour refuses. See Autodesk's
+[2D Offset Roughing reference](https://help.autodesk.com/view/fusion360/ENU/?contextId=MFG-REF-2D-POCKET-CMD)
+for floor selection, wall passes and radial stock to leave.
+
 Required: `surface`, `floor_z_mm`, `stepover_mm`, `clearance_z_mm`. Finds the
 horizontal faces above `floor_z_mm` (faces within `level_tolerance_mm`, 0.001,
 form one level) and finishes each level at its exact height plus
