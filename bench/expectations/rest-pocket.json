@@ -26,21 +26,21 @@
       "retracts": 6
     },
     "rest": {
-      "air_cut_mm": 175.491,
-      "cut_mm": 310.735,
-      "cycle_seconds_exact_stop": 39.917,
-      "cycle_seconds_tangent": 39.557,
-      "link_mm": 123.743,
-      "moves": 123,
-      "plunges": 6,
-      "rapid_mm": 55.803,
+      "air_cut_mm": 27.999,
+      "cut_mm": 103.496,
+      "cycle_seconds_exact_stop": 24.983,
+      "cycle_seconds_tangent": 24.983,
+      "link_mm": 0.0,
+      "moves": 72,
+      "plunges": 11,
+      "rapid_mm": 119.801,
       "removed_mm3": 2.0,
-      "retracts": 12
+      "retracts": 22
     }
   },
   "toolpath": {
-    "cycle_seconds_exact_stop": 92.098,
-    "cycle_seconds_tangent": 91.738,
+    "cycle_seconds_exact_stop": 77.164,
+    "cycle_seconds_tangent": 77.164,
     "material": {
       "leftover_mm3": [
         0.0,
@@ -51,8 +51,8 @@
         66.004
       ]
     },
-    "moves": 186,
+    "moves": 135,
     "post_error": null,
-    "posted_blocks": 225
+    "posted_blocks": 174
   }
 }

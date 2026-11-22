@@ -202,6 +202,7 @@ fn small_tool_rest_path_uses_large_tool_stock_and_omits_cleared_strokes() {
         "{:?}",
         rest.report()
     );
+    assert!(rest.report().rest_history_skipped_strokes > 0);
     assert!(rest.report().rest_merged_pieces > 0);
     assert_eq!(
         rest.report().rest_candidates,
