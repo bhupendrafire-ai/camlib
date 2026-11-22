@@ -1629,7 +1629,13 @@ the face and its disk takes one stepover of it like every later pass, minus the
 shadow of everything standing above it grown by the radius plus
 `radial_stock_to_leave_mm` (default 0) plus its stated errors, so near walls
 the tool stays a radius plus the radial stock away and cuts only the horizontal
-faces: the walls keep their radial stock for a wall finish. Its inward offsets
+faces: the walls keep their radial stock for a wall finish. Flat covers small
+notches between straight facets of the protective shadow with a
+validated outer envelope before expansion. This can only add protection, with
+the displacement included in the boundary error, and the cuts are still
+checked against the original part. An erosion that fails to advance or leaves
+area beyond the component's geometric depth limit refuses the operation.
+The inward offsets at
 0, `stepover_mm`, 2 `stepover_mm`, ... are the passes; after the last one, a
 core deeper than a radius is covered by half-step passes while it lasts, and
 where an offset pinches off in a corner between two boundaries of the region

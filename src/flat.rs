@@ -3393,10 +3393,14 @@ fn level_region(
         // A radius plus the radial stock left on the walls off everything
         // standing above the level.
         let reach = r + radial + (above.report.boundary_error_mm - source_error).max(0.);
-        let blocked = above
+        let above_region = above
             .region
             .prepare(options)
-            .map_err(|e| format!("flat-area region at Z{z}: {e}"))?
+            .map_err(|e| format!("flat-area region at Z{z}: {e}"))?;
+        let envelope = above_region.protective_outer_envelope();
+        let blocked = envelope
+            .as_ref()
+            .unwrap_or(&above_region)
             .offset_prepared(-reach)
             .map_err(|e| format!("flat-area region at Z{z}: {e}"))?
             .into_parts()
@@ -3412,10 +3416,7 @@ fn level_region(
         // that really stands above and the face kept is a superset of the
         // true flat: a point a radius outside this region is a radius
         // outside the true face too.
-        let core = above
-            .region
-            .prepare(options)
-            .map_err(|e| format!("flat-area face at Z{z}: {e}"))?
+        let core = above_region
             .offset_prepared(above.report.boundary_error_mm + tolerance)
             .map_err(|e| format!("flat-area face at Z{z}: {e}"))?
             .into_parts()
@@ -3700,16 +3701,22 @@ fn level_loops(
         let prepared = single
             .prepare(options)
             .map_err(|e| format!("flat-area loop region: {e}"))?;
+        // A disk inside this component cannot be wider than its bounding
+        // box. Reserve the stated boundary error and the construction guard
+        // for a near pinch, then refuse inconsistent nonempty erosions.
+        let [xmin, ymin, xmax, ymax] = prepared.bounds().ok_or("flat-area loop bounds missing")?;
+        let max_depth =
+            0.5 * (xmax - xmin).min(ymax - ymin) + prepared.definition().boundary_error_mm + guard;
         // Loops as (depth, strokes, the depth the loops before them reach,
         // when they are only cut where they reach past it).
         type Pending = (f64, Vec<crate::pocket::Stroke>, Option<f64>);
         let mut outers: Vec<Pending> = vec![];
         let mut holes: Vec<Pending> = vec![];
+        let mut vertices = 0usize;
         let mut collect = |eroded: &crate::planar::PreparedRegion,
                            d: f64,
                            need: Option<f64>|
          -> Result<(), String> {
-            let mut vertices = 0usize;
             // A loop the kernel vouches no geometry for is not cut: shorter
             // than the guard (16 tolerances), or — the offset kernel
             // quantizes vertices to its construction grid (32 tolerances per
@@ -3750,6 +3757,11 @@ fn level_loops(
             if cancel.is_cancelled() {
                 return Err("flat-area planning cancelled".into());
             }
+            if d > max_depth {
+                return Err(
+                    "flat-area offset remains nonempty past the component's erosion limit".into(),
+                );
+            }
             // The rings so far (at 0, s, ..., d - s) already cover every point
             // of the region within d - s + r of its boundary: a point at depth
             // t >= d' lies t - d' from the boundary of the offset at d' (the
@@ -3770,8 +3782,12 @@ fn level_loops(
                 None
             };
             collect(&eroded, d, need)?;
+            let next_depth = d + stepover;
+            if next_depth <= d {
+                return Err("flat-area offset depth cannot advance by the stepover".into());
+            }
             let next = prepared
-                .offset_prepared(d + stepover)
+                .offset_prepared(next_depth)
                 .map_err(|e| format!("flat-area loop offset: {e}"))?
                 .into_parts()
                 .1;
@@ -3825,7 +3841,7 @@ fn level_loops(
                     }
                 }
             }
-            d += stepover;
+            d = next_depth;
             eroded = next;
         }
         let mut core = d - stepover;
@@ -3837,6 +3853,11 @@ fn level_loops(
                 break;
             }
             let step = core + stepover / 2.;
+            if step <= core || step > max_depth {
+                return Err(
+                    "flat-area remaining floor cannot be resolved within the erosion limit".into(),
+                );
+            }
             let eroded = prepared
                 .offset_prepared(step)
                 .map_err(|e| format!("flat-area loop offset: {e}"))?
