@@ -692,14 +692,20 @@ impl<'a> Field<'a> {
                 // (o - p) . d + t (xhat . d) <= 0.
                 let (mut b0, mut b1) = (0f64, l);
                 let o = self.v[self.topo.edges[e as usize][0] as usize];
-                for d in &wedge {
-                    let (k0, k1) = (dot(sub(o, p), *d), dot(self.topo.xhat[e as usize], *d));
-                    if k1 > 0. {
-                        b1 = b1.min(-k0 / k1);
-                    } else if k1 < 0. {
-                        b0 = b0.max(-k0 / k1);
-                    } else if k0 > 0. {
-                        b1 = -1.;
+                // A true path along the source's own edge is available
+                // independently of its outgoing wedge. When a polyline
+                // crosses almost perpendicularly, the two near-zero dot
+                // products can otherwise trim away this evaluation window.
+                if !on {
+                    for d in &wedge {
+                        let (k0, k1) = (dot(sub(o, p), *d), dot(self.topo.xhat[e as usize], *d));
+                        if k1 > 0. {
+                            b1 = b1.min(-k0 / k1);
+                        } else if k1 < 0. {
+                            b0 = b0.max(-k0 / k1);
+                        } else if k0 > 0. {
+                            b1 = -1.;
+                        }
                     }
                 }
                 if b1 - b0 <= 1e-12 * l {
@@ -1654,8 +1660,13 @@ fn dist_to_polygon(c: [f64; 2], poly: &[[f64; 2]]) -> f64 {
     // Inside: on the same side of every edge (either orientation).
     let cross =
         |a: [f64; 2], b: [f64; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-    let signs: Vec<f64> = (0..n).map(|i| cross(poly[i], poly[(i + 1) % n])).collect();
-    if n >= 3 && (signs.iter().all(|&x| x >= 0.) || signs.iter().all(|&x| x <= 0.)) {
+    let (mut positive, mut negative) = (false, false);
+    for i in 0..n {
+        let side = cross(poly[i], poly[(i + 1) % n]);
+        positive |= side > 0.;
+        negative |= side < 0.;
+    }
+    if n >= 3 && !(positive && negative) {
         return 0.;
     }
     (0..n)
@@ -2060,7 +2071,25 @@ pub(super) trait Distance {
             // least value over the cell clipped to each of its regions (a
             // region missing the cell contributes nothing).
             let slack = 1e-9 * size;
+            let lo = [0, 1].map(|k| cell.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min));
+            let hi = [0, 1].map(|k| cell.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max));
             let least = |func: &F2, rs: &[R2]| -> f64 {
+                // Every clipped region is inside the cell. A circle's distance
+                // to the box in either axis, or a line's minimum at a vertex,
+                // can rule it out before constructing those clipped polygons.
+                let lower = match *func {
+                    F2::Circle(c, s) => {
+                        let gap = [0, 1].map(|k| (lo[k] - c[k]).max(c[k] - hi[k]).max(0.));
+                        s + gap[0].max(gap[1])
+                    }
+                    F2::Line(u, k) => cell
+                        .iter()
+                        .map(|p| k + u[0] * p[0] + u[1] * p[1])
+                        .fold(f64::INFINITY, f64::min),
+                };
+                if lower > ub + slack {
+                    return f64::INFINITY;
+                }
                 let mut best = f64::INFINITY;
                 for r in rs {
                     let (poly, m) = clip_cell(&cell, r, slack);
@@ -2690,6 +2719,38 @@ mod tests {
             let d = field.at(g, q3);
             assert!((d - seg(q3)).abs() < 1e-9, "{q:?}: {d} {}", seg(q3));
         }
+    }
+
+    #[test]
+    fn a_source_crossing_a_split_edge_keeps_its_edge_distance() {
+        let never = AtomicBool::new(false);
+        let (v, t, topo) = build(
+            vec![
+                [20., 15., 10.],
+                [4., 26., 10.],
+                [4., 15., 10.],
+                [20., 4., 10.],
+            ],
+            vec![[0, 1, 2], [0, 2, 3]],
+        );
+        let a = [8.21708948182874, 12.10075098124274, 10.];
+        let p = [8.217089481828841, 15., 10.];
+        let b = [8.217089481829076, 21.781941872970677, 10.];
+        let paths = [Piece::Segment(1, a, p), Piece::Segment(0, p, b)];
+        let field = Field::compute(&v, &t, &topo, &paths, 3.755, &never).unwrap();
+        let e = topo.edges.iter().position(|edge| *edge == [0, 2]).unwrap() as u32;
+        let q = [p[0] + 0.25, p[1], p[2]];
+        let (x, _) = field.coords(e, 0, q);
+        let expected = paths
+            .iter()
+            .map(|piece| piece_dist(piece, q))
+            .fold(f64::INFINITY, f64::min);
+        assert!((field.at(0, q) - expected).abs() < 1e-9);
+        let edge = field.edge_at(e, x);
+        assert!(
+            (edge - expected).abs() < 1e-9,
+            "edge {edge}, expected {expected}"
+        );
     }
 
     #[test]
