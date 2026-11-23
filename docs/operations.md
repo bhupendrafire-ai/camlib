@@ -1861,6 +1861,11 @@ How it is computed:
   along the boundary pass or back along the ring just cut; only otherwise a
   retract.
 
+At a near-perpendicular crossing of a facet edge, the pass endpoint retains
+its distance along that edge during coverage verification. This prevents
+spurious gaps on split faces. In each face subdivision, a lower bound rules
+out distance functions that cannot be nearest before clipping their regions.
+
 Cancellation is checked while constructing a level, including subdivision
 inside one facet, path chaining and simplification. A cancelled contour returns
 an error; its partial paths cannot become a successful plan.
