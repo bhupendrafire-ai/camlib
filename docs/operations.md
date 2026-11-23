@@ -1528,6 +1528,15 @@ no-gouge height; `stock_to_leave_mm` leaves material. In a direct comparison
 with OpenCamLib's drop-cutter on the same mesh, camlib's tip stayed between
 +0.0046 and +0.0099 mm above the exact no-gouge height.
 
+Set `slope_aware_stepover=True` to use the ball-end raster's `stepover_mm`
+as the flat-surface maximum. Each interval is reduced by the cosine of
+the greatest cross-track facet slope over its proposed strip and cutter
+reach. This follows the [steep-area stepover approach in Autodesk Parallel
+finishing](https://help.autodesk.com/view/fusion360/ENU/?contextId=MFG-REF-3D-PARALLEL-CMD).
+The report records this option and the maximum generated row pitch.
+Whole-target ridge height still requires the independent material check,
+including at joins, fillets, and unreachable areas.
+
 Pass direction: rows run along `axis`, stepping from the low to the high end
 of the other axis. By default they alternate (zigzag: the first row from the
 low end of `axis`, or from the high end with `reverse=True`, the next one

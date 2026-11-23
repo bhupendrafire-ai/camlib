@@ -78,6 +78,98 @@ class ParallelTest(unittest.TestCase):
             self.assertGreater(volume["removed_lower_mm3"], 1400)
             self.assertLessEqual(volume["removed_lower_mm3"], 1536)
 
+    def test_slope_aware_spacing_keeps_the_posted_ridge_height(self):
+        import cadquery as cq
+        import numpy as np
+
+        from camlib.cadquery import export_stock_mesh
+        from camlib.post import LoweringOptions, ToolSetting
+        from camlib.verification import MaterialCheck
+        from test_machine import model
+        from test_post import fixture
+
+        def prism(skin):
+            return (
+                cq.Workplane("YZ")
+                .polyline([(-7, -8), (7, -8), (7, -4.32 + skin), (1, skin), (-7, skin)])
+                .close()
+                .extrude(16)
+                .translate((-8, 0, 0))
+            )
+
+        tool = ToolAssembly(
+            "ball2",
+            BallEndMill("be2", diameter=2, flute_length=15, overall_length=50),
+            30,
+            60,
+            (HolderSection(30, 60, 4, 4),),
+        )
+        surface = export_surface_mesh(prism(0))
+        stock = camlib.StockSpec.from_mesh(export_stock_mesh(prism(0.1)), 0.25)
+        start = (0, 0, 8)
+        step = 2 * math.sqrt(2 * 0.01 - 0.01**2)
+        y = np.linspace(-5, 5, 1001)
+        queries = np.column_stack([np.zeros_like(y), y, -0.72 * np.maximum(y - 1, 0)])
+        measurements = []
+        for adaptive in (False, True):
+            op = camlib.Parallel(
+                "scan",
+                tool,
+                surface,
+                -8,
+                step if adaptive else step / math.hypot(1.0, 0.72),
+                8,
+                slope_aware_stepover=adaptive,
+                safety_margin_mm=0.001,
+                path_error_mm=0.00025,
+                feed_mm_min=200,
+                plunge_mm_min=80,
+                spindle_rpm=12000,
+                tool_number=1,
+                length_register=1,
+                coolant="flood",
+            )
+            verification = StreamChecks(
+                stock_contact=StockContactOptions(),
+                material=(MaterialCheck(SurfaceTarget("part", "1", surface, -8)),),
+            )
+            job = camlib.Job(
+                "mixed-slope", "1", (camlib.Setup("top", stock, (tool,), (op,), start, verification=verification),)
+            )
+            header = job.compile().setup("top").program_header()
+            machine = replace(
+                fixture()[1],
+                tools=(ToolSetting.for_tool(header.tools[0], number=1, length_register=1, position_after_mm=start),),
+            )
+            crash = replace(model(header, machine), initial_axes_mm=(0, 0, 8 + tool.gauge_length_mm))
+            distance = np.full(len(y), np.inf)
+            length = seconds = 0.0
+            with job.post(
+                "top", machine=replace(machine, crash_model=crash), lowering=LoweringOptions(chord_tolerance_mm=0.0005)
+            ) as posted:
+                result = posted.export()
+                self.assertEqual(result["accepted"], ())
+                self.assertEqual(result["findings"], ())
+                self.assertEqual(result["machine"]["status"], "clear")
+                for i in range(result["motions"]):
+                    move = posted.posted_motion(i)["motion"]
+                    curve = move["curve"]
+                    a, b = np.array(curve["start"]) + [0, 0, 1], np.array(curve["end"]) + [0, 0, 1]
+                    d = b - a
+                    segment_length = float(np.linalg.norm(d))
+                    seconds += 60 * segment_length / (move["feed_mm_min"] or machine.rapid_mm_min)
+                    if move["kind"] != "cut":
+                        continue
+                    length += segment_length
+                    t = np.clip((queries - a) @ d / max(float(d @ d), 1e-30), 0, 1)
+                    distance = np.minimum(distance, np.linalg.norm(queries - a - t[:, None] * d, axis=1) - 1)
+            self.assertGreaterEqual(distance.min(), -0.001)
+            self.assertLessEqual(distance.max(), 0.012)
+            measurements.append((length, seconds, float(distance.max())))
+        fixed, local = measurements
+        self.assertLess(local[0], fixed[0], measurements)
+        self.assertLess(local[1], fixed[1], measurements)
+
     def test_two_tool_job_and_partial_sloped_segment_seek_replay(self):
         config = example().parallel_job()
         face_tool = ToolAssembly(

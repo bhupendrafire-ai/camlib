@@ -17,6 +17,131 @@ pub use patterns::{FinishPattern, GeodesicSeed};
 /// One XY polyline of a scan pattern.
 type Pass = Vec<[f64; 2]>;
 
+fn raster_coordinate(
+    spec: &StockSpec,
+    radius: f64,
+    cross: usize,
+    rows: usize,
+    pitch: f64,
+    row: usize,
+) -> f64 {
+    if row + 1 == rows {
+        spec.max_mm[cross] + radius
+    } else {
+        spec.min_mm[cross] - radius + row as f64 * pitch
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn slope_raster_coordinates(
+    mesh: &SurfaceMesh,
+    cross: usize,
+    start: f64,
+    end: f64,
+    step: f64,
+    reach: f64,
+    guard: f64,
+    cancel: &impl CancelSignal,
+) -> Result<Vec<f64>, String> {
+    use std::{cmp::Reverse, collections::BinaryHeap};
+    let span_bytes = mesh.triangles.len() as u128 * 40;
+    crate::resources::check_memory(span_bytes, "parallel slope spans")?;
+    let mut spans = Vec::with_capacity(mesh.triangles.len());
+    for &[a, b, c] in mesh.triangles.iter() {
+        if cancel.is_cancelled() {
+            return Err("parallel planning cancelled".into());
+        }
+        let u: Vec3 = std::array::from_fn(|k| b[k] - a[k]);
+        let v: Vec3 = std::array::from_fn(|k| c[k] - a[k]);
+        let nz = (u[0] * v[1] - u[1] * v[0]).abs();
+        if nz == 0. {
+            continue; // A vertical facet spans no area in plan.
+        }
+        let nc = if cross == 0 {
+            u[1] * v[2] - u[2] * v[1]
+        } else {
+            u[2] * v[0] - u[0] * v[2]
+        };
+        spans.push((
+            a[cross].min(b[cross]).min(c[cross]),
+            a[cross].max(b[cross]).max(c[cross]),
+            nz / nz.hypot(nc),
+        ));
+    }
+    spans.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+    let mut positions = vec![start];
+    let mut position = start;
+    let mut active = BinaryHeap::new();
+    let mut next = 0;
+    while position < end {
+        if cancel.is_cancelled() {
+            return Err("parallel planning cancelled".into());
+        }
+        // A contact can lie to either side of the cutter's centre line.
+        // Test the entire proposed interval, including its cutter halo.
+        while next < spans.len() && spans[next].0 <= position + step + reach {
+            // Positive finite cosines have the same order as their bits.
+            active.push(Reverse((spans[next].2.to_bits(), next)));
+            next += 1;
+        }
+        while active
+            .peek()
+            .is_some_and(|&Reverse((_, i))| spans[i].1 < position - reach)
+        {
+            active.pop();
+        }
+        let pitch = step
+            * active
+                .peek()
+                .map_or(1., |&Reverse((bits, _))| f64::from_bits(bits));
+        if pitch <= guard || !pitch.is_finite() {
+            return Err("slope-aware parallel stepover falls below the planning tolerance; use a separate steep-area operation".into());
+        }
+        position = (position + pitch).min(end);
+        if positions.len() == positions.capacity() {
+            crate::resources::check_memory(
+                span_bytes + positions.len() as u128 * 16,
+                "parallel slope-aware rows",
+            )?;
+            positions
+                .try_reserve_exact(positions.len())
+                .map_err(|err| format!("parallel slope-aware rows allocation failed: {err}"))?;
+        }
+        positions.push(position);
+    }
+    Ok(positions)
+}
+
+#[cfg(test)]
+mod spacing_tests {
+    use super::*;
+
+    #[test]
+    fn projected_spacing_tracks_local_cross_slope() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mesh = SurfaceMesh {
+            version: 1,
+            units: "mm".into(),
+            triangles: vec![
+                [[0., 0., 0.], [2., 0., 0.], [0., 10., 0.]],
+                [[0., 10., 0.], [2., 10., 0.], [0., 20., 10.]],
+            ]
+            .into(),
+            surface_error_mm: 0.,
+            source: serde_json::Value::Null,
+        };
+        let rows = slope_raster_coordinates(&mesh, 1, 0., 20., 1., 1., 1e-5, &cancel).unwrap();
+        assert_eq!(&rows[..2], &[0., 1.]);
+        assert_eq!(rows.last(), Some(&20.));
+        let narrow = 1. / 2f64.sqrt();
+        for pair in rows.windows(2).filter(|pair| pair[0] >= 8.) {
+            assert!(pair[1] - pair[0] <= narrow + 1e-12, "{pair:?}");
+        }
+        let along = slope_raster_coordinates(&mesh, 0, 0., 2., 1., 1., 1e-5, &cancel).unwrap();
+        assert_eq!(along, vec![0., 1., 2.]);
+    }
+}
+
 /// Whole-stock upper-height premise for a finishing cutter after roughing.
 /// This reports actual conservative stock, not the nominal CAD surface height.
 #[derive(Clone, Serialize)]
@@ -102,6 +227,10 @@ pub struct ParallelOperation<G = SurfaceMesh> {
     /// project, which require 0.
     #[serde(default)]
     pub stepover_mm: f64,
+    /// Treat the raster stepover as a flat-surface maximum and project it
+    /// onto each strip using the maximum cross-track facet slope.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub slope_aware_stepover: bool,
     pub clearance_z_mm: f64,
     /// Raster row direction.
     #[serde(default = "default_axis")]
@@ -365,6 +494,7 @@ impl<G> ParallelOperation<G> {
             surface: f(self.surface)?,
             floor_z_mm: self.floor_z_mm,
             stepover_mm: self.stepover_mm,
+            slope_aware_stepover: self.slope_aware_stepover,
             clearance_z_mm: self.clearance_z_mm,
             axis: self.axis,
             reverse: self.reverse,
@@ -403,6 +533,8 @@ pub struct ParallelReport {
     pub triangles: usize,
     pub rows: usize,
     pub row_pitch_mm: f64,
+    #[serde(skip_serializing_if = "is_false")]
+    pub slope_aware_stepover: bool,
     pub rows_completed: usize,
     pub cut_segments: usize,
     pub adaptive_splits: usize,
@@ -559,6 +691,8 @@ pub struct ParallelPlan {
     /// Current pass, lifted onto the surface; `cursor` is the next chord.
     vertices: Vec<Vec3>,
     cursor: usize,
+    /// Cross-track coordinates of the optional variable-spacing raster.
+    raster_coordinates: Vec<f64>,
     /// XY polylines of a non-raster pattern (entered by a vertical plunge).
     passes: Vec<Pass>,
     transition: Vec<(Vec3, MoveKind)>,
@@ -910,7 +1044,33 @@ impl ParallelPlan {
         // Scan the rounded rectangle expanded by the actual ball radius so
         // sloped edge contacts can lie outside the model's XY footprint.
         let span = spec.max_mm[cross] - spec.min_mm[cross] + 2. * radius;
+        let inflated =
+            radius + op.stock_to_leave_mm + op.surface.surface_error_mm + op.safety_margin_mm;
+        let raster_coordinates = if op.slope_aware_stepover {
+            if !op.pattern.is_raster() || !matches!(cutter.shape, CutterShape::Ball) {
+                return Err("slope-aware stepover requires a ball-end parallel raster".into());
+            }
+            slope_raster_coordinates(
+                mesh,
+                cross,
+                spec.min_mm[cross] - radius,
+                spec.max_mm[cross] + radius,
+                op.stepover_mm,
+                inflated,
+                guard,
+                cancel,
+            )?
+        } else {
+            vec![]
+        };
         let (rows, pitch) = match &op.pattern {
+            FinishPattern::Raster if !raster_coordinates.is_empty() => (
+                raster_coordinates.len(),
+                raster_coordinates
+                    .windows(2)
+                    .map(|w| w[1] - w[0])
+                    .fold(0., f64::max),
+            ),
             FinishPattern::Raster => {
                 let intervals = (span / op.stepover_mm).ceil() as usize;
                 if intervals == 0 {
@@ -926,8 +1086,6 @@ impl ParallelPlan {
                 (passes.len(), op.stepover_mm)
             }
         };
-        let inflated =
-            radius + op.stock_to_leave_mm + op.surface.surface_error_mm + op.safety_margin_mm;
         let mut slope_work = SurfaceWork::default();
         let corner = match cutter.shape {
             CutterShape::Flat => Some(0.),
@@ -1073,7 +1231,13 @@ impl ParallelPlan {
         let rows = if limits.is_some() || rest.is_some() || region_limits.is_some() {
             if op.pattern.is_raster() {
                 passes = (0..rows)
-                    .map(|row| Self::raster_row(&op, spec, radius, axis, rows, pitch, row))
+                    .map(|row| {
+                        let coordinate =
+                            raster_coordinates.get(row).copied().unwrap_or_else(|| {
+                                raster_coordinate(spec, radius, cross, rows, pitch, row)
+                            });
+                        Self::raster_row(&op, spec, radius, axis, coordinate, row)
+                    })
                     .collect();
             }
             let spacing = if op.stepover_mm > 0. {
@@ -1170,6 +1334,7 @@ impl ParallelPlan {
             triangles: mesh.triangles.len(),
             rows,
             row_pitch_mm: pitch,
+            slope_aware_stepover: op.slope_aware_stepover,
             rows_completed: 0,
             cut_segments: 0,
             adaptive_splits: 0,
@@ -1226,6 +1391,7 @@ impl ParallelPlan {
             stack: vec![],
             vertices: vec![],
             cursor: 0,
+            raster_coordinates,
             passes,
             transition: vec![],
             ramp: Default::default(),
@@ -1435,17 +1601,11 @@ impl ParallelPlan {
         spec: &StockSpec,
         radius: f64,
         axis: usize,
-        rows: usize,
-        pitch: f64,
+        c: f64,
         row: usize,
     ) -> Vec<[f64; 2]> {
         let cross = 1 - axis;
         let reverse = op.row_reversed(row);
-        let c = if row + 1 == rows {
-            spec.max_mm[cross] + radius
-        } else {
-            spec.min_mm[cross] - radius + row as f64 * pitch
-        };
         let outside = (spec.min_mm[cross] - c).max(c - spec.max_mm[cross]).max(0.);
         let extension = (radius * radius - outside * outside).max(0.).sqrt();
         let (lo, hi) = (spec.min_mm[axis] - extension, spec.max_mm[axis] + extension);
@@ -1469,11 +1629,20 @@ impl ParallelPlan {
         let mut b = [0.; 3];
         let cross = 1 - self.axis;
         let reverse = self.op.row_reversed(self.row);
-        a[cross] = if self.row + 1 == self.report.rows {
-            self.spec.max_mm[cross] + self.radius
-        } else {
-            self.spec.min_mm[cross] - self.radius + self.row as f64 * self.report.row_pitch_mm
-        };
+        a[cross] = self
+            .raster_coordinates
+            .get(self.row)
+            .copied()
+            .unwrap_or_else(|| {
+                raster_coordinate(
+                    &self.spec,
+                    self.radius,
+                    cross,
+                    self.report.rows,
+                    self.report.row_pitch_mm,
+                    self.row,
+                )
+            });
         b[cross] = a[cross];
         let outside = (self.spec.min_mm[cross] - a[cross])
             .max(a[cross] - self.spec.max_mm[cross])
