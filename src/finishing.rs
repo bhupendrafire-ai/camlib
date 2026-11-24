@@ -65,7 +65,7 @@ fn slope_raster_coordinates(
         spans.push((
             a[cross].min(b[cross]).min(c[cross]),
             a[cross].max(b[cross]).max(c[cross]),
-            nz / nz.hypot(nc),
+            nz / metallic::hypot(nz, nc),
         ));
     }
     spans.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
@@ -120,6 +120,31 @@ fn slope_raster_coordinates(
 #[cfg(test)]
 mod spacing_tests {
     use super::*;
+
+    #[test]
+    fn steep_facet_row_coordinate_is_reproducible() {
+        let mesh = SurfaceMesh {
+            version: 1,
+            units: "mm".into(),
+            triangles: vec![[[0., 0., 0.], [1., 0., 0.], [0., 11., 261.]]].into(),
+            surface_error_mm: 0.,
+            source: serde_json::Value::Null,
+        };
+        let rows = slope_raster_coordinates(
+            &mesh,
+            1,
+            0.,
+            1.,
+            1.,
+            1.,
+            1e-5,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        // Cross-track projection 11/hypot(11,261); the host norm can
+        // differ in the last bit of the generated cutter coordinate.
+        assert_eq!(rows[1].to_bits(), 0x3fa5_8f35_2c29_98e4);
+    }
 
     #[test]
     fn projected_spacing_tracks_local_cross_slope() {
