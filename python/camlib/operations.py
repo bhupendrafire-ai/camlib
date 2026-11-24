@@ -170,6 +170,8 @@ def _pattern_dict(op, kind, pattern_fields):
         if result.get(key, 0) is None:
             result.pop(key)
     _drop_default_slopes(result)
+    if result.get('fit_arcs') is False:
+        result.pop('fit_arcs')
     return result
 
 
@@ -272,6 +274,8 @@ class Scallop:
     feed_z_mm: float | None = None
     # Entry where live stock stands above a pass: RampEntry(...), as in Parallel.
     entry: object | None = None
+
+    fit_arcs: bool = field(default=False, kw_only=True)
 
     def to_dict(self):
         return _pattern_dict(self, "scallop", ())
@@ -449,6 +453,8 @@ class Spiral:
     # Entry where live stock stands above a pass: RampEntry(...), as in Parallel.
     entry: object | None = None
 
+    fit_arcs: bool = field(default=False, kw_only=True)
+
     def to_dict(self):
         return _pattern_dict(
             self, "spiral", ("center_mm", "inner_radius_mm", "outer_radius_mm", "outward", "clockwise")
@@ -536,6 +542,8 @@ class Morph:
     # Entry where live stock stands above a pass: RampEntry(...), as in Parallel.
     entry: object | None = None
 
+    fit_arcs: bool = field(default=False, kw_only=True)
+
     def to_dict(self):
         return _pattern_dict(self, "morph", ("from_path", "to_path"))
 
@@ -573,6 +581,8 @@ class Project:
     feed_z_mm: float | None = None
     # Entry where live stock stands above a pass: RampEntry(...), as in Parallel.
     entry: object | None = None
+
+    fit_arcs: bool = field(default=False, kw_only=True)
 
     def to_dict(self):
         return _pattern_dict(self, "project", ("paths",))

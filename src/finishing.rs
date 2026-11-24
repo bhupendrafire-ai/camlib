@@ -1,7 +1,7 @@
 //! Adaptive, continuously checked parallel finishing of faceted upper surfaces.
 use crate::{
     facing::TraverseAxis,
-    motion::{Coolant, Curve, Event, Motion, MoveKind, SpindleDirection, Vec3},
+    motion::{Coolant, Curve, Event, Motion, MoveKind, Plane, SpindleDirection, Vec3},
     pocket::ResidualStatus,
     stock::{CancelSignal, Stock, StockSpec},
     surface::{PreparedSurface, SurfaceMesh, SurfaceWork},
@@ -102,6 +102,9 @@ pub struct ParallelOperation<G = SurfaceMesh> {
     /// project, which require 0.
     #[serde(default)]
     pub stepover_mm: f64,
+    /// Fit constant-height XY arcs inside the existing path-error budget.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fit_arcs: bool,
     pub clearance_z_mm: f64,
     /// Raster row direction.
     #[serde(default = "default_axis")]
@@ -365,6 +368,7 @@ impl<G> ParallelOperation<G> {
             surface: f(self.surface)?,
             floor_z_mm: self.floor_z_mm,
             stepover_mm: self.stepover_mm,
+            fit_arcs: self.fit_arcs,
             clearance_z_mm: self.clearance_z_mm,
             axis: self.axis,
             reverse: self.reverse,
@@ -407,6 +411,9 @@ pub struct ParallelReport {
     pub cut_segments: usize,
     pub adaptive_splits: usize,
     pub compacted_vertices: usize,
+    /// Constant-height XY cuts accepted by the arc proof.
+    #[serde(skip_serializing_if = "no_entries")]
+    pub fitted_arcs: usize,
     pub reused_segments: usize,
     pub vertical_transitions: usize,
     pub transition_moves: usize,
@@ -1174,6 +1181,7 @@ impl ParallelPlan {
             cut_segments: 0,
             adaptive_splits: 0,
             compacted_vertices: 0,
+            fitted_arcs: 0,
             reused_segments: 0,
             vertical_transitions: 0,
             transition_moves: 0,
@@ -1308,7 +1316,16 @@ impl ParallelPlan {
     ) -> Result<(Vec<Pass>, f64), String> {
         let lo = [spec.min_mm[0] - radius, spec.min_mm[1] - radius];
         let hi = [spec.max_mm[0] + radius, spec.max_mm[1] + radius];
-        let sagitta = op.path_error_mm;
+        // Reserve part of the pattern error for the optional fitted arc.
+        let sagitta = if op.fit_arcs
+            && op.limits.is_none()
+            && op.rest_threshold_mm.is_none()
+            && (op.slope_from_deg, op.slope_to_deg) == (0., 90.)
+        {
+            op.path_error_mm / 4.
+        } else {
+            op.path_error_mm
+        };
         let guard = 16. * op.tolerance_mm;
         let finite = |v: &[f64]| v.iter().all(|x| x.is_finite() && x.abs() <= 1e6);
         let radii = |center: [f64; 2], inner: f64, outer: Option<f64>| {
@@ -1615,6 +1632,120 @@ impl ParallelPlan {
             [s.b[0], s.b[1], s.a[2]]
         }
     }
+    /// Try a bounded run of whole lifted segments. The tube enclosing the
+    /// arc is checked with an enlarged protected ball and a smaller contact
+    /// ball. These bound gouge and path excess at every point of the arc,
+    /// without sampling the arc or spending the same error allowance twice.
+    fn fitted_cut(&mut self, cancel: &impl CancelSignal) -> Result<Option<Motion>, String> {
+        if !self.op.fit_arcs
+            || self.flat.is_some()
+            || self.op.pattern.is_raster()
+            || self.op.limits.is_some()
+            || self.op.rest_threshold_mm.is_some()
+            || self.move_depth.is_some()
+            || (self.op.slope_from_deg, self.op.slope_to_deg) != (0., 90.)
+            || !self.transition.is_empty()
+            || !self.stack.is_empty()
+            || self.prepared_segment.is_some()
+        {
+            return Ok(None);
+        }
+        let budget = (self.op.path_error_mm / 2.).min((self.inflated - self.protected) / 2.);
+        let mut work = self.report.work;
+        let vertices = &self.vertices[self.cursor..];
+        let Some(&start) = vertices.first() else {
+            return Ok(None);
+        };
+        if start[0] != self.position[0]
+            || start[1] != self.position[1]
+            || start[2] - self.tip_offset != self.position[2]
+        {
+            return Ok(None);
+        }
+        let n = vertices
+            .iter()
+            .take(17)
+            .take_while(|p| p[2] == start[2])
+            .count();
+        // A shorter attempt keeps the same start and never consumes a
+        // segment until an arc has been proved.
+        for count in [n, n.div_ceil(2), n.div_ceil(4)] {
+            if count < 4 || budget <= 0. {
+                break;
+            }
+            let vertices = &vertices[..count];
+            let xy: Vec<_> = vertices.iter().map(|p| [p[0], p[1]]).collect();
+            let Some((center, sweep, band)) = arc_band(&xy, budget) else {
+                continue;
+            };
+            let mut maximum: f64 = 0.;
+            let mut certified = true;
+            for w in vertices.windows(2) {
+                if !self.surface.segment_clear(
+                    w[0],
+                    w[1],
+                    self.protected + band,
+                    &mut work,
+                    cancel,
+                )? {
+                    certified = false;
+                    break;
+                }
+                let excess = self.surface.horizontal_excess_bound(
+                    w[0],
+                    w[1],
+                    self.inflated - band,
+                    self.op.path_error_mm,
+                    &mut work,
+                    cancel,
+                )?;
+                let Some(excess) = excess.filter(|e| *e <= self.op.path_error_mm) else {
+                    certified = false;
+                    break;
+                };
+                maximum = maximum.max(excess);
+            }
+            if !certified {
+                continue;
+            }
+            let mut end = vertices[count - 1];
+            end[2] -= self.tip_offset;
+            let curve = Curve::Arc {
+                start: self.position,
+                end,
+                center: [center[0], center[1], end[2]],
+                plane: Plane::Xy,
+                sweep_rad: sweep,
+            };
+            let Ok(prepared) = curve.prepare(self.op.tolerance_mm) else {
+                continue;
+            };
+            let bounds = prepared.bounds();
+            if (0..2).any(|k| {
+                bounds.min[k] < self.spec.min_mm[k] - self.radius
+                    || bounds.max[k] > self.spec.max_mm[k] + self.radius
+            }) {
+                continue;
+            }
+            if cancel.is_cancelled() {
+                return Err("parallel planning cancelled".into());
+            }
+            let result = self.emit_curve(end, MoveKind::Cut, None, curve)?;
+            self.cursor += count - 1;
+            self.report.work = work;
+            self.report.max_certified_path_excess_mm = Some(
+                self.report
+                    .max_certified_path_excess_mm
+                    .unwrap_or(0.)
+                    .max(maximum),
+            );
+            self.report.fitted_arcs += 1;
+            return Ok(result);
+        }
+        self.report.work = work;
+        Ok(None)
+    }
+
     fn next_cut(&mut self, cancel: &impl CancelSignal) -> Result<Option<(Vec3, MoveKind)>, String> {
         if cancel.is_cancelled() {
             return Err("parallel planning cancelled".into());
@@ -2165,13 +2296,22 @@ impl ParallelPlan {
         if end == self.position || d < 1e-9 {
             return Ok(None);
         }
-        if self.next_id == u64::MAX {
-            return Err("parallel motion id space exhausted".into());
-        }
         let curve = Curve::Line {
             start: self.position,
             end,
         };
+        self.emit_curve(end, kind, plunge_feed, curve)
+    }
+    fn emit_curve(
+        &mut self,
+        end: Vec3,
+        kind: MoveKind,
+        plunge_feed: Option<f64>,
+        curve: Curve,
+    ) -> Result<Option<Motion>, String> {
+        if self.next_id == u64::MAX {
+            return Err("parallel motion id space exhausted".into());
+        }
         curve.prepare(self.op.tolerance_mm)?;
         let motion = Motion {
             id: self.next_id,
@@ -2293,24 +2433,31 @@ impl ParallelPlan {
                     self.phase = Phase::Cut;
                     result
                 }
-                Phase::Cut => match self.next_cut(cancel)? {
-                    Some((end, kind)) => {
-                        let r = self.emit(end, kind)?;
-                        if r.is_some() {
-                            if kind == MoveKind::Cut {
-                                self.report.cut_segments += 1;
-                            } else {
-                                self.report.transition_moves += 1;
+                Phase::Cut => {
+                    if let Some(arc) = self.fitted_cut(cancel)? {
+                        self.report.cut_segments += 1;
+                        Some(arc)
+                    } else {
+                        match self.next_cut(cancel)? {
+                            Some((end, kind)) => {
+                                let r = self.emit(end, kind)?;
+                                if r.is_some() {
+                                    if kind == MoveKind::Cut {
+                                        self.report.cut_segments += 1;
+                                    } else {
+                                        self.report.transition_moves += 1;
+                                    }
+                                }
+                                r
+                            }
+                            None => {
+                                self.report.rows_completed += 1;
+                                self.phase = Phase::Exit;
+                                None
                             }
                         }
-                        r
                     }
-                    None => {
-                        self.report.rows_completed += 1;
-                        self.phase = Phase::Exit;
-                        None
-                    }
-                },
+                }
                 Phase::Exit => {
                     let result = self.emit(
                         [
@@ -2367,6 +2514,52 @@ impl ParallelPlan {
             }
         }
     }
+}
+
+/// Two-way distance bound between the line run and arc. Each source chord
+/// differs from the chord of its radially projected ends by at most the
+/// larger endpoint shift. The intervening minor arc adds its sagitta.
+fn arc_band(xy: &[[f64; 2]], limit: f64) -> Option<([f64; 2], f64, f64)> {
+    let (center, sweep) = crate::flat::fit_circle_run(xy, limit)?;
+    if !(1e-8..=std::f64::consts::PI).contains(&sweep.abs()) {
+        return None;
+    }
+    let radius = (xy[0][0] - center[0]).hypot(xy[0][1] - center[1]);
+    let guard = 512. * f64::EPSILON * (1. + radius + center[0].abs() + center[1].abs());
+    let mut band: f64 = 0.;
+    for w in xy.windows(2) {
+        let [a, b] = std::array::from_fn(|i| [w[i][0] - center[0], w[i][1] - center[1]]);
+        let angle = (a[0] * b[1] - a[1] * b[0]).atan2(a[0] * b[0] + a[1] * b[1]);
+        if angle * sweep <= 0. || angle.abs() >= std::f64::consts::FRAC_PI_2 {
+            return None;
+        }
+        let shift = (a[0].hypot(a[1]) - radius)
+            .abs()
+            .max((b[0].hypot(b[1]) - radius).abs());
+        band = band.max(shift + 2. * radius * (angle / 4.).sin().powi(2) + guard);
+    }
+    (band <= limit).then_some((center, sweep, band))
+}
+
+#[cfg(test)]
+#[test]
+fn arc_band_tests_the_interior_and_refuses_backtracking() {
+    let run = |step: f64| {
+        (0..=8)
+            .map(|i| {
+                let (sin, cos) = (i as f64 * step).sin_cos();
+                [8. * cos, 8. * sin]
+            })
+            .collect::<Vec<_>>()
+    };
+    let dense = run(0.01);
+    assert!(arc_band(&dense, 0.001).is_some());
+    // All vertices sit exactly on a circle. The interiors of the chords
+    // are too far from the arc and must still refuse.
+    assert!(arc_band(&run(0.06), 0.001).is_none());
+    let mut turns_back = dense;
+    turns_back.swap(4, 5);
+    assert!(arc_band(&turns_back, 0.001).is_none());
 }
 
 /// The XY distance of `q` from the chord `a`-`b`.

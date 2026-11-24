@@ -78,6 +78,80 @@ class ParallelTest(unittest.TestCase):
             self.assertGreater(volume["removed_lower_mm3"], 1400)
             self.assertLessEqual(volume["removed_lower_mm3"], 1536)
 
+    def test_fitted_level_spiral_reduces_posted_blocks_with_the_same_checks(self):
+        import cadquery as cq
+
+        from camlib.cadquery import export_stock_mesh
+        from camlib.post import LoweringOptions, ToolSetting
+        from camlib.verification import MaterialCheck
+        from test_machine import model
+        from test_post import fixture
+
+        tool = ToolAssembly(
+            "be2",
+            BallEndMill("d2", diameter=2, flute_length=15, overall_length=50),
+            30,
+            60,
+            (HolderSection(30, 60, 4, 4),),
+        )
+        part = cq.Workplane("XY").box(16, 16, 3).translate((0, 0, -1.5))
+        blank = cq.Workplane("XY").box(16, 16, 3.03).translate((0, 0, -1.485))
+        surface = export_surface_mesh(part)
+        stock = camlib.StockSpec.from_mesh(export_stock_mesh(blank), 0.25)
+        start = (0, 0, 8)
+        verification = StreamChecks(
+            stock_contact=StockContactOptions(),
+            material=(MaterialCheck(SurfaceTarget("plate", "1", surface, -3)),),
+        )
+        measurements = []
+        for fitted in (False, True):
+            op = camlib.Spiral(
+                "spiral",
+                tool,
+                surface,
+                -3,
+                0.42,
+                8,
+                (0, 0),
+                inner_radius_mm=1.1,
+                outer_radius_mm=6.0,
+                fit_arcs=fitted,
+                entry=camlib.RampEntry(angle_deg=5, min_length_mm=0.5),
+                safety_margin_mm=0.003,
+                path_error_mm=0.004,
+                feed_mm_min=200,
+                plunge_mm_min=80,
+                spindle_rpm=12000,
+                tool_number=1,
+                length_register=1,
+                coolant="flood",
+            )
+            job = camlib.Job(
+                "round", "1", (camlib.Setup("top", stock, (tool,), (op,), start, verification=verification),)
+            )
+            header = job.compile().setup("top").program_header()
+            machine = replace(
+                fixture()[1],
+                tools=(ToolSetting.for_tool(header.tools[0], number=1, length_register=1, position_after_mm=start),),
+            )
+            crash = replace(model(header, machine), initial_axes_mm=(0, 0, 8 + tool.gauge_length_mm))
+            with job.post(
+                "top",
+                machine=replace(machine, crash_model=crash),
+                lowering=LoweringOptions(native_arcs=True, chord_tolerance_mm=0.0005),
+            ) as posted:
+                result = posted.export()
+                self.assertEqual(result["accepted"], ())
+                self.assertEqual(result["findings"], ())
+                self.assertEqual(result["machine"]["status"], "clear")
+                posting = posted.status()["posting"]
+                measurements.append((result["motions"], posting["arc_output"]["native"]))
+        original, fitted = measurements
+        print(f"Posted spiral moves and arcs. Original {original}, fitted {fitted}")
+        self.assertEqual(original[1], 0)
+        self.assertGreater(fitted[1], 0)
+        self.assertLess(fitted[0], original[0])
+
     def test_two_tool_job_and_partial_sloped_segment_seek_replay(self):
         config = example().parallel_job()
         face_tool = ToolAssembly(

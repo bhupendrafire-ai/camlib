@@ -4462,7 +4462,7 @@ fn refit_arcs(segs: Vec<crate::pocket::Stroke>, fit: f64) -> Vec<crate::pocket::
 /// sits on it within `fit`, the chords are short against the radius, the turn
 /// is steady and one-sided and the sweep stays under a full circle: the
 /// centre and the signed sweep from the first to the last point.
-fn fit_circle_run(pts: &[[f64; 2]], fit: f64) -> Option<([f64; 2], f64)> {
+pub(crate) fn fit_circle_run(pts: &[[f64; 2]], fit: f64) -> Option<([f64; 2], f64)> {
     let n = pts.len();
     if n < 3 {
         return None;

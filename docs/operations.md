@@ -1528,6 +1528,16 @@ no-gouge height; `stock_to_leave_mm` leaves material. In a direct comparison
 with OpenCamLib's drop-cutter on the same mesh, camlib's tip stayed between
 +0.0046 and +0.0099 mm above the exact no-gouge height.
 
+Set `fit_arcs=True` on eligible ball-end curved finishing operations such
+as `Spiral` to fit constant-depth XY cutting runs. The planner bounds the
+distance from the entire line run to each arc in both directions and
+rechecks continuous clearance and path excess with that bound. Runs with
+slope, rest or machining limits, and cuts requiring live-stock flute-depth
+admission continue to use lines. The report counts fitted arcs. To retain
+G2/G3 where the machine and post precision allow it, use
+`LoweringOptions(native_arcs=True)`. Existing stock, machine and
+decoded-program verification still apply to the posted output.
+
 Pass direction: rows run along `axis`, stepping from the low to the high end
 of the other axis. By default they alternate (zigzag: the first row from the
 low end of `axis`, or from the high end with `reverse=True`, the next one
