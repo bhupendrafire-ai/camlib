@@ -121,7 +121,7 @@ class Parallel:
     # or the high end with reverse) and returns at retract_z_mm with a rapid
     # link, for a consistent climb or conventional cut (docs/operations.md).
     one_way: bool = False
-    slope_aware_stepover: bool = False
+    slope_aware_stepover: bool = field(default=False, kw_only=True)
     # How a row is entered where live stock stands above its entry:
     # RampEntry(angle_deg, ...), a ramp down the row line. None: no stock
     # stands above the entries, and one that does is refused.

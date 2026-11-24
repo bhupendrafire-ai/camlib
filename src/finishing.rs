@@ -71,7 +71,12 @@ fn slope_raster_coordinates(
     spans.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
     let mut positions = vec![start];
     let mut position = start;
+    // The span budget includes one heap entry per facet. Reserve it here so
+    // geometric capacity growth cannot exceed that bound on a wide strip.
     let mut active = BinaryHeap::new();
+    active
+        .try_reserve_exact(spans.len())
+        .map_err(|err| format!("parallel slope spans allocation failed: {err}"))?;
     let mut next = 0;
     while position < end {
         if cancel.is_cancelled() {

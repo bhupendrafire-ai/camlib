@@ -78,6 +78,41 @@ class ParallelTest(unittest.TestCase):
             self.assertGreater(volume["removed_lower_mm3"], 1400)
             self.assertLessEqual(volume["removed_lower_mm3"], 1536)
 
+    def test_existing_positional_ramp_entry_keeps_fixed_spacing(self):
+        entry = camlib.RampEntry(3)
+        # The positional signature through one_way and entry predates slope-aware rows.
+        scan = camlib.Parallel(
+            "scan",
+            "ball",
+            None,
+            -2,
+            0.3,
+            5,
+            "x",
+            False,
+            0,
+            0.005,
+            0.005,
+            0.5,
+            1e-5,
+            1,
+            0,
+            90,
+            None,
+            None,
+            None,
+            False,
+            entry,
+            feed_mm_min=200,
+            plunge_mm_min=50,
+            spindle_rpm=3000,
+            tool_number=1,
+            length_register=1,
+            coolant="off",
+        )
+        self.assertIs(scan.entry, entry)
+        self.assertIs(scan.slope_aware_stepover, False)
+
     def test_slope_aware_spacing_keeps_the_posted_ridge_height(self):
         import cadquery as cq
         import numpy as np
