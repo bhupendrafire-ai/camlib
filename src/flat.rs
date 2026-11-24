@@ -4433,7 +4433,7 @@ fn refit_arcs(segs: Vec<crate::pocket::Stroke>, fit: f64) -> Vec<crate::pocket::
             let mut trial = pts.clone();
             trial.extend(inner(&segs[j + 1]));
             trial.push(segs[j + 1].b);
-            let Some(f) = fit_circle_run(&trial, fit) else {
+            let Some(f) = fit_circle_run(&trial, fit, f64::hypot, f64::atan2) else {
                 break;
             };
             trial.pop();
@@ -4462,14 +4462,21 @@ fn refit_arcs(segs: Vec<crate::pocket::Stroke>, fit: f64) -> Vec<crate::pocket::
 /// sits on it within `fit`, the chords are short against the radius, the turn
 /// is steady and one-sided and the sweep stays under a full circle: the
 /// centre and the signed sweep from the first to the last point.
-pub(crate) fn fit_circle_run(pts: &[[f64; 2]], fit: f64) -> Option<([f64; 2], f64)> {
+/// Flat retains its original numerical behavior. New surface-finishing paths
+/// use pinned math for the fit decisions and the sweep sent to the machine.
+pub(crate) fn fit_circle_run(
+    pts: &[[f64; 2]],
+    fit: f64,
+    hypot: impl Fn(f64, f64) -> f64,
+    atan2: impl Fn(f64, f64) -> f64,
+) -> Option<([f64; 2], f64)> {
     let n = pts.len();
     if n < 3 {
         return None;
     }
     let (p, q, r) = (pts[0], pts[n / 2], pts[n - 1]);
     let cross = (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
-    let long = (q[0] - p[0]).hypot(q[1] - p[1]) * (r[0] - p[0]).hypot(r[1] - p[1]);
+    let long = hypot(q[0] - p[0], q[1] - p[1]) * hypot(r[0] - p[0], r[1] - p[1]);
     // Collinear to the same 1e-9 rad a merged straight stretch may keep.
     if long <= 0. || cross.abs() <= 1e-9 * long {
         return None;
@@ -4483,18 +4490,18 @@ pub(crate) fn fit_circle_run(pts: &[[f64; 2]], fit: f64) -> Option<([f64; 2], f6
         (p2 * (q[1] - r[1]) + q2 * (r[1] - p[1]) + r2 * (p[1] - q[1])) / (2. * cross),
         (p2 * (r[0] - q[0]) + q2 * (p[0] - r[0]) + r2 * (q[0] - p[0])) / (2. * cross),
     ];
-    let radius = (p[0] - centre[0]).hypot(p[1] - centre[1]);
+    let radius = hypot(p[0] - centre[0], p[1] - centre[1]);
     if !radius.is_finite() || !(1e-9..=1e6).contains(&radius) {
         return None;
     }
     // Every vertex on the circle, every chord short against the radius.
     for s in pts {
-        if ((s[0] - centre[0]).hypot(s[1] - centre[1]) - radius).abs() > fit {
+        if (hypot(s[0] - centre[0], s[1] - centre[1]) - radius).abs() > fit {
             return None;
         }
     }
     for w in pts.windows(2) {
-        if (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]) > 0.1 * radius {
+        if hypot(w[1][0] - w[0][0], w[1][1] - w[0][1]) > 0.1 * radius {
             return None;
         }
     }
@@ -4517,7 +4524,10 @@ pub(crate) fn fit_circle_run(pts: &[[f64; 2]], fit: f64) -> Option<([f64; 2], f6
     let mut prev = [pts[0][0] - centre[0], pts[0][1] - centre[1]];
     for &s in &pts[1..] {
         let cur = [s[0] - centre[0], s[1] - centre[1]];
-        sweep += (prev[0] * cur[1] - prev[1] * cur[0]).atan2(prev[0] * cur[0] + prev[1] * cur[1]);
+        sweep += atan2(
+            prev[0] * cur[1] - prev[1] * cur[0],
+            prev[0] * cur[0] + prev[1] * cur[1],
+        );
         prev = cur;
     }
     if !sweep.is_finite() || sweep.abs() >= 2. * std::f64::consts::PI {

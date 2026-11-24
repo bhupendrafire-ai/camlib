@@ -2520,23 +2520,23 @@ impl ParallelPlan {
 /// differs from the chord of its radially projected ends by at most the
 /// larger endpoint shift. The intervening minor arc adds its sagitta.
 fn arc_band(xy: &[[f64; 2]], limit: f64) -> Option<([f64; 2], f64, f64)> {
-    let (center, sweep) = crate::flat::fit_circle_run(xy, limit)?;
+    let (center, sweep) = crate::flat::fit_circle_run(xy, limit, metallic::hypot, metallic::atan2)?;
     if !(1e-8..=std::f64::consts::PI).contains(&sweep.abs()) {
         return None;
     }
-    let radius = (xy[0][0] - center[0]).hypot(xy[0][1] - center[1]);
+    let radius = metallic::hypot(xy[0][0] - center[0], xy[0][1] - center[1]);
     let guard = 512. * f64::EPSILON * (1. + radius + center[0].abs() + center[1].abs());
     let mut band: f64 = 0.;
     for w in xy.windows(2) {
         let [a, b] = std::array::from_fn(|i| [w[i][0] - center[0], w[i][1] - center[1]]);
-        let angle = (a[0] * b[1] - a[1] * b[0]).atan2(a[0] * b[0] + a[1] * b[1]);
+        let angle = metallic::atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]);
         if angle * sweep <= 0. || angle.abs() >= std::f64::consts::FRAC_PI_2 {
             return None;
         }
-        let shift = (a[0].hypot(a[1]) - radius)
+        let shift = (metallic::hypot(a[0], a[1]) - radius)
             .abs()
-            .max((b[0].hypot(b[1]) - radius).abs());
-        band = band.max(shift + 2. * radius * (angle / 4.).sin().powi(2) + guard);
+            .max((metallic::hypot(b[0], b[1]) - radius).abs());
+        band = band.max(shift + 2. * radius * metallic::sin(angle / 4.).powi(2) + guard);
     }
     (band <= limit).then_some((center, sweep, band))
 }
@@ -2560,6 +2560,23 @@ fn arc_band_tests_the_interior_and_refuses_backtracking() {
     let mut turns_back = dense;
     turns_back.swap(4, 5);
     assert!(arc_band(&turns_back, 0.001).is_none());
+}
+
+#[cfg(test)]
+#[test]
+fn arc_sweep_is_reproducible_on_the_unit_circle() {
+    // Rational unit-circle points, parameterized by t = i/28. The sweep
+    // changes by two ulps with host atan2 on Linux.
+    let points: Vec<_> = (0..4)
+        .map(|i| {
+            let i = f64::from(i);
+            let den = 784. + i * i;
+            [(784. - i * i) / den, 56. * i / den]
+        })
+        .collect();
+    let (center, sweep, _) = arc_band(&points, 0.001).unwrap();
+    assert_eq!(center, [0., 0.]);
+    assert_eq!(sweep.to_bits(), 0x3fcb_5307_6f58_37a8);
 }
 
 /// The XY distance of `q` from the chord `a`-`b`.
