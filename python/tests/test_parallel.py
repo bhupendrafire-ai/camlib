@@ -78,6 +78,81 @@ class ParallelTest(unittest.TestCase):
             self.assertGreater(volume["removed_lower_mm3"], 1400)
             self.assertLessEqual(volume["removed_lower_mm3"], 1536)
 
+    def test_two_tool_job_and_partial_sloped_segment_seek_replay(self):
+        config = example().parallel_job()
+        face_tool = ToolAssembly(
+            "face8",
+            EndMill("em8", diameter=8, flute_length=20, overall_length=50),
+            30,
+            60,
+            (HolderSection(30, 60, 5, 5),),
+        )
+        face = Facing(
+            "face",
+            face_tool,
+            9,
+            1,
+            6,
+            12,
+            feed_mm_min=600,
+            plunge_mm_min=150,
+            spindle_rpm=12000,
+            tool_number=1,
+            length_register=1,
+            coolant="flood",
+        )
+        op = replace(config["operations"][0], tool_number=2, length_register=2)
+        config.update(tools=(face_tool, *config["tools"]), operations=(face, op))
+        events = []
+        partial_motion = None
+        with Simulation(**config) as sim:
+            for update in sim.run_operations():
+                if isinstance(update, OperationUpdate):
+                    events.extend(update.events)
+                else:
+                    events.append(dict(kind="motion", motion=update.motion))
+                    c = update.motion["curve"]
+                    if (
+                        partial_motion is None
+                        and update.motion["kind"] == "cut"
+                        and abs(c["end"][2] - c["start"][2]) > 0.001
+                        and all(4 <= p[0] <= 8 and 0 <= p[1] <= 16 for p in (c["start"], c["end"]))
+                        and update.changed_count
+                    ):
+                        partial_motion = update.completed
+            count = sim.state.completed
+        program = dict(
+            version=1,
+            id="surface-program",
+            revision="1",
+            units="mm",
+            tolerance_mm=1e-5,
+            frame=dict(origin_mm=(0, 0, 0), x=(1, 0, 0), y=(0, 1, 0), z=(0, 0, 1)),
+            initial_position_mm=(0, 0, 12),
+            tools=[t.to_dict() for t in config["tools"]],
+            events=events,
+        )
+        with Engine() as engine:
+            self.assertEqual(
+                engine._request("validate_program", program=program, capabilities=None)["summary"]["motions"], count
+            )
+        self.assertIsNotNone(partial_motion)
+        with RecordedRun(**{'rapid_mm_min': 6000, **config}, checkpoint_every=16) as run:
+            player = Player(run)
+            player.pause()
+            run.wait()
+            player.seek(Cursor(partial_motion - 1))
+            before = player.state.heights.tobytes()
+            player.seek(Cursor(partial_motion - 1, 0.5))
+            partial = player.state.heights.tobytes()
+            self.assertNotEqual(before, partial)
+            volume = player.state.volume()["removed_lower_mm3"]
+            self.assertGreater(volume, 0.001)
+            player.seek(Cursor(run.status()["available"]))
+            self.assertGreater(player.state.volume()["removed_lower_mm3"], volume)
+            player.seek(Cursor(partial_motion - 1, 0.5))
+            self.assertEqual(player.state.heights.tobytes(), partial)
+
     def test_existing_positional_ramp_entry_keeps_fixed_spacing(self):
         entry = camlib.RampEntry(3)
         # The positional signature through one_way and entry predates slope-aware rows.
@@ -204,81 +279,6 @@ class ParallelTest(unittest.TestCase):
         fixed, local = measurements
         self.assertLess(local[0], fixed[0], measurements)
         self.assertLess(local[1], fixed[1], measurements)
-
-    def test_two_tool_job_and_partial_sloped_segment_seek_replay(self):
-        config = example().parallel_job()
-        face_tool = ToolAssembly(
-            "face8",
-            EndMill("em8", diameter=8, flute_length=20, overall_length=50),
-            30,
-            60,
-            (HolderSection(30, 60, 5, 5),),
-        )
-        face = Facing(
-            "face",
-            face_tool,
-            9,
-            1,
-            6,
-            12,
-            feed_mm_min=600,
-            plunge_mm_min=150,
-            spindle_rpm=12000,
-            tool_number=1,
-            length_register=1,
-            coolant="flood",
-        )
-        op = replace(config["operations"][0], tool_number=2, length_register=2)
-        config.update(tools=(face_tool, *config["tools"]), operations=(face, op))
-        events = []
-        partial_motion = None
-        with Simulation(**config) as sim:
-            for update in sim.run_operations():
-                if isinstance(update, OperationUpdate):
-                    events.extend(update.events)
-                else:
-                    events.append(dict(kind="motion", motion=update.motion))
-                    c = update.motion["curve"]
-                    if (
-                        partial_motion is None
-                        and update.motion["kind"] == "cut"
-                        and abs(c["end"][2] - c["start"][2]) > 0.001
-                        and all(4 <= p[0] <= 8 and 0 <= p[1] <= 16 for p in (c["start"], c["end"]))
-                        and update.changed_count
-                    ):
-                        partial_motion = update.completed
-            count = sim.state.completed
-        program = dict(
-            version=1,
-            id="surface-program",
-            revision="1",
-            units="mm",
-            tolerance_mm=1e-5,
-            frame=dict(origin_mm=(0, 0, 0), x=(1, 0, 0), y=(0, 1, 0), z=(0, 0, 1)),
-            initial_position_mm=(0, 0, 12),
-            tools=[t.to_dict() for t in config["tools"]],
-            events=events,
-        )
-        with Engine() as engine:
-            self.assertEqual(
-                engine._request("validate_program", program=program, capabilities=None)["summary"]["motions"], count
-            )
-        self.assertIsNotNone(partial_motion)
-        with RecordedRun(**{'rapid_mm_min': 6000, **config}, checkpoint_every=16) as run:
-            player = Player(run)
-            player.pause()
-            run.wait()
-            player.seek(Cursor(partial_motion - 1))
-            before = player.state.heights.tobytes()
-            player.seek(Cursor(partial_motion - 1, 0.5))
-            partial = player.state.heights.tobytes()
-            self.assertNotEqual(before, partial)
-            volume = player.state.volume()["removed_lower_mm3"]
-            self.assertGreater(volume, 0.001)
-            player.seek(Cursor(run.status()["available"]))
-            self.assertGreater(player.state.volume()["removed_lower_mm3"], volume)
-            player.seek(Cursor(partial_motion - 1, 0.5))
-            self.assertEqual(player.state.heights.tobytes(), partial)
 
     def test_cad_approximation_bounded_input_and_invalid_before_motion(self):
         import cadquery as cq

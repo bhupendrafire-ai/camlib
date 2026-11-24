@@ -232,10 +232,6 @@ pub struct ParallelOperation<G = SurfaceMesh> {
     /// project, which require 0.
     #[serde(default)]
     pub stepover_mm: f64,
-    /// Treat the raster stepover as a flat-surface maximum and project it
-    /// onto each strip using the maximum cross-track facet slope.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub slope_aware_stepover: bool,
     pub clearance_z_mm: f64,
     /// Raster row direction.
     #[serde(default = "default_axis")]
@@ -255,6 +251,10 @@ pub struct ParallelOperation<G = SurfaceMesh> {
     /// Issue #175.
     #[serde(default, skip_serializing_if = "is_false")]
     pub one_way: bool,
+    /// Treat the raster stepover as a flat-surface maximum and project it
+    /// onto each strip using the maximum cross-track facet slope.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub slope_aware_stepover: bool,
     #[serde(default, skip_serializing_if = "FinishPattern::is_raster")]
     pub pattern: FinishPattern,
     /// Contact (slope) angle limits, degrees from the tool axis: cut only
@@ -499,11 +499,11 @@ impl<G> ParallelOperation<G> {
             surface: f(self.surface)?,
             floor_z_mm: self.floor_z_mm,
             stepover_mm: self.stepover_mm,
-            slope_aware_stepover: self.slope_aware_stepover,
             clearance_z_mm: self.clearance_z_mm,
             axis: self.axis,
             reverse: self.reverse,
             one_way: self.one_way,
+            slope_aware_stepover: self.slope_aware_stepover,
             pattern: self.pattern,
             slope_from_deg: self.slope_from_deg,
             slope_to_deg: self.slope_to_deg,
