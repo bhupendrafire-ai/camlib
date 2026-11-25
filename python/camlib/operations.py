@@ -279,8 +279,11 @@ class Scallop:
 
     fit_arcs: bool = field(default=False, kw_only=True)
 
+    intrinsic_spacing: bool = field(default=False, kw_only=True)
+
     def to_dict(self):
-        return _pattern_dict(self, "scallop", ())
+        kind = "scallop_intrinsic" if self.intrinsic_spacing else "scallop"
+        return _pattern_dict(self, kind, ("intrinsic_spacing",))
 
 
 @dataclass(frozen=True)
