@@ -283,7 +283,9 @@ class Scallop:
 
     def to_dict(self):
         kind = "scallop_intrinsic" if self.intrinsic_spacing else "scallop"
-        return _pattern_dict(self, kind, ("intrinsic_spacing",))
+        result = _pattern_dict(self, kind, ("intrinsic_spacing",))
+        result["pattern"].pop("intrinsic_spacing")
+        return result
 
 
 @dataclass(frozen=True)

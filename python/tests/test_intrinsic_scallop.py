@@ -138,6 +138,9 @@ class IntrinsicScallopTest(unittest.TestCase):
                 measurements.append((out["text"], out["motions"], leftover, dome_ridge(posted, out["motions"])))
         legacy, intrinsic = measurements
         self.assertNotEqual(legacy[0], intrinsic[0])
+        self.assertLess(intrinsic[1], legacy[1])
+        self.assertLess(intrinsic[-1][0], 0.049)
+        self.assertLessEqual(intrinsic[-1][1], legacy[-1][1] + 0.001)
         print(
             "Curved offsets (posted moves, residual stock mm³ bounds, sampled max and p90-p10 mm):",
             legacy[1:],
