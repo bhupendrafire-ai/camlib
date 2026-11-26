@@ -20,17 +20,89 @@ import json
 from ._buffers import native
 
 
+def _bounds(value, what):
+    """A radius known exactly (a number) or within [lower, upper]."""
+    try:
+        lower, upper = (float(value),) * 2 if isinstance(value, (int, float)) else (float(v) for v in value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{what} is a radius in mm, or its (lower, upper) bounds") from None
+    return [lower, upper]
+
+
+@dataclass(frozen=True)
+class TurnStockSection:
+    """A stretch of turning stock along z (``TurnStockSpec(sections=...)``):
+    from ``z_mm[0]`` to ``z_mm[1]`` the outer radius is ``outer_mm`` and the
+    bore radius ``inner_mm`` (0: solid). Each is a radius, or the (lower,
+    upper) bounds the radius is known within, as a stock cell's are. A
+    stretch with no material has its outer radius at or below its bore's."""
+
+    z_mm: tuple
+    outer_mm: object
+    inner_mm: object = 0
+
+    def to_dict(self):
+        z0, z1 = (float(v) for v in self.z_mm)
+        return dict(
+            z_mm=[z0, z1], outer_mm=_bounds(self.outer_mm, "outer_mm"), inner_mm=_bounds(self.inner_mm, "inner_mm")
+        )
+
+
 @dataclass(frozen=True)
 class TurnStockSpec:
+    """Turning stock: a bar (or tube, ``bore_radius_mm``) from ``z_min_mm``
+    to ``z_max_mm``, in bins ``cell_mm`` long.
+
+    ``sections`` (``TurnStockSection``): stock that is not a plain bar, such
+    as a stepped blank, or what an earlier chucking left
+    (``TurnStockSpec.from_turned``). They tile ``z_min_mm..z_max_mm`` in
+    ascending order, every radius within ``bore_radius_mm..outer_radius_mm``
+    (then the largest and smallest radius of the stock)."""
+
     z_min_mm: float
     z_max_mm: float
     outer_radius_mm: float
     bore_radius_mm: float = 0
     cell_mm: float = 0.25
     max_cells: int = 1_000_000
+    sections: tuple = ()
+
+    @classmethod
+    def from_turned(cls, stock, *, reversed=False, z_shift_mm=0.0):
+        """The stock of the next chucking: what a lathe run left
+        (``state.stock()`` of its finished stock state, for example
+        ``JobRun.states[setup_id].stock()`` or ``Player.state.stock()``),
+        moved along the spindle axis by ``z_shift_mm``, and turned end for
+        end first with ``reversed=True`` (z becomes ``z_shift_mm - z``: the
+        part taken out, turned around and gripped on its other end).
+
+        The ends with no material left (a faced-off front) are dropped. The
+        cells keep their radius bounds: on the same ``cell_mm`` the new
+        stock is the old one cell for cell where the two grids line up, and
+        otherwise each bin holds the bounds of the cells it overlaps (the
+        same stock, known less sharply; never less material). Removed face
+        groove rings are not carried: they count as possible material."""
+        spec = json.loads(
+            native.turn_stock_carried(
+                json.dumps(dict(spec=stock["spec"], cells=stock["cells"], rings=stock.get("rings", []))),
+                bool(reversed),
+                float(z_shift_mm),
+            )
+        )
+        return cls(
+            spec["z_min_mm"],
+            spec["z_max_mm"],
+            spec["outer_radius_mm"],
+            spec["bore_radius_mm"],
+            spec["cell_mm"],
+            spec["max_cells"],
+            tuple(
+                TurnStockSection(tuple(s["z_mm"]), tuple(s["outer_mm"]), tuple(s["inner_mm"])) for s in spec["sections"]
+            ),
+        )
 
     def to_dict(self):
-        return dict(
+        result = dict(
             version=1,
             units="mm",
             z_min_mm=self.z_min_mm,
@@ -40,6 +112,9 @@ class TurnStockSpec:
             cell_mm=self.cell_mm,
             max_cells=self.max_cells,
         )
+        if self.sections:
+            result["sections"] = [s.to_dict() for s in self.sections]
+        return result
 
 
 # Turning tools. Every geometric value is stated: nothing defaults to a tool
@@ -1041,7 +1116,14 @@ class TurnFace:
 class TurnRough:
     """Outside roughing in axial passes of ``depth_of_cut_mm`` (G71 type I),
     leaving ``allowance_mm``; each pass ends where the part (plus allowance)
-    is reached and retracts ``retract_mm`` at 45 degrees."""
+    is reached and retracts ``retract_mm`` at 45 degrees.
+
+    ``z_from_mm``, ``z_to_mm``: the stretch of the profile this operation
+    turns (its nose centre works between them; either may be left out). The
+    passes end at ``z_to_mm`` at the latest, and start a clearance in front
+    of a ``z_from_mm`` inside the stock. The rest of the profile is left for
+    another operation or chucking, and the operation's report lists it
+    (``left_for_another_setup_z_mm``)."""
 
     id: str
     tool: str
@@ -1051,6 +1133,8 @@ class TurnRough:
     rpm: float = field(kw_only=True)
     surface_speed_m_min: float | None = None
     retract_mm: float = 0.5
+    z_from_mm: float | None = field(default=None, kw_only=True)
+    z_to_mm: float | None = field(default=None, kw_only=True)
 
     def to_dict(self):
         return _op("rough", self.__dict__)
@@ -1238,7 +1322,14 @@ class TurnBoreFinish:
 @dataclass(frozen=True)
 class TurnFinish:
     """Outside finishing along the profile (front face first), the nose
-    center ``nose radius + allowance_mm`` outside it."""
+    center ``nose radius + allowance_mm`` outside it.
+
+    ``z_from_mm``, ``z_to_mm``: the stretch of the profile this operation
+    turns (either may be left out). The path is followed between them, cut
+    exactly at both: with ``z_from_mm`` inside the profile the tool feeds in
+    radially at it, and it leaves radially at ``z_to_mm``. The rest of the
+    profile is left for another operation or chucking, and the operation's
+    report lists it (``left_for_another_setup_z_mm``)."""
 
     id: str
     tool: str
@@ -1249,9 +1340,33 @@ class TurnFinish:
     # control applying only the wear in its offset's nose radius.
     compensation: str = "computer"
     surface_speed_m_min: float | None = None
+    z_from_mm: float | None = field(default=None, kw_only=True)
+    z_to_mm: float | None = field(default=None, kw_only=True)
 
     def to_dict(self):
         return _op("finish", self.__dict__)
+
+
+@dataclass(frozen=True)
+class ChuckGrip:
+    """The jaws on the work (``TurningSetup(grip=...)``): they hold it over
+    ``length_mm`` behind the chuck face ``chuck_z_mm``, closed on
+    ``radius_mm``.
+
+    With a grip the chuck face may sit along the part: a second chucking,
+    the part turned around and held on a diameter the first one finished.
+    Nothing behind the chuck face is machined, and no tool part may go
+    there. The grip is checked before anything is planned: the stock must be
+    the cylinder of that radius over the whole held length (jaws hold a
+    parallel diameter), and the part no larger than it there; a chuck face
+    set onto a shoulder, a taper or no material is refused. camlib does not
+    judge whether the grip holds against the cut."""
+
+    length_mm: float
+    radius_mm: float
+
+    def to_dict(self):
+        return dict(length_mm=self.length_mm, radius_mm=self.radius_mm)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1263,7 +1378,11 @@ class TurningSetup:
     ``profile``: the part's half-section (radius, z, bulge) from the front
     face on the axis toward the chuck (``camlib.cadquery.turning_section``
     takes it from a solid). ``chuck_z_mm``: the chuck face; no tool part may
-    reach below it (plus the clearance). ``clearance_mm``: the approach and
+    reach below it (plus the clearance). The part lies in front of it,
+    unless ``grip`` (a ``ChuckGrip``) declares that the jaws hold the part
+    over part of its own length: a second chucking, whose roughing and
+    finishing stop at the clearance in front of the chuck face and report
+    the rest as left for another setup. ``clearance_mm``: the approach and
     retract clearance. ``tolerance_mm``: the tolerance of every move check.
     ``bore``: the part's hole (radius, z, bulge) from the front face to its
     deepest point; drilling and boring stay inside it.
@@ -1286,6 +1405,7 @@ class TurningSetup:
     feed_per_rev: bool = False
     controlled_point: str = "tip"
     face_grooves: tuple = ()
+    grip: ChuckGrip | None = None
 
     @classmethod
     def from_section(cls, section, **settings):
@@ -1307,6 +1427,8 @@ class TurningSetup:
             controlled_point=self.controlled_point,
             face_grooves=[g.to_dict() for g in self.face_grooves],
         )
+        if self.grip is not None:
+            result["grip"] = self.grip.to_dict()
         if self.bore is not None:
             result["bore"] = dict(points=[list(p) for p in self.bore])
         if tool_change is not None and tool_change.mode != "tip_kept":

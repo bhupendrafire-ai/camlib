@@ -208,6 +208,8 @@ _EXPORTS = {
             "FaceGroove",
             "FaceGrooveInsert",
             "TurnFaceGroove",
+            "ChuckGrip",
+            "TurnStockSection",
         ),
         "turning",
     ),
