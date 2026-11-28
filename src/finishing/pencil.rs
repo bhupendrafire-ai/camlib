@@ -78,7 +78,7 @@ pub(super) fn flank(crease: &[[f64; 2]], offset: f64) -> Option<Vec<[f64; 2]>> {
         };
         let dx = points[next][0] - points[prev][0];
         let dy = points[next][1] - points[prev][1];
-        let length = dx.hypot(dy);
+        let length = metallic::hypot(dx, dy);
         if length <= f64::EPSILON {
             return None;
         }
@@ -351,6 +351,9 @@ mod tests {
             flank(&[[0., 0.], [2., 0.], [4., 0.]], 0.5).unwrap(),
             [[0., 0.5], [2., 0.5], [4., 0.5]]
         );
+        // The normal contributes directly to the emitted cutter coordinate.
+        let diagonal = flank(&[[0., 0.], [261., 11.]], 1.).unwrap();
+        assert_eq!(diagonal[0][0].to_bits(), 0xbfa5_8f35_2c29_98e4);
         let ring = [[0., 0.], [4., 0.], [4., 4.], [0., 4.], [0., 0.]];
         let inset = flank(&ring, 0.5).unwrap();
         assert_eq!(inset.first(), inset.last());
